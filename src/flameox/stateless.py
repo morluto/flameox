@@ -47,7 +47,7 @@ from flameox.providers.cpu import CpuProfileProvider
 from flameox.providers.inference_exports import InferenceExportProvider
 from flameox.providers.kernel_evidence import KernelEvidenceProvider
 from flameox.providers.memray import MemrayProvider
-from flameox.providers.nsight_compute import NsightComputeProvider, find_report_interface
+from flameox.providers.nsight_compute import NsightComputeProvider
 from flameox.providers.nsight_systems import NsightSystemsParquetProvider
 from flameox.providers.nvbench import NvbenchProvider
 from flameox.providers.otlp import OtlpProvider
@@ -456,7 +456,7 @@ class AnalysisRuntime:
             )
             if (
                 target.provider_id == "nsight-compute"
-                and find_report_interface(binding.invocation_path) is None
+                and self.nsight_compute.resolve_interface(binding.invocation_path) is None
             ):
                 raise RuntimeFailure(
                     "UNAVAILABLE_CAPABILITY",
