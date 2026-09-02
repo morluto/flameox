@@ -97,6 +97,9 @@ version-pinned uvx environment returned in its launcher. The invocation's
 provider list is complete; Flameox retains no provider inventory or setup receipt.
 System and vendor packages remain externally installed. Setup creates no
 project state and is not a prerequisite for explicit-path analysis.
+Nsight Compute capture requires both the `ncu` executable and NVIDIA's vendor-shipped
+`extras/python/ncu_report.py` reader. Flameox resolves both before workload execution and returns
+external setup guidance if the installation is incomplete.
 
 Provider ownership is explicit during capture. External collectors installed
 with Flameox, such as py-spy, execute from the launched uvx environment rather

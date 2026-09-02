@@ -51,6 +51,12 @@ reported as limitations; fewer than three eligible pairs produce a descriptive
 estimate without a confidence interval. The practical-threshold decision is
 returned as typed comparison evidence, not retained only as request metadata.
 
+Artifact comparison is separate from that experiment result. Capture the representative baseline
+and candidate summaries independently, preserve them if they must survive the session, then submit
+both sources to the matching `analyze_*_compare` tool. There is no `capture_*_compare` shortcut:
+comparison requires explicit artifact identity, while experiment mode owns randomized case order
+and repeated measurements within one request.
+
 Randomization and blocking reduce ordering and environmental bias; they do not
 make an unrepresentative workload representative. Failed and partial trials are
 evidence and must stay visible in the returned episode. A semantic oracle checks

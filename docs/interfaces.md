@@ -68,9 +68,13 @@ requirement in a project-bound MCP launcher. The request names the complete mana
 Flameox keeps no installed-provider inventory or setup receipt. System profilers, drivers, device
 access, and OS permissions remain external requirements; Flameox returns guidance for them but does
 not invoke a system package manager or elevate privileges. Preparation creates no project state,
-durable job, or plan. A provider such as Perfetto may be both prepared Python support and an external
-host Trace Processor requirement. Preparation waits up to 1,800 seconds by default; callers may set
-`timeout_seconds` from 1 through 3,600. A uvx failure returns its complete stderr in `SETUP_FAILURE`.
+durable job, or plan, and it cannot add packages to the currently running server. A result with
+`restart_required=true` means the MCP client must reconnect with the returned launcher. Managed
+provider IDs are `aiperf`, `memray`, `otlp`, `perfetto`, `py-spy`, and `torch`; every call declares
+the complete desired set. A provider such as Perfetto may be both prepared Python support and an
+external host Trace Processor requirement. Preparation waits up to 1,800 seconds by default;
+callers may set `timeout_seconds` from 1 through 3,600. A uvx failure returns its complete stderr in
+`SETUP_FAILURE`.
 
 ## Sources and limits
 
@@ -125,6 +129,13 @@ eligible blocks and a deterministic percentile interval when at least three
 blocks survive capture/oracle validation, and classifies the effect against the
 declared threshold. Work is not detached; the request receives progress and owns
 cancellation.
+
+Comparison tools consume explicit artifacts; they do not capture their inputs. A caller captures
+representative baseline and candidate summaries separately, preserves them when durable provenance
+is needed, and supplies at least two sources to `analyze_benchmark_compare`,
+`analyze_inference_compare`, or `analyze_kernel_compare`. Flameox does not advertise
+`capture_*_compare`: experiment capture reports the declared cases' effect but does not create the
+case-grouped native inputs required by artifact comparison.
 
 ## Stable failure codes
 
