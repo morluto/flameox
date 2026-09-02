@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
-
-import portalocker
+from typing import Literal
 
 from flameox import __version__
 
@@ -31,6 +28,9 @@ SYSTEM_PROVIDER_GUIDANCE = {
     "triton": "Install Triton in the target Python environment and verify device access.",
 }
 
+DEFAULT_PREPARATION_TIMEOUT_SECONDS = 1_800
+MAX_PREPARATION_TIMEOUT_SECONDS = 3_600
+
 
 class SetupFailure(RuntimeError):
     pass
@@ -49,69 +49,19 @@ class ExternalRequirement:
 @dataclass(frozen=True, slots=True)
 class ProviderPreparation:
     requested_providers: list[str]
-    configured_managed_providers: list[str]
+    prepared_managed_providers: list[str]
     external_requirements: list[ExternalRequirement]
-    install_command: list[str]
+    preparation_command: list[str]
     launcher_command: str
     launcher_args: list[str]
 
     @property
-    def changed(self) -> bool:
-        return bool(self.install_command)
-
-    @property
-    def installation_status(self) -> Literal["installed", "already_configured", "not_applicable"]:
-        if not any(item in PYTHON_PROVIDER_EXTRAS for item in self.requested_providers):
-            return "not_applicable"
-        return "installed" if self.changed else "already_configured"
+    def preparation_status(self) -> Literal["prepared", "not_applicable"]:
+        return "prepared" if self.prepared_managed_providers else "not_applicable"
 
     @property
     def restart_required(self) -> bool:
-        return any(item in PYTHON_PROVIDER_EXTRAS for item in self.requested_providers)
-
-
-def installed_tool_extras(tool_directory: Path) -> set[str]:
-    """Read the optional extras uv will replace when reinstalling the Flameox tool."""
-
-    receipt = tool_directory / "flameox" / "uv-receipt.toml"
-    if not receipt.is_file():
-        return set()
-    try:
-        document: Any = tomllib.loads(receipt.read_text())
-        requirements = document["tool"]["requirements"]
-        flameox = next(
-            item
-            for item in requirements
-            if isinstance(item, dict) and item.get("name") == "flameox"
-        )
-        extras = flameox.get("extras", [])
-    except (
-        OSError,
-        KeyError,
-        StopIteration,
-        TypeError,
-        UnicodeError,
-        tomllib.TOMLDecodeError,
-    ) as exc:
-        raise SetupFailure(f"Cannot read the existing uv tool receipt: {receipt}") from exc
-    if not isinstance(extras, list) or not all(isinstance(item, str) for item in extras):
-        raise SetupFailure(f"The existing uv tool receipt has invalid extras: {receipt}")
-    return set(extras)
-
-
-def _uv_tool_directory(uv: Path) -> Path:
-    try:
-        completed = subprocess.run(
-            [str(uv), "tool", "dir"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as error:
-        raise SetupFailure("uv tool dir could not start the uv executable.") from error
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise SetupFailure("uv tool dir could not locate the managed tool environment.")
-    return Path(completed.stdout.strip())
+        return bool(self.prepared_managed_providers)
 
 
 def _validate_providers(providers: list[str]) -> None:
@@ -123,34 +73,6 @@ def _validate_providers(providers: list[str]) -> None:
         raise ProviderSelectionFailure(
             f"Unknown provider {unknown[0]!r}; choose one of: {supported}"
         )
-
-
-def provider_install_command(
-    providers: list[str], *, uv: Path, installed_extras: set[str] | None = None
-) -> list[str]:
-    _validate_providers(providers)
-    requested_extras = {
-        PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
-    }
-    retained_extras = installed_extras or set()
-    effective_installed = (
-        set(PYTHON_PROVIDER_EXTRAS.values()) if "all" in retained_extras else retained_extras
-    )
-    if not requested_extras or requested_extras.issubset(effective_installed):
-        return []
-    extras = sorted(retained_extras | requested_extras)
-    requirement = f"flameox[{','.join(extras)}]=={__version__}"
-    return [
-        str(uv),
-        "tool",
-        "install",
-        "--force",
-        "--python",
-        "3.12",
-        "--prerelease",
-        "allow",
-        requirement,
-    ]
 
 
 def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
@@ -171,7 +93,26 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
     )
 
 
-def prepare_providers(providers: list[str], project_root: Path) -> ProviderPreparation:
+def _decode_stderr(stderr: bytes | str | None) -> str:
+    if not stderr:
+        return ""
+    return stderr.strip() if isinstance(stderr, str) else stderr.decode(errors="replace").strip()
+
+
+def _failure_message(message: str, stderr: bytes | str | None) -> str:
+    diagnostic = _decode_stderr(stderr)
+    return f"{message}\n\nuvx stderr:\n{diagnostic}" if diagnostic else message
+
+
+def prepare_providers(
+    providers: list[str],
+    project_root: Path,
+    timeout_seconds: int = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+) -> ProviderPreparation:
+    if not 1 <= timeout_seconds <= MAX_PREPARATION_TIMEOUT_SECONDS:
+        raise SetupFailure(
+            f"timeout_seconds must be between 1 and {MAX_PREPARATION_TIMEOUT_SECONDS}"
+        )
     requested = list(dict.fromkeys(providers))
     _validate_providers(requested)
     managed = [item for item in requested if item in PYTHON_PROVIDER_EXTRAS]
@@ -180,70 +121,44 @@ def prepare_providers(providers: list[str], project_root: Path) -> ProviderPrepa
         for item in requested
         if item in SYSTEM_PROVIDER_GUIDANCE
     ]
-    if not managed:
-        launcher_command, launcher_args = mcp_launcher([])
-        return ProviderPreparation(
-            requested,
-            [],
-            external,
-            [],
-            launcher_command,
-            [*launcher_args, "mcp", "serve", "--project-root", str(project_root)],
-        )
+    launcher_command, launcher_args = mcp_launcher(managed)
+    server_args = [*launcher_args, "mcp", "serve", "--project-root", str(project_root)]
+    preparation_command: list[str] = []
 
-    uv_text = shutil.which("uv")
-    if uv_text is None:
-        raise SetupFailure("Provider installation requires uv on PATH.")
-    uv = Path(uv_text)
-    tool_directory = _uv_tool_directory(uv)
-    try:
-        with portalocker.Lock(
-            tool_directory / ".flameox-setup.lock",
-            mode="a+",
-            timeout=10,
-            encoding="utf-8",
-        ):
-            installed_extras = installed_tool_extras(tool_directory)
-            command = provider_install_command(
-                managed,
-                uv=uv,
-                installed_extras=installed_extras,
+    if managed:
+        uvx = shutil.which(launcher_command)
+        if uvx is None:
+            raise SetupFailure("Provider preparation requires uvx on PATH.")
+        preparation_command = [uvx, *launcher_args, "--version"]
+        try:
+            completed = subprocess.run(
+                preparation_command,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds,
             )
-            if command:
-                try:
-                    completed = subprocess.run(command, check=False)
-                except OSError as error:
-                    raise SetupFailure(
-                        "uv tool install could not start the uv executable."
-                    ) from error
-                if completed.returncode != 0:
-                    raise SetupFailure(
-                        f"uv tool install exited with status {completed.returncode}."
-                    )
-            final_extras = installed_tool_extras(tool_directory) if command else installed_extras
-            requested_extras = {PYTHON_PROVIDER_EXTRAS[item] for item in managed}
-            missing_extras = requested_extras.difference(final_extras)
-            if missing_extras:
-                raise SetupFailure(
-                    "uv reported success but the managed tool receipt is missing extras: "
-                    + ", ".join(sorted(missing_extras))
+        except OSError as error:
+            raise SetupFailure("uvx could not prepare the provider environment.") from error
+        except subprocess.TimeoutExpired as error:
+            raise SetupFailure(
+                _failure_message(
+                    f"uvx provider preparation exceeded {timeout_seconds} seconds.", error.stderr
                 )
-    except portalocker.exceptions.LockException as error:
-        raise SetupFailure("Timed out waiting to update the managed Flameox tool.") from error
-    except OSError as error:
-        raise SetupFailure("Cannot update the managed Flameox tool environment.") from error
+            ) from error
+        if completed.returncode != 0:
+            raise SetupFailure(
+                _failure_message(
+                    f"uvx provider preparation exited with status {completed.returncode}.",
+                    completed.stderr,
+                )
+            )
 
-    configured = sorted(
-        provider
-        for provider, extra in PYTHON_PROVIDER_EXTRAS.items()
-        if extra in final_extras or "all" in final_extras
-    )
-    launcher_command, launcher_args = mcp_launcher(configured)
     return ProviderPreparation(
         requested,
-        configured,
+        managed,
         external,
-        command,
+        preparation_command,
         launcher_command,
-        [*launcher_args, "mcp", "serve", "--project-root", str(project_root)],
+        server_args,
     )

@@ -14,7 +14,12 @@ from pydantic import ValidationError
 from flameox import __version__
 from flameox.mcp import create_server, run_server
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
-from flameox.setup import SetupFailure, prepare_providers
+from flameox.setup import (
+    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+    MAX_PREPARATION_TIMEOUT_SECONDS,
+    SetupFailure,
+    prepare_providers,
+)
 from flameox.stateless import AnalysisRuntime
 
 app = typer.Typer(
@@ -78,15 +83,19 @@ def setup(
     project_root: Annotated[Path, typer.Option("--project-root")] = Path("."),
     provider: Annotated[list[str] | None, typer.Option("--provider")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
+    timeout_seconds: Annotated[
+        int,
+        typer.Option("--timeout-seconds", min=1, max=MAX_PREPARATION_TIMEOUT_SECONDS),
+    ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Print version-bound MCP config and optionally install selected provider extras."""
+    """Print version-bound MCP config and optionally prepare selected provider extras."""
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
-        preparation = prepare_providers(selected, root)
+        preparation = prepare_providers(selected, root, timeout_seconds)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
-    configured_providers = preparation.configured_managed_providers
+    prepared_providers = preparation.prepared_managed_providers
     external_providers = [item.provider_id for item in preparation.external_requirements]
     guidance = [item.guidance for item in preparation.external_requirements]
     launcher, launcher_args = preparation.launcher_command, preparation.launcher_args
@@ -99,8 +108,8 @@ def setup(
         "project_root": str(root),
         "durable_repository": str(root / ".flameox"),
         "repository_created": False,
-        "providers": sorted(set(configured_providers) | set(external_providers)),
-        "install_command": preparation.install_command,
+        "providers": sorted(set(prepared_providers) | set(external_providers)),
+        "preparation_command": preparation.preparation_command,
         "external_guidance": guidance,
     }
     if json_output:
@@ -110,10 +119,9 @@ def setup(
             "No MCP client registration was changed. Configure your client to run:\n"
             f"  {shlex.join([launcher, *args])}\n\n"
             + (
-                "Installed the selected Python provider extras into the persistent Flameox "
-                "uv tool environment.\n"
-                if preparation.changed
-                else "No Python provider packages were installed.\n"
+                "Prepared the exact version-pinned uvx provider environment.\n"
+                if preparation.preparation_command
+                else "No managed provider environment needed preparation.\n"
             )
             + "\n".join(guidance)
         )

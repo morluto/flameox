@@ -11,7 +11,7 @@ The catalog contains exactly seven tools:
 | --- | --- |
 | `discover_capabilities` | Rank by intent and bounded source sniffing; report provider state and external remediation. |
 | `inspect_capabilities` | Inspect 1-16 IDs with source modes, strict argument schema, examples, limits, and capture semantics. |
-| `prepare_capabilities` | Explicitly install 1-16 selected Flameox-managed providers and return a reconnect launcher; report host-tool guidance without changing the host. |
+| `prepare_capabilities` | Prepare an exact version-pinned uvx environment for 1-16 selected managed providers and return that launcher; report host-tool guidance without changing the host. |
 | `analyze` | Analyze 1-32 explicit path/evidence sources and return bounded inline evidence plus a session `analysis_id`. |
 | `capture_and_analyze` | Run typed argv through the broker in single or bounded experiment mode, then analyze outputs. |
 | `preserve_evidence` | Idempotently publish one session analysis and return an evidence reference plus `ResourceLink`. |
@@ -33,14 +33,15 @@ metrics and rows remain open JSON values. Success uses structured content direct
 `ok/result/error` wrapper. Tool failures set `isError=true` and carry a stable code, message, and
 details; both success and failure shapes validate against the advertised schema.
 
-`prepare_capabilities` is the only open-world tool. It may resolve packages through `uv`, retains
-already configured Flameox extras, verifies the resulting managed-tool receipt, and reports whether
-the MCP client must reconnect. Repeating a fully satisfied request is a no-op. System profilers,
-drivers, device access, and OS permissions remain external requirements; Flameox returns guidance
-for them but does not invoke a system package manager or elevate privileges. Preparation creates no
-project state, durable job, plan, or setup receipt of its own. The result distinguishes configured
-managed providers from external requirements; a provider such as Perfetto may appear in both when
-its Python support is configured but its host Trace Processor still needs setup.
+`prepare_capabilities` is the only open-world tool. It resolves the exact package requirement through
+`uvx`, verifies that environment by running Flameox's version command, and returns the same
+requirement in a project-bound MCP launcher. The request names the complete managed provider set;
+Flameox keeps no installed-provider inventory or setup receipt. System profilers, drivers, device
+access, and OS permissions remain external requirements; Flameox returns guidance for them but does
+not invoke a system package manager or elevate privileges. Preparation creates no project state,
+durable job, or plan. A provider such as Perfetto may be both prepared Python support and an external
+host Trace Processor requirement. Preparation waits up to 1,800 seconds by default; callers may set
+`timeout_seconds` from 1 through 3,600. A uvx failure returns its complete stderr in `SETUP_FAILURE`.
 
 ## Sources and limits
 
@@ -120,9 +121,8 @@ flameox evidence query|show
 `setup` prints stdio configuration that launches the exact running Flameox
 release through `uvx` on Python 3.12. It reports that no MCP client registration
 was changed; client-owned management interfaces apply the returned command.
-Repeated `--provider` options add Python
-provider extras to a persistent uv tool environment without removing its
-existing extras, and the result reports the complete managed provider set.
+Repeated `--provider` options declare the complete Python provider set for the
+exact version-pinned uvx environment used by the returned launcher.
 System and vendor providers receive external installation guidance. Setup does
 not create a project repository, durable operation, or MCP setup endpoint.
 Other CLI commands construct the same runtime and project-root rules used by

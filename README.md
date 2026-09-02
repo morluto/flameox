@@ -33,10 +33,10 @@ uv run flameox mcp serve --project-root "$PWD"
 3.12 and the exact running Flameox release. It does not change an MCP client
 registration; apply the printed command through the client's supported MCP
 management interface. Explicit
-`--provider` selections add the matching Python extras to a persistent uv tool
-environment without removing its existing provider extras. System and vendor
-tools are diagnosed with external install guidance. Setup never initializes the
-project or creates `.flameox`.
+`--provider` selections prepare the exact version-pinned `uvx` environment in
+the printed launcher. Each invocation declares the complete managed provider
+set for that launcher. System and vendor tools are diagnosed with external
+install guidance. Setup never initializes the project or creates `.flameox`.
 
 ## Authority model
 
@@ -89,12 +89,12 @@ strings are never accepted. Work remains owned by the live MCP request, so SDK
 progress and cancellation apply directly; there are no detached or
 restart-surviving tasks.
 
-Managed external collectors such as py-spy execute from Flameox's uv tool
+Managed external collectors such as py-spy execute from Flameox's uvx
 environment. In-process collectors such as coverage.py and Memray are verified
 in, and run with, the workload's declared Python interpreter. Flameox does not
 substitute one Python runtime for the other. When discovery reports a missing
-managed provider, `prepare_capabilities` explicitly installs its version-pinned
-extra and returns the launcher to use after reconnecting. Host tools, drivers,
+managed provider, `prepare_capabilities` prepares its version-pinned uvx
+environment and returns that same launcher for reconnection. Host tools, drivers,
 and permissions are never installed or changed; the same result reports their
 setup guidance.
 

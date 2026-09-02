@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import threading
-from concurrent.futures import ThreadPoolExecutor
+import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -9,11 +8,10 @@ import pytest
 
 from flameox import __version__
 from flameox.setup import (
+    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     SetupFailure,
-    installed_tool_extras,
     mcp_launcher,
     prepare_providers,
-    provider_install_command,
 )
 
 
@@ -21,7 +19,7 @@ def test_mcp_launcher_pins_python_release_and_provider_extras() -> None:
     command, args = mcp_launcher(["memray", "nsight-compute", "py-spy"])
 
     assert command == "uvx"
-    assert args[:5] == [
+    assert args == [
         "--python",
         "3.12",
         "--from",
@@ -30,196 +28,155 @@ def test_mcp_launcher_pins_python_release_and_provider_extras() -> None:
     ]
 
 
-def test_provider_install_command_adds_declared_extras_to_managed_tool() -> None:
-    command = provider_install_command(
-        ["perfetto", "memray", "otlp"],
-        uv=Path("/usr/bin/uv"),
-        installed_extras={"cpu"},
-    )
+def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    options: list[dict[str, object]] = []
 
-    assert command == [
-        "/usr/bin/uv",
-        "tool",
-        "install",
-        "--force",
+    def run(command: list[str], **kwargs: object) -> CompletedProcess[bytes]:
+        calls.append(command)
+        options.append(kwargs)
+        return CompletedProcess(command, 0, stderr=b"")
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
+    monkeypatch.setattr("flameox.setup.subprocess.run", run)
+
+    prepared = prepare_providers(["memray", "py-spy", "memray"], tmp_path)
+
+    requirement = f"flameox[cpu,memory]=={__version__}"
+    assert prepared.requested_providers == ["memray", "py-spy"]
+    assert prepared.prepared_managed_providers == ["memray", "py-spy"]
+    assert prepared.preparation_status == "prepared"
+    assert prepared.restart_required is True
+    assert calls == [
+        [
+            "/usr/bin/uvx",
+            "--python",
+            "3.12",
+            "--from",
+            requirement,
+            "flameox",
+            "--version",
+        ]
+    ]
+    assert options == [
+        {
+            "check": False,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+            "timeout": DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+        }
+    ]
+    assert prepared.launcher_command == "uvx"
+    assert prepared.launcher_args == [
         "--python",
         "3.12",
-        "--prerelease",
-        "allow",
-        f"flameox[cpu,memory,trace]=={__version__}",
+        "--from",
+        requirement,
+        "flameox",
+        "mcp",
+        "serve",
+        "--project-root",
+        str(tmp_path),
     ]
 
 
-def test_system_provider_has_guidance_but_no_python_install() -> None:
-    assert provider_install_command(["nsight-compute"], uv=Path("uv")) == []
-
-
-def test_system_only_preparation_does_not_require_uv(
+def test_host_only_preparation_returns_guidance_without_requiring_uvx(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
     prepared = prepare_providers(["nsight-compute"], tmp_path)
 
-    assert prepared.configured_managed_providers == []
+    assert prepared.prepared_managed_providers == []
     assert [item.provider_id for item in prepared.external_requirements] == ["nsight-compute"]
-    assert prepared.install_command == []
-    assert prepared.changed is False
+    assert prepared.preparation_command == []
+    assert prepared.preparation_status == "not_applicable"
     assert prepared.restart_required is False
 
 
-def test_provider_install_is_a_noop_when_requested_extra_is_already_managed() -> None:
-    assert (
-        provider_install_command(
-            ["py-spy"],
-            uv=Path("/usr/bin/uv"),
-            installed_extras={"cpu", "memory"},
-        )
-        == []
-    )
-
-
-def test_installed_tool_extras_are_read_from_uv_receipt(tmp_path: Path) -> None:
-    tool = tmp_path / "flameox"
-    tool.mkdir()
-    (tool / "uv-receipt.toml").write_text(
-        """
-[tool]
-requirements = [{ name = "flameox", extras = ["cpu", "memory"], specifier = "==0.2.1" }]
-"""
-    )
-
-    assert installed_tool_extras(tmp_path) == {"cpu", "memory"}
-
-
-def test_all_extra_satisfies_and_survives_managed_provider_preparation() -> None:
-    assert (
-        provider_install_command(
-            ["memray", "py-spy"],
-            uv=Path("/usr/bin/uv"),
-            installed_extras={"all"},
-        )
-        == []
-    )
-
-
-def test_provider_install_retains_existing_managed_providers(
+def test_uvx_is_required_before_managed_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tool = tmp_path / "tools" / "flameox"
-    tool.mkdir(parents=True)
-    (tool / "uv-receipt.toml").write_text(
-        '[tool]\nrequirements = [{ name = "flameox", extras = ["cpu"] }]\n'
-    )
-    calls: list[list[str]] = []
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: None)
 
-    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
-        calls.append(command)
-        if command[1:] == ["tool", "dir"]:
-            return CompletedProcess(command, 0, f"{tmp_path / 'tools'}\n", "")
-        (tool / "uv-receipt.toml").write_text(
-            '[tool]\nrequirements = [{ name = "flameox", extras = ["cpu", "memory"] }]\n'
-        )
-        return CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
-    monkeypatch.setattr("flameox.setup.subprocess.run", run)
-
-    installed = prepare_providers(["memray"], tmp_path)
-
-    assert calls[-1][-1] == f"flameox[cpu,memory]=={__version__}"
-    assert installed.configured_managed_providers == ["memray", "py-spy"]
-    assert installed.changed is True
-    assert installed.restart_required is True
+    with pytest.raises(SetupFailure, match="requires uvx"):
+        prepare_providers(["memray"], tmp_path)
 
 
-def test_satisfied_managed_provider_still_returns_a_reconnect_launcher(
+def test_uvx_failure_is_normalized_as_setup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tool = tmp_path / "tools" / "flameox"
-    tool.mkdir(parents=True)
-    (tool / "uv-receipt.toml").write_text(
-        '[tool]\nrequirements = [{ name = "flameox", extras = ["cpu"] }]\n'
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
+    monkeypatch.setattr(
+        "flameox.setup.subprocess.run",
+        lambda command, **_kwargs: CompletedProcess(
+            command,
+            2,
+            stderr=b"No solution found: dependency conflict.\xff",
+        ),
     )
 
-    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
-        assert command[1:] == ["tool", "dir"]
-        return CompletedProcess(command, 0, f"{tmp_path / 'tools'}\n", "")
+    with pytest.raises(SetupFailure) as raised:
+        prepare_providers(["memray"], tmp_path)
 
-    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
+    assert "status 2" in str(raised.value)
+    assert "No solution found: dependency conflict.\ufffd" in str(raised.value)
+
+
+def test_preparation_timeout_is_configurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> CompletedProcess[bytes]:
+        observed.update(kwargs)
+        return CompletedProcess(command, 0, stderr=b"")
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
     monkeypatch.setattr("flameox.setup.subprocess.run", run)
 
-    prepared = prepare_providers(["py-spy"], tmp_path)
+    prepare_providers(["torch"], tmp_path, timeout_seconds=2_400)
 
-    assert prepared.changed is False
-    assert prepared.restart_required is True
-    assert prepared.launcher_args[-4:] == ["mcp", "serve", "--project-root", str(tmp_path)]
+    assert observed["timeout"] == 2_400
 
 
-def test_uv_start_failure_is_normalized_as_setup_failure(
+def test_preparation_timeout_preserves_uvx_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(*_args: object, **_kwargs: object) -> CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired("uvx", 2_400, stderr=b"download stalled\xff")
+
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
+    monkeypatch.setattr("flameox.setup.subprocess.run", run)
+
+    with pytest.raises(SetupFailure) as raised:
+        prepare_providers(["torch"], tmp_path, timeout_seconds=2_400)
+
+    assert "exceeded 2400 seconds" in str(raised.value)
+    assert "download stalled\ufffd" in str(raised.value)
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, 3_601])
+def test_preparation_timeout_is_bounded(timeout_seconds: int, tmp_path: Path) -> None:
+    with pytest.raises(SetupFailure, match="between 1 and 3600"):
+        prepare_providers(["torch"], tmp_path, timeout_seconds=timeout_seconds)
+
+
+def test_uvx_start_failure_is_normalized_as_setup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
         raise PermissionError("denied")
 
-    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uvx")
     monkeypatch.setattr("flameox.setup.subprocess.run", fail)
 
-    with pytest.raises(SetupFailure, match="could not start"):
+    with pytest.raises(SetupFailure, match="could not prepare"):
         prepare_providers(["memray"], tmp_path)
 
 
-def test_concurrent_preparation_retains_both_provider_extra_sets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tool_directory = tmp_path / "tools"
-    tool_directory.mkdir()
-    both_located = threading.Event()
-    calls_guard = threading.Lock()
-    tool_dir_calls = 0
-    install_requirements: list[str] = []
-
-    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
-        nonlocal tool_dir_calls
-        if command[1:] == ["tool", "dir"]:
-            with calls_guard:
-                tool_dir_calls += 1
-                if tool_dir_calls == 2:
-                    both_located.set()
-            return CompletedProcess(command, 0, f"{tool_directory}\n", "")
-
-        assert both_located.wait(timeout=2)
-        requirement = command[-1]
-        install_requirements.append(requirement)
-        extras = requirement.partition("[")[2].partition("]")[0].split(",")
-        receipt = tool_directory / "flameox" / "uv-receipt.toml"
-        receipt.parent.mkdir(exist_ok=True)
-        extras_toml = ", ".join(f'"{extra}"' for extra in extras)
-        receipt.write_text(
-            f'[tool]\nrequirements = [{{ name = "flameox", extras = [{extras_toml}] }}]\n'
-        )
-        return CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("flameox.setup.shutil.which", lambda _name: "/usr/bin/uv")
-    monkeypatch.setattr("flameox.setup.subprocess.run", run)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(
-            executor.map(
-                prepare_providers,
-                [["memray"], ["otlp"]],
-                [tmp_path, tmp_path],
-            )
-        )
-
-    assert len(install_requirements) == 2
-    assert any("flameox[memory,trace]" in requirement for requirement in install_requirements)
-    assert any(
-        set(result.configured_managed_providers) == {"memray", "otlp", "perfetto"}
-        for result in results
-    )
-
-
-def test_unknown_provider_is_rejected_before_installation() -> None:
+def test_unknown_provider_is_rejected_before_preparation(tmp_path: Path) -> None:
     with pytest.raises(SetupFailure, match="Unknown provider"):
-        provider_install_command(["mystery"], uv=Path("uv"))
+        prepare_providers(["mystery"], tmp_path)

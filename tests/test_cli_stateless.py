@@ -202,23 +202,26 @@ def test_setup_prints_configuration_without_creating_repository(tmp_path: Path) 
     assert not (tmp_path / ".flameox").exists()
 
 
-def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
+def test_setup_prepares_exact_python_providers_and_guides_system_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     selected: list[list[str]] = []
 
-    def prepare(providers: list[str], project_root: Path) -> ProviderPreparation:
+    def prepare(
+        providers: list[str], project_root: Path, timeout_seconds: int
+    ) -> ProviderPreparation:
+        assert timeout_seconds == 1_800
         selected.append(providers)
         return ProviderPreparation(
             providers,
-            ["memray", "py-spy"],
+            ["memray"],
             [
                 ExternalRequirement(
                     "nsight-compute",
                     "Install NVIDIA Nsight Compute with its extras/python interface.",
                 )
             ],
-            ["uv", "tool", "install", f"flameox[memory]=={__version__}"],
+            ["/usr/bin/uvx", "--from", f"flameox[memory]=={__version__}", "--version"],
             "uvx",
             [
                 "--python",
@@ -251,7 +254,8 @@ def test_setup_installs_only_explicit_python_providers_and_guides_system_tools(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert selected == [["memray", "nsight-compute"]]
-    assert payload["providers"] == ["memray", "nsight-compute", "py-spy"]
+    assert payload["providers"] == ["memray", "nsight-compute"]
+    assert payload["preparation_command"][0] == "/usr/bin/uvx"
     assert f"flameox[cpu,memory]=={__version__}" in payload["args"]
     assert "extras/python" in payload["external_guidance"][0]
     assert not (tmp_path / ".flameox").exists()
