@@ -45,11 +45,11 @@ uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
 
 ## Understand the contract you are changing
 
-Production code uses a `src/` layout. Domain types and errors belong in
-`src/flameox/domain/`, transport-independent orchestration in
-`src/flameox/application/`, persistence in `src/flameox/storage/`, external tool
-integration in `src/flameox/adapters/`, and transport code in `src/flameox/cli.py`
-and `src/flameox/mcp/`. Tests mirror these boundaries under `tests/`.
+Production code uses a `src/` layout. `stateless.py` owns request-local orchestration and public
+contracts, `repository.py` owns optional immutable preservation, and `execution.py` owns bounded
+subprocess work. Provider integrations live in `providers/`, reusable native-format parsing in
+`adapters/`, isolated protocols in `workers/`, and transport code in `cli.py` and `mcp/`. Tests
+mirror these semantic owners under `tests/`.
 
 Read the contract that owns the behavior before editing it:
 

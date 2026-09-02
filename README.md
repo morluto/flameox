@@ -67,12 +67,11 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 ## MCP interface
 
-The server exposes exactly seven tools:
+The server exposes exactly six tools:
 
 - `discover_capabilities`
 - `inspect_capabilities`
 - `analyze`
-- `preflight_capture`
 - `capture_and_analyze`
 - `preserve_evidence`
 - `query_evidence`

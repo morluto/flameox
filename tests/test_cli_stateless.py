@@ -23,13 +23,13 @@ def test_help_exposes_only_stateless_command_families() -> None:
         for command in (
             "setup",
             "analyze",
-            "preflight",
             "capture",
             "capabilities",
             "mcp",
             "evidence",
         )
     )
+    assert "preflight" not in result.output
     assert all(
         removed not in result.output
         for removed in ("workspace", "catalog", "runs", "investigations", "detached")

@@ -28,9 +28,9 @@ Session scratch has byte and file ceilings. A capture is rejected before its
 declared output budget could exhaust remaining capacity. Unpreserved files are
 never silently evicted and disappear at shutdown.
 
-Capture preflight is read-only and request-local. It may resolve and hash executable files, but it
-does not execute workload or oracle processes, run workload-interpreter package probes, create
-scratch children, publish evidence, or grant later execution authority.
+Capture performs compatibility, executable, aggregate scratch, and provenance admission before it
+creates request scratch or executes workload and oracle processes. These checks are part of the
+capture request rather than a separate plan or preflight lifecycle.
 
 ## Input and output bounds
 
