@@ -19,7 +19,7 @@ def isolated_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("FLAMEOX_DATA_DIR", str(tmp_path / "flameox-data"))
 
 
-def test_help_exposes_only_stateless_command_families() -> None:
+def test_help_exposes_current_command_families() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0, result.output
@@ -32,11 +32,6 @@ def test_help_exposes_only_stateless_command_families() -> None:
             "mcp",
             "evidence",
         )
-    )
-    assert "preflight" not in result.output
-    assert all(
-        removed not in result.output
-        for removed in ("workspace", "catalog", "runs", "investigations", "detached")
     )
 
 

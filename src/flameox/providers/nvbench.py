@@ -31,7 +31,7 @@ class _NvbenchBundle:
 
 
 class NvbenchProvider:
-    """Read an explicit NVBench JSON-bin directory without workspace ownership."""
+    """Read an explicit NVBench JSON-bin directory."""
 
     def analyze(
         self,

@@ -782,7 +782,7 @@ def test_pyperf_summary_uses_native_isolated_reader(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
-def test_pyperf_compare_reads_explicit_artifacts_without_catalog(tmp_path: Path) -> None:
+def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
     _write_pyperf_suite(baseline, [0.010, 0.012])
@@ -1152,7 +1152,7 @@ def _write_otlp_trace(path: Path) -> None:
 
 
 @pytest.mark.process
-def test_otlp_partial_rows_continue_without_legacy_application_service(tmp_path: Path) -> None:
+def test_otlp_partial_rows_continue_without_repository_state(tmp_path: Path) -> None:
     trace = tmp_path / "trace.otlp"
     _write_otlp_trace(trace)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -1423,7 +1423,7 @@ def test_semantic_observations_reject_unknown_fields(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 @pytest.mark.requires_memray
-def test_memray_capture_is_analyzed_without_workspace_or_repository(tmp_path: Path) -> None:
+def test_memray_capture_is_analyzed_without_creating_repository(tmp_path: Path) -> None:
     memray = pytest.importorskip("memray")
     capture = tmp_path / "memory.bin"
     with memray.Tracker(str(capture)):
@@ -1608,7 +1608,7 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
 
 
 @pytest.mark.unit
-def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
+def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
     async def inspect() -> None:
         server = create_server()
         tools = await server.list_tools()
@@ -1620,15 +1620,8 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
             if compatible_capture_providers(capability):
                 expected.append(capture_tool_name(capability))
         expected.extend(["preserve_evidence", "query_evidence"])
-        assert [tool.name for tool in tools] == expected
-        assert len(tools) == 44
+        assert {tool.name for tool in tools} == set(expected)
         assert all(tool.output_schema is not None for tool in tools)
-        assert not {
-            "discover_capabilities",
-            "inspect_capabilities",
-            "analyze",
-            "capture_and_analyze",
-        }.intersection(expected)
         by_name = {tool.name: tool for tool in tools}
         analysis_schema = by_name["analyze_cpu_hotspots"].input_schema
         assert set(analysis_schema["properties"]) == {

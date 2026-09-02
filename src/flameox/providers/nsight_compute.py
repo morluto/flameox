@@ -59,7 +59,7 @@ class NsightComputeProvider:
         self.interface_path = interface_path
 
     def resolve_interface(self, executable: Path | None = None) -> Path | None:
-        """Resolve the vendor reader used by both capture preflight and analysis."""
+        """Resolve the vendor reader used by capture validation and analysis."""
         return self.interface_path or find_report_interface(executable)
 
     def analyze(
