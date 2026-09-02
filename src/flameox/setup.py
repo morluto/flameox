@@ -5,7 +5,9 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+import portalocker
 
 from flameox import __version__
 
@@ -34,11 +36,34 @@ class SetupFailure(RuntimeError):
     pass
 
 
+class ProviderSelectionFailure(SetupFailure):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
-class ProviderInstallation:
-    command: list[str]
-    providers: list[str]
-    changed: bool = False
+class ExternalRequirement:
+    provider_id: str
+    guidance: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPreparation:
+    requested_providers: list[str]
+    configured_managed_providers: list[str]
+    external_requirements: list[ExternalRequirement]
+    install_command: list[str]
+    launcher_command: str
+    launcher_args: list[str]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.install_command)
+
+    @property
+    def installation_status(self) -> Literal["installed", "already_configured", "not_applicable"]:
+        if not any(item in PYTHON_PROVIDER_EXTRAS for item in self.requested_providers):
+            return "not_applicable"
+        return "installed" if self.changed else "already_configured"
 
 
 def managed_tool_extras(tool_directory: Path) -> set[str]:
@@ -82,15 +107,21 @@ def _uv_tool_directory(uv: Path) -> Path:
     return Path(completed.stdout.strip())
 
 
-def provider_install_command(
-    providers: list[str], *, uv: Path, installed_extras: set[str] | None = None
-) -> list[str]:
+def _validate_providers(providers: list[str]) -> None:
     unknown = sorted(
         set(providers).difference(PYTHON_PROVIDER_EXTRAS).difference(SYSTEM_PROVIDER_GUIDANCE)
     )
     if unknown:
         supported = ", ".join(sorted(PYTHON_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
-        raise SetupFailure(f"Unknown provider {unknown[0]!r}; choose one of: {supported}")
+        raise ProviderSelectionFailure(
+            f"Unknown provider {unknown[0]!r}; choose one of: {supported}"
+        )
+
+
+def provider_install_command(
+    providers: list[str], *, uv: Path, installed_extras: set[str] | None = None
+) -> list[str]:
+    _validate_providers(providers)
     requested_extras = {
         PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
     }
@@ -129,50 +160,70 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
     )
 
 
-def install_providers(providers: list[str]) -> ProviderInstallation:
-    if not any(item in PYTHON_PROVIDER_EXTRAS for item in providers):
-        provider_install_command(providers, uv=Path("uv"))
-        return ProviderInstallation(
+def prepare_providers(providers: list[str]) -> ProviderPreparation:
+    requested = list(dict.fromkeys(providers))
+    _validate_providers(requested)
+    managed = [item for item in requested if item in PYTHON_PROVIDER_EXTRAS]
+    external = [
+        ExternalRequirement(item, SYSTEM_PROVIDER_GUIDANCE[item])
+        for item in requested
+        if item in SYSTEM_PROVIDER_GUIDANCE
+    ]
+    if not managed:
+        launcher_command, launcher_args = mcp_launcher([])
+        return ProviderPreparation(
+            requested,
             [],
-            sorted(set(providers).intersection(SYSTEM_PROVIDER_GUIDANCE)),
+            external,
+            [],
+            launcher_command,
+            launcher_args,
         )
+
     uv_text = shutil.which("uv")
     if uv_text is None:
         raise SetupFailure("Provider installation requires uv on PATH.")
     uv = Path(uv_text)
     tool_directory = _uv_tool_directory(uv)
-    installed_extras = managed_tool_extras(tool_directory)
-    command = provider_install_command(
-        providers,
-        uv=uv,
-        installed_extras=installed_extras,
-    )
-    if command:
-        completed = subprocess.run(command, check=False)
-        if completed.returncode != 0:
-            raise SetupFailure(f"uv tool install exited with status {completed.returncode}.")
-    final_extras = managed_tool_extras(tool_directory) if command else installed_extras
-    requested_extras = {
-        PYTHON_PROVIDER_EXTRAS[item] for item in providers if item in PYTHON_PROVIDER_EXTRAS
-    }
-    missing_extras = requested_extras.difference(final_extras)
-    if missing_extras:
-        raise SetupFailure(
-            "uv reported success but the managed tool receipt is missing extras: "
-            + ", ".join(sorted(missing_extras))
-        )
-    managed_providers = {
+    try:
+        with portalocker.Lock(
+            tool_directory / ".flameox-setup.lock",
+            mode="a+",
+            timeout=10,
+            encoding="utf-8",
+        ):
+            installed_extras = managed_tool_extras(tool_directory)
+            command = provider_install_command(
+                managed,
+                uv=uv,
+                installed_extras=installed_extras,
+            )
+            if command:
+                completed = subprocess.run(command, check=False)
+                if completed.returncode != 0:
+                    raise SetupFailure(
+                        f"uv tool install exited with status {completed.returncode}."
+                    )
+            final_extras = managed_tool_extras(tool_directory) if command else installed_extras
+            requested_extras = {PYTHON_PROVIDER_EXTRAS[item] for item in managed}
+            missing_extras = requested_extras.difference(final_extras)
+            if missing_extras:
+                raise SetupFailure(
+                    "uv reported success but the managed tool receipt is missing extras: "
+                    + ", ".join(sorted(missing_extras))
+                )
+    except portalocker.exceptions.LockException as error:
+        raise SetupFailure("Timed out waiting to update the managed Flameox tool.") from error
+
+    configured = sorted(
         provider for provider, extra in PYTHON_PROVIDER_EXTRAS.items() if extra in final_extras
-    }
-    selected_system = set(providers).intersection(SYSTEM_PROVIDER_GUIDANCE)
-    return ProviderInstallation(
-        command,
-        sorted(managed_providers | selected_system),
-        changed=bool(command),
     )
-
-
-def provider_guidance(providers: list[str]) -> list[str]:
-    return [
-        SYSTEM_PROVIDER_GUIDANCE[item] for item in providers if item in SYSTEM_PROVIDER_GUIDANCE
-    ]
+    launcher_command, launcher_args = mcp_launcher(configured)
+    return ProviderPreparation(
+        requested,
+        configured,
+        external,
+        command,
+        launcher_command,
+        launcher_args,
+    )

@@ -34,11 +34,9 @@ from flameox.runtime_contracts import (
     Source,
 )
 from flameox.setup import (
-    PYTHON_PROVIDER_EXTRAS,
-    SYSTEM_PROVIDER_GUIDANCE,
+    ProviderSelectionFailure,
     SetupFailure,
-    install_providers,
-    mcp_launcher,
+    prepare_providers,
 )
 from flameox.stateless import AnalysisRuntime
 
@@ -107,7 +105,6 @@ class ExternalRequirementEnvelope(BaseModel):
 
 class InstallationEnvelope(BaseModel):
     status: Literal["installed", "already_configured", "not_applicable"]
-    command: list[str]
 
 
 class LauncherEnvelope(BaseModel):
@@ -117,7 +114,7 @@ class LauncherEnvelope(BaseModel):
 
 class PreparationEnvelope(_Envelope):
     requested_providers: list[str]
-    configured_providers: list[str]
+    configured_managed_providers: list[str]
     external_requirements: list[ExternalRequirementEnvelope]
     installation: InstallationEnvelope
     launcher: LauncherEnvelope
@@ -264,49 +261,30 @@ def create_server(
     ) -> Annotated[CallToolResult, PreparationOutcome]:
         """Install selected managed providers; report host-tool setup without changing it."""
 
-        requested = list(dict.fromkeys(provider_ids))
-        unknown = sorted(
-            set(requested).difference(PYTHON_PROVIDER_EXTRAS).difference(SYSTEM_PROVIDER_GUIDANCE)
-        )
-        if unknown:
-            supported = ", ".join(sorted(PYTHON_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
-            return _failure(
-                RuntimeFailure(
-                    "INVALID_INPUT",
-                    f"Unknown provider {unknown[0]!r}; choose one of: {supported}",
-                )
-            )
-
-        managed = [item for item in requested if item in PYTHON_PROVIDER_EXTRAS]
-        external = [
-            {"provider_id": item, "guidance": SYSTEM_PROVIDER_GUIDANCE[item]}
-            for item in requested
-            if item in SYSTEM_PROVIDER_GUIDANCE
-        ]
         try:
-            installation = await asyncio.to_thread(install_providers, managed)
+            preparation = await asyncio.to_thread(prepare_providers, provider_ids)
+        except ProviderSelectionFailure as error:
+            return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
         except SetupFailure as error:
             return _failure(RuntimeFailure("SETUP_FAILURE", str(error)))
 
-        launcher_command, launcher_args = mcp_launcher(installation.providers)
-        installation_status: Literal["installed", "already_configured", "not_applicable"]
-        if not managed:
-            installation_status = "not_applicable"
-        elif installation.changed:
-            installation_status = "installed"
-        else:
-            installation_status = "already_configured"
         return _success(
             {
-                "requested_providers": requested,
-                "configured_providers": installation.providers,
-                "external_requirements": external,
-                "installation": {
-                    "status": installation_status,
-                    "command": installation.command,
+                "requested_providers": preparation.requested_providers,
+                "configured_managed_providers": preparation.configured_managed_providers,
+                "external_requirements": [
+                    {
+                        "provider_id": requirement.provider_id,
+                        "guidance": requirement.guidance,
+                    }
+                    for requirement in preparation.external_requirements
+                ],
+                "installation": {"status": preparation.installation_status},
+                "launcher": {
+                    "command": preparation.launcher_command,
+                    "args": preparation.launcher_args,
                 },
-                "launcher": {"command": launcher_command, "args": launcher_args},
-                "restart_required": installation.changed,
+                "restart_required": preparation.changed,
             }
         )
 

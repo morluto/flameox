@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from flameox import __version__
 from flameox.mcp import create_server, run_server
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
-from flameox.setup import SetupFailure, install_providers, mcp_launcher, provider_guidance
+from flameox.setup import SetupFailure, prepare_providers
 from flameox.stateless import AnalysisRuntime
 
 app = typer.Typer(
@@ -83,13 +83,13 @@ def setup(
     root = project_root.resolve(strict=True)
     selected = provider or []
     try:
-        installation = install_providers(selected) if selected else None
-        command = installation.command if installation is not None else []
-        configured_providers = installation.providers if installation is not None else []
-        guidance = provider_guidance(selected)
+        preparation = prepare_providers(selected)
     except SetupFailure as error:
         raise typer.BadParameter(str(error), param_hint="--provider") from error
-    launcher, launcher_args = mcp_launcher(configured_providers)
+    configured_providers = preparation.configured_managed_providers
+    external_providers = [item.provider_id for item in preparation.external_requirements]
+    guidance = [item.guidance for item in preparation.external_requirements]
+    launcher, launcher_args = preparation.launcher_command, preparation.launcher_args
     args = [*launcher_args, "mcp", "serve", "--project-root", str(root)]
     value = {
         "command": launcher,
@@ -99,8 +99,8 @@ def setup(
         "project_root": str(root),
         "durable_repository": str(root / ".flameox"),
         "repository_created": False,
-        "providers": configured_providers,
-        "install_command": command,
+        "providers": sorted(set(configured_providers) | set(external_providers)),
+        "install_command": preparation.install_command,
         "external_guidance": guidance,
     }
     if json_output:
@@ -112,7 +112,7 @@ def setup(
             + (
                 "Installed the selected Python provider extras into the persistent Flameox "
                 "uv tool environment.\n"
-                if command
+                if preparation.changed
                 else "No Python provider packages were installed.\n"
             )
             + "\n".join(guidance)

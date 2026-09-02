@@ -38,7 +38,9 @@ already configured Flameox extras, verifies the resulting managed-tool receipt, 
 the MCP client must reconnect. Repeating a fully satisfied request is a no-op. System profilers,
 drivers, device access, and OS permissions remain external requirements; Flameox returns guidance
 for them but does not invoke a system package manager or elevate privileges. Preparation creates no
-project state, durable job, plan, or setup receipt of its own.
+project state, durable job, plan, or setup receipt of its own. The result distinguishes configured
+managed providers from external requirements; a provider such as Perfetto may appear in both when
+its Python support is configured but its host Trace Processor still needs setup.
 
 ## Sources and limits
 
