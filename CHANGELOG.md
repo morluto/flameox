@@ -2,6 +2,34 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.4] - 2026-09-02
+
+### Bug Fixes
+
+- **mcp:** Include cwd in capture examples
+- **release:** Retry MCP registry propagation
+
+### Documentation
+
+- Explain workspace-free evidence runtime
+
+### Features
+
+- **setup:** Configure global MCP clients
+
+### Refactoring
+
+- **runtime:** Simplify bounded capture lifecycle
+- **runtime:** Remove workspace binding
+
+### Styling
+
+- Format capture provider module
+
+### Testing
+
+- Remove stale redesign assertions
+- Remove unused execution helper
 ## [0.2.3] - 2026-09-02
 
 ### Bug Fixes
