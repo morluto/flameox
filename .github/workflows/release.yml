@@ -300,9 +300,35 @@ jobs:
           tar -xzf "$archive" mcp-publisher
 
       - name: Publish MCP server metadata
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
         run: |
+          set -euo pipefail
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish server.json
+          for attempt in {1..12}; do
+            set +e
+            output=$(./mcp-publisher publish server.json 2>&1)
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+
+            missing_version="version '${RELEASE_VERSION}' was not found (status: 404)"
+            if ! grep --fixed-strings --quiet "$missing_version" <<< "$output"; then
+              exit "$status"
+            fi
+
+            if [[ "$attempt" -lt 12 ]]; then
+              echo "MCP Registry has not observed PyPI $RELEASE_VERSION; retrying in 10 seconds"
+              sleep 10
+            fi
+          done
+
+          echo "MCP Registry did not observe PyPI $RELEASE_VERSION within 120 seconds" >&2
+          exit 1
 
   verify-npm-latest:
     name: Verify npm latest bootstrap
