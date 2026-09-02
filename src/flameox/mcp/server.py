@@ -277,6 +277,10 @@ def create_server(
 
         # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
         handler.__name__ = analysis_tool_name(capability)
+        minimum_sources = 2 if capability.id.endswith(".compare") else 1
+        handler.__annotations__["sources"] = Annotated[
+            list[Source], Field(min_length=minimum_sources, max_length=32)
+        ]
         handler.__annotations__["options"] = capability.model
         return handler
 

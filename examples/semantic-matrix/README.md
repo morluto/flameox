@@ -4,8 +4,8 @@ This standard-library-only example shows why process success and semantic
 outcomes are different evidence. Its explicit cells cover matching behavior, a
 typed candidate mismatch, an expected rejection, and an unavailable backend.
 
-Run each case as a typed target or send the cases together through MCP
-`capture_and_analyze` in `experiment` mode. Declare the blocks, seed, metric,
+Run each case as a typed target or send the cases together through an appropriate MCP
+`capture_*` tool in `experiment` mode. Declare the blocks, seed, metric,
 estimand, practical threshold, and semantic-oracle argv in that request; no
 workspace or configuration file is required.
 

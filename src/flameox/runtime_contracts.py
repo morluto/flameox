@@ -707,6 +707,8 @@ CAPABILITY_BY_ID = {item.id: item for item in CAPABILITIES}
 def compatible_capture_providers(capability: Capability) -> tuple[CaptureProviderContract, ...]:
     """Return capture providers whose artifacts can feed a capability."""
 
+    if capability.id.endswith(".compare"):
+        return ()
     return tuple(
         contract
         for contract in CAPTURE_PROVIDER_CONTRACTS.values()

@@ -40,7 +40,7 @@ optional semantic oracle. Cases are bounded and execute through the same broker 
 For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
 correctness through `analyze_kernel_validation` and `analyze_kernel_compare`, checks hazards with
 `capture_sanitizer_failures`, measures representative baseline/candidate cases with
-`capture_benchmark_compare`, and profiles only the remaining uncertainty with
+`capture_benchmark_summary` in experiment mode, and profiles only the remaining uncertainty with
 `capture_gpu_launches` or `capture_gpu_kernel_metrics`. Flameox preserves the verification evidence;
 it does not generate kernels, wrap compilers, or decide which optimization to implement.
 

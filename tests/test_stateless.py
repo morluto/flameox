@@ -129,6 +129,38 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     assert not marker.exists()
 
 
+@pytest.mark.unit
+def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(tmp_path)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+                        provider_id="direct",
+                    ),
+                    "artifact.preview",
+                    mode="experiment",
+                    experiment=ExperimentDesign(
+                        cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
+                        blocks=9,
+                        seed=1,
+                        metric="wall_time_ns",
+                        estimand="median_difference",
+                        practical_threshold=0,
+                    ),
+                )
+        finally:
+            runtime.close()
+        assert failure.value.code == "LIMIT_EXCEEDED"
+
+    anyio.run(exercise)
+    assert not marker.exists()
+
+
 def test_special_file_sources_are_rejected_before_decoding(tmp_path: Path) -> None:
     fifo = tmp_path / "input.fifo"
     os.mkfifo(fifo)
@@ -1533,7 +1565,7 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
                 expected.append(capture_tool_name(capability))
         expected.extend(["preserve_evidence", "query_evidence"])
         assert [tool.name for tool in tools] == expected
-        assert len(tools) == 45
+        assert len(tools) == 44
         assert all(tool.output_schema is not None for tool in tools)
         assert not {
             "discover_capabilities",
@@ -1565,6 +1597,11 @@ def test_mcp_catalog_is_exact_typed_and_has_one_resource_template() -> None:
             "py-spy": "#/$defs/PySpyProvider",
         }
         assert capture_schema["required"] == ["target", "provider", "options", "execution"]
+        assert (
+            by_name["analyze_benchmark_compare"].input_schema["properties"]["sources"]["minItems"]
+            == 2
+        )
+        assert "capture_benchmark_compare" not in by_name
         analysis_annotations = by_name["analyze_cpu_hotspots"].annotations
         capture_annotations = by_name["capture_cpu_hotspots"].annotations
         assert analysis_annotations and analysis_annotations.read_only_hint is True
@@ -1710,7 +1747,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 45
+        assert len(tools.tools) == 44
         assert "preview_artifact" in [tool.name for tool in tools.tools]
         assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)

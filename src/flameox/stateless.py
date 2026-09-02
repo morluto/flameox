@@ -47,7 +47,7 @@ from flameox.providers.cpu import CpuProfileProvider
 from flameox.providers.inference_exports import InferenceExportProvider
 from flameox.providers.kernel_evidence import KernelEvidenceProvider
 from flameox.providers.memray import MemrayProvider
-from flameox.providers.nsight_compute import NsightComputeProvider
+from flameox.providers.nsight_compute import NsightComputeProvider, find_report_interface
 from flameox.providers.nsight_systems import NsightSystemsParquetProvider
 from flameox.providers.nvbench import NvbenchProvider
 from flameox.providers.otlp import OtlpProvider
@@ -95,6 +95,7 @@ from flameox.runtime_contracts import (
     compatible_capture_providers,
 )
 from flameox.runtime_errors import DomainError, ErrorCode
+from flameox.setup import SYSTEM_PROVIDER_GUIDANCE
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
 
 
@@ -380,6 +381,19 @@ class AnalysisRuntime:
                 },
             )
         cases = experiment.cases if experiment else [ExperimentCase(name="single")]
+        source_count = (
+            len(cases)
+            * (experiment.blocks if experiment else 1)
+            * len(CAPTURE_PROVIDER_CONTRACTS[target.provider_id].artifacts)
+        )
+        if source_count > MAX_INPUTS:
+            raise RuntimeFailure(
+                "LIMIT_EXCEEDED",
+                (
+                    f"Capture would produce {source_count} analysis sources; "
+                    f"the limit is {MAX_INPUTS}."
+                ),
+            )
         return ValidatedCaptureRequest(
             capability=capability,
             capture_arguments=capture_arguments,
@@ -434,9 +448,24 @@ class AnalysisRuntime:
                 target.provider_id, argv, environment, capture_arguments, directory
             )
             self._require_workload_python_provider(target.provider_id, argv, environment, cwd=cwd)
-            self._require_host_tool(
-                invocation.argv[0], cwd=cwd, environment={**os.environ, **invocation.environment}
+            binding = self._require_host_tool(
+                invocation.argv[0],
+                cwd=cwd,
+                environment={**os.environ, **invocation.environment},
+                provider_id=target.provider_id,
             )
+            if (
+                target.provider_id == "nsight-compute"
+                and find_report_interface(binding.invocation_path) is None
+            ):
+                raise RuntimeFailure(
+                    "UNAVAILABLE_CAPABILITY",
+                    "The official Nsight Compute ncu_report.py interface is missing.",
+                    details={
+                        "provider_id": target.provider_id,
+                        "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
+                    },
+                )
             if experiment is not None and experiment.semantic_oracle is not None:
                 self._require_host_tool(
                     experiment.semantic_oracle[0],
@@ -878,7 +907,11 @@ class AnalysisRuntime:
 
     @staticmethod
     def _require_host_tool(
-        executable: str, *, cwd: Path, environment: Mapping[str, str]
+        executable: str,
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        provider_id: str | None = None,
     ) -> ResolvedExecutable:
         try:
             return ExecutableResolver().require_host_tool(
@@ -890,7 +923,13 @@ class AnalysisRuntime:
                 if error.code is ErrorCode.UNAVAILABLE_CAPABILITY
                 else "EXECUTION_FAILURE"
             )
-            raise RuntimeFailure(code, error.message) from error
+            details = {}
+            if provider_id in SYSTEM_PROVIDER_GUIDANCE:
+                details = {
+                    "provider_id": provider_id,
+                    "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[provider_id],
+                }
+            raise RuntimeFailure(code, error.message, details=details) from error
 
     @staticmethod
     def _managed_executable(name: str) -> str | None:

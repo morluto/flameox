@@ -10,12 +10,12 @@ search/inspect protocol in front of its operations. A caller that knows the evid
 invoke its tool directly; an unfamiliar caller relies on the MCP client's ordinary tool search and
 then receives the selected tool's complete schema.
 
-There are exactly 45 tools:
+There are exactly 44 tools:
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
 | Existing-artifact analysis | 24 | `analyze_cpu_hotspots`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_kernel_validation`, `preview_artifact` | Read-only and idempotent. |
-| Capture and immediate analysis | 18 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_compare`, `capture_sanitizer_failures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
+| Capture and immediate analysis | 17 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_sanitizer_failures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 3 | `prepare_providers`, `preserve_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
 The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
@@ -59,7 +59,8 @@ view. A missing resource is a protocol error.
 Every tool advertises a compact output schema for its stable result envelope. Provider-specific
 metrics and rows remain open JSON values. Success uses structured content directly, without an
 `ok/result/error` wrapper. Tool failures set `isError=true` and carry a stable code, message, and
-details; both success and failure shapes validate against the advertised schema.
+details. MCP SDK argument-validation errors occur before tool execution and therefore use the
+protocol error shape rather than the tool's output schema.
 
 `prepare_providers` is the only open-world tool. It resolves the exact package requirement through
 `uvx`, verifies that environment by running Flameox's version command, and returns the same
