@@ -101,6 +101,8 @@ def _py_spy(request: CaptureBuildRequest, managed: ManagedExecutable) -> Capture
         options.append("--gil")
     if arguments.native:
         options.append("--native")
+    if arguments.subprocesses:
+        options.append("--subprocesses")
     argv = (
         managed("py-spy", "py-spy"),
         "record",

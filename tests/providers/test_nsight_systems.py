@@ -90,6 +90,41 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
     assert preserved["evidence_id"]
 
 
+def test_nsight_systems_trace_projections_select_semantic_table_families(
+    tmp_path: Path,
+) -> None:
+    parquetdir = tmp_path / "report.parquetdir"
+    parquetdir.mkdir()
+    pq.write_table(
+        pa.table({"name": ["cudaLaunchKernel"], "duration_ns": [10]}),
+        parquetdir / "CUDA_API_TRACE.parquet",
+    )
+    pq.write_table(
+        pa.table({"process_id": [7], "event": ["started"]}),
+        parquetdir / "PROCESS_LIFECYCLE.parquet",
+    )
+    pq.write_table(
+        pa.table({"kernel": ["ignored"]}),
+        parquetdir / "CUDA_GPU_KERN_SUM.parquet",
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    source = [PathSource(path=str(parquetdir), format="nsys-parquet")]
+    try:
+        summary = runtime.analyze("trace.summary", source, {})
+        operations = runtime.analyze("trace.operations", source, {})
+        lifecycle = runtime.analyze("trace.lifecycle", source, {})
+    finally:
+        runtime.close()
+
+    assert {row["table"] for row in summary["blocks"][1]["rows"]} == {
+        "CUDA_API_TRACE",
+        "CUDA_GPU_KERN_SUM",
+        "PROCESS_LIFECYCLE",
+    }
+    assert {row["table"] for row in operations["blocks"][1]["rows"]} == {"CUDA_API_TRACE"}
+    assert {row["table"] for row in lifecycle["blocks"][1]["rows"]} == {"PROCESS_LIFECYCLE"}
+
+
 @pytest.mark.process
 def test_cpu_only_nsight_capture_is_typed_negative_accelerator_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

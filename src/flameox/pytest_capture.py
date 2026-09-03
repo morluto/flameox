@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import itertools
 import json
 import os
 import time
@@ -14,6 +15,7 @@ pytest = importlib.import_module("pytest")
 _OUTPUT_ENVIRONMENT = "FLAMEOX_PYTEST_OUTPUT"
 _MAX_TEXT = 4096
 _MAX_EVENT_BYTES = 64 * 1024
+_FIXTURE_INVOCATIONS = itertools.count(1)
 
 
 def _write(event: dict[str, Any]) -> None:
@@ -34,6 +36,84 @@ def _write(event: dict[str, Any]) -> None:
 
 def _text(value: object) -> str:
     return str(value)[:_MAX_TEXT]
+
+
+def _worker_id(config: Any) -> str:
+    worker_input = getattr(config, "workerinput", None)
+    if isinstance(worker_input, dict) and isinstance(worker_input.get("workerid"), str):
+        return _text(worker_input["workerid"])
+    return "main"
+
+
+@pytest.hookimpl(wrapper=True)  # type: ignore[untyped-decorator]
+def pytest_fixture_setup(fixturedef: Any, request: Any) -> Any:
+    worker_id = _worker_id(request.config)
+    invocation_id = f"{worker_id}:{next(_FIXTURE_INVOCATIONS)}"
+    fixture = _text(fixturedef.argname)
+    scope = _text(fixturedef.scope)
+    nodeid = _text(getattr(request.node, "nodeid", ""))
+    teardown_started_ns: int | None = None
+
+    def finish_teardown() -> None:
+        finished_ns = time.perf_counter_ns()
+        _write(
+            {
+                "event": "fixture_phase",
+                "fixture": fixture,
+                "scope": scope,
+                "phase": "teardown",
+                "outcome": "completed" if teardown_started_ns is not None else "incomplete",
+                "duration_ns": (
+                    max(0, finished_ns - teardown_started_ns)
+                    if teardown_started_ns is not None
+                    else None
+                ),
+                "worker_id": worker_id,
+                "invocation_id": invocation_id,
+                "nodeid": nodeid,
+            }
+        )
+
+    def begin_teardown() -> None:
+        nonlocal teardown_started_ns
+        teardown_started_ns = time.perf_counter_ns()
+
+    request.addfinalizer(finish_teardown)
+    started_ns = time.perf_counter_ns()
+    try:
+        result = yield
+    except BaseException:
+        _write(
+            {
+                "event": "fixture_phase",
+                "fixture": fixture,
+                "scope": scope,
+                "phase": "setup",
+                "outcome": "failed",
+                "duration_ns": max(0, time.perf_counter_ns() - started_ns),
+                "worker_id": worker_id,
+                "invocation_id": invocation_id,
+                "nodeid": nodeid,
+            }
+        )
+        raise
+    else:
+        _write(
+            {
+                "event": "fixture_phase",
+                "fixture": fixture,
+                "scope": scope,
+                "phase": "setup",
+                "outcome": "passed",
+                "duration_ns": max(0, time.perf_counter_ns() - started_ns),
+                "worker_id": worker_id,
+                "invocation_id": invocation_id,
+                "nodeid": nodeid,
+            }
+        )
+        return result
+    finally:
+        request.addfinalizer(begin_teardown)
 
 
 def pytest_sessionstart(session: object) -> None:

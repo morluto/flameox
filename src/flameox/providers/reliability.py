@@ -14,13 +14,158 @@ _MAX_LINE_BYTES = 64 * 1024
 class ReliabilityProvider:
     """Bounded projections for explicit pytest and semantic-observation streams."""
 
-    def analyze(self, path: Path, format_name: str, *, max_rows: int) -> ProviderAnalysis:
+    def analyze(
+        self, capability_id: str, path: Path, format_name: str, *, max_rows: int
+    ) -> ProviderAnalysis:
         if format_name == "pytest":
+            if capability_id == "pytest.fixtures":
+                return self._pytest_fixtures(path, max_rows=max_rows)
             return self._pytest(path, max_rows=max_rows)
         if format_name == "observations":
             return self._observations(path, max_rows=max_rows)
         raise ProviderFailure(
             "UNSUPPORTED_FORMAT", f"Unsupported reliability format: {format_name}"
+        )
+
+    def _pytest_fixtures(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
+        invocations: dict[str, dict[str, Any]] = {}
+        finished = False
+        interrupted = False
+        for index, event in self._events(path):
+            event_name = event.get("event")
+            if event_name == "run_finished":
+                finished = True
+                continue
+            if event_name in {"interrupted", "internal_error"}:
+                interrupted = True
+                continue
+            if event_name != "fixture_phase":
+                continue
+            required = ("fixture", "scope", "phase", "outcome", "worker_id", "invocation_id")
+            if not all(isinstance(event.get(field), str) for field in required):
+                raise ProviderFailure("DECODE_FAILURE", "Fixture event fields are invalid")
+            duration = event.get("duration_ns")
+            if duration is not None and (
+                not isinstance(duration, int) or isinstance(duration, bool) or duration < 0
+            ):
+                raise ProviderFailure("DECODE_FAILURE", "Fixture duration is invalid")
+            invocation_id = str(event["invocation_id"])
+            invocation = invocations.setdefault(
+                invocation_id,
+                {
+                    "index": index,
+                    "fixture": str(event["fixture"]),
+                    "scope": str(event["scope"]),
+                    "worker_id": str(event["worker_id"]),
+                    "nodeid": str(event.get("nodeid") or ""),
+                    "setup_duration_ns": None,
+                    "teardown_duration_ns": None,
+                    "setup_outcome": None,
+                    "teardown_outcome": None,
+                },
+            )
+            if any(
+                invocation[field] != str(event.get(field) or "")
+                for field in ("fixture", "scope", "worker_id", "nodeid")
+            ):
+                raise ProviderFailure("DECODE_FAILURE", "Fixture invocation identity changed")
+            phase = str(event["phase"])
+            if phase not in {"setup", "teardown"} or invocation[f"{phase}_outcome"] is not None:
+                raise ProviderFailure("DECODE_FAILURE", "Fixture phase is invalid or repeated")
+            invocation[f"{phase}_duration_ns"] = duration
+            invocation[f"{phase}_outcome"] = str(event["outcome"])
+
+        aggregate_values: dict[tuple[str, str], dict[str, Any]] = {}
+        worker_work: dict[str, int] = defaultdict(int)
+        invocation_rows: list[dict[str, Any]] = []
+        for invocation_id, invocation in invocations.items():
+            setup_duration = invocation["setup_duration_ns"]
+            teardown_duration = invocation["teardown_duration_ns"]
+            known_work = sum(
+                value for value in (setup_duration, teardown_duration) if isinstance(value, int)
+            )
+            worker_work[str(invocation["worker_id"])] += known_work
+            complete = (
+                isinstance(setup_duration, int)
+                and isinstance(teardown_duration, int)
+                and invocation["teardown_outcome"] == "completed"
+            )
+            invocation_rows.append(
+                {
+                    "row_kind": "fixture_invocation",
+                    "invocation_id": invocation_id,
+                    **invocation,
+                    "known_work_ns": known_work,
+                    "complete": complete,
+                }
+            )
+            key = (str(invocation["fixture"]), str(invocation["scope"]))
+            aggregate = aggregate_values.setdefault(
+                key,
+                {
+                    "invocation_count": 0,
+                    "workers": set(),
+                    "setup_work_ns": 0,
+                    "teardown_work_ns": 0,
+                    "incomplete_invocation_count": 0,
+                },
+            )
+            aggregate["invocation_count"] += 1
+            aggregate["workers"].add(str(invocation["worker_id"]))
+            aggregate["setup_work_ns"] += setup_duration if isinstance(setup_duration, int) else 0
+            aggregate["teardown_work_ns"] += (
+                teardown_duration if isinstance(teardown_duration, int) else 0
+            )
+            aggregate["incomplete_invocation_count"] += int(not complete)
+        aggregate_rows = [
+            {
+                "row_kind": "fixture_aggregate",
+                "fixture": fixture,
+                "scope": scope,
+                "invocation_count": values["invocation_count"],
+                "worker_count": len(values["workers"]),
+                "setup_work_ns": values["setup_work_ns"],
+                "teardown_work_ns": values["teardown_work_ns"],
+                "known_work_ns": values["setup_work_ns"] + values["teardown_work_ns"],
+                "incomplete_invocation_count": values["incomplete_invocation_count"],
+            }
+            for (fixture, scope), values in aggregate_values.items()
+        ]
+        aggregate_rows.sort(key=lambda row: (-int(row["known_work_ns"]), str(row["fixture"])))
+        invocation_rows.sort(
+            key=lambda row: (-int(row["known_work_ns"]), str(row["invocation_id"]))
+        )
+        rows = [*aggregate_rows, *invocation_rows]
+        completion = "interrupted" if interrupted else "complete" if finished else "incomplete"
+        incomplete_count = sum(not bool(row["complete"]) for row in invocation_rows)
+        return ProviderAnalysis(
+            provider_id="pytest",
+            provider_version="event-stream-v2",
+            blocks=[
+                {
+                    "type": "metrics",
+                    "values": {
+                        "completion": completion,
+                        "fixture_count": len(aggregate_rows),
+                        "invocation_count": len(invocation_rows),
+                        "worker_count": len(worker_work),
+                        "incomplete_invocation_count": incomplete_count,
+                        "summed_fixture_work_ns": sum(worker_work.values()),
+                        "max_worker_fixture_work_ns": max(worker_work.values(), default=0),
+                    },
+                },
+                {"type": "table", "rows": rows[:max_rows]},
+            ],
+            rows_observed=len(rows),
+            complete=len(rows) <= max_rows,
+            limitations=[
+                "Summed fixture work can overlap across xdist workers and is not wall-clock "
+                "critical-path duration.",
+                "max_worker_fixture_work_ns is accumulated known work on one worker, not a "
+                "critical-path measurement.",
+                "Interrupted runs retain incomplete fixture invocations instead of treating "
+                "missing finalizers as zero duration.",
+            ],
         )
 
     def _pytest(self, path: Path, *, max_rows: int) -> ProviderAnalysis:

@@ -70,4 +70,6 @@ inventory. Host profilers, drivers, and permissions remain external and receive 
 
 Direct capture is trusted local execution, not containment. Typed argv prevents
 shell interpretation, while the broker provides process-group cleanup, bounded
-output, timeouts, resource observation, and exact executable identity.
+output, timeouts, resource observation, and exact executable identity. Those bounds do not provide
+a network sandbox or neutralize the target program's own external side effects. MCP effect
+annotations are discovery and confirmation hints, not authorization controls.

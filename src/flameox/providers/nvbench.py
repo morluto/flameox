@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -49,6 +50,19 @@ class NvbenchProvider:
         parsed = [self._read_bundle(path, max_rows=max_rows) for path in paths]
         if capability_id == "benchmark.compare":
             return self._compare(parsed, arguments, max_rows=max_rows)
+        if capability_id == "benchmark.scaling":
+            if any(bundle.measurement_count > len(bundle.rows) for bundle in parsed):
+                raise ProviderFailure(
+                    "LIMIT_EXCEEDED",
+                    "benchmark.scaling requires complete samples; raise the startup row limit",
+                )
+            return scaling_projection(
+                [row for bundle in parsed for row in bundle.rows],
+                arguments,
+                provider_id="nvbench",
+                provider_version=parsed[0].version,
+                max_rows=max_rows,
+            )
         rows: list[dict[str, Any]] = []
         observed = 0
         for input_index, bundle in enumerate(parsed):
@@ -318,12 +332,30 @@ def _sidecar_rows(
                 "value_int": None,
                 "value_float": value,
                 "value_index": index,
-                "dimensions": {
-                    "state": state.get("name"),
-                    "device": state.get("device"),
-                    "type_config_index": state.get("type_config_index"),
-                },
+                "dimensions": _state_dimensions(state),
             }
+
+
+def _state_dimensions(state: Mapping[str, Any]) -> dict[str, Any]:
+    name = state.get("name")
+    dimensions = {
+        "state": name,
+        "device": state.get("device"),
+        "type_config_index": state.get("type_config_index"),
+    }
+    if isinstance(name, str):
+        for component in name.split(","):
+            key, separator, value = component.strip().partition("=")
+            if (
+                separator
+                and key
+                and value
+                and len(key) <= 120
+                and len(value) <= 200
+                and all(character.isalnum() or character in "._:/-" for character in key)
+            ):
+                dimensions.setdefault(key, value)
+    return dimensions
 
 
 def _object(value: object, subject: str) -> dict[str, Any]:

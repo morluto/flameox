@@ -33,10 +33,13 @@ containment must not be silently promoted to complete evidence.
 
 ## Experiments
 
-Every MCP `capture_*` capability tool accepts a discriminated `single` or `experiment` execution
-request. The CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON`.
-An experiment declares cases, blocks, seed, metric, estimand, practical threshold, and an optional
-semantic oracle. Cases are bounded and execute through the same broker as a single capture.
+MCP capture tools accept `single` execution. Capabilities whose analysis intentionally composes
+multiple artifacts also accept a discriminated `experiment` request. Single-artifact analyses do
+not advertise experiment mode and reject it during runtime preflight before a target starts. The
+CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON` when the chosen
+capability supports it. An experiment declares cases, blocks, seed, metric, estimand, practical
+threshold, and an optional semantic oracle. Cases are bounded and execute through the same broker
+as a single capture.
 
 For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
 correctness through `analyze_kernel_validation` and `analyze_kernel_compare`, checks hazards with
@@ -57,6 +60,27 @@ and candidate summaries independently, preserve them if they must survive the se
 both sources to the matching `analyze_*_compare` tool. There is no `capture_*_compare` shortcut:
 comparison requires explicit artifact identity, while experiment mode owns randomized case order
 and repeated measurements within one request.
+
+## Scaling
+
+`benchmark.scaling` is distinct from both workflows. The caller names a declared numeric benchmark
+dimension such as `elements`; Flameox groups positive measurements for each compatible benchmark
+series, averages repeated samples at each input value, and fits
+`measurement = coefficient * input ** exponent` in log space. The result reports the observed
+input range, point count, exponent, and goodness of fit. A series with fewer than two distinct
+positive input values is explicitly inconclusive rather than falling back to a generic benchmark
+summary. The fit describes the measured range; it does not establish asymptotic complexity or a
+causal performance change.
+
+## Pytest fixture work
+
+`pytest.fixtures` records fixture setup and finalizer phases without serializing fixture values.
+Each invocation retains its fixture name, scope, test identity, worker, phase outcome, and measured
+duration. Session-scoped fixtures therefore appear once per xdist worker, rather than being
+mistaken for one global invocation. Aggregate work is summed evidence and can overlap across
+workers; Flameox reports the maximum accumulated worker work separately and does not label either
+quantity as wall-clock critical-path duration. Interrupted runs preserve incomplete invocations
+instead of assigning missing finalizers a zero duration.
 
 Randomization and blocking reduce ordering and environmental bias; they do not
 make an unrepresentative workload representative. Failed and partial trials are

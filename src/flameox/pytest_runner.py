@@ -4,24 +4,9 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import importlib.util
 import os
-import sys
-from pathlib import Path
-from types import ModuleType
 
 pytest = importlib.import_module("pytest")
-
-
-def _capture_plugin() -> ModuleType:
-    path = Path(__file__).with_name("pytest_capture.py")
-    spec = importlib.util.spec_from_file_location("_flameox_pytest_capture", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Flameox pytest capture plugin could not be loaded")
-    plugin = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = plugin
-    spec.loader.exec_module(plugin)
-    return plugin
 
 
 def main() -> int:
@@ -35,7 +20,12 @@ def main() -> int:
         else parsed.pytest_arguments
     )
     os.environ["FLAMEOX_PYTEST_OUTPUT"] = parsed.output
-    return int(pytest.main(arguments, plugins=[_capture_plugin()]))
+    existing_plugins = os.environ.get("PYTEST_PLUGINS")
+    capture_plugin = "flameox.pytest_capture"
+    os.environ["PYTEST_PLUGINS"] = (
+        f"{existing_plugins},{capture_plugin}" if existing_plugins else capture_plugin
+    )
+    return int(pytest.main(arguments))
 
 
 if __name__ == "__main__":

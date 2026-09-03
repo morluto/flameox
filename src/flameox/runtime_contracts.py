@@ -91,16 +91,49 @@ class PreviewArguments(StrictModel):
     )
 
 
-class SummaryArguments(StrictModel):
+PstatsMetric = Literal[
+    "self_time_seconds",
+    "cumulative_time_seconds",
+    "total_calls",
+    "primitive_calls",
+]
+
+
+class CpuHotspotArguments(StrictModel):
+    metric: PstatsMetric | None = Field(
+        default=None,
+        description=(
+            "Ranking metric for pstats artifacts; omit for self_time_seconds. Other CPU formats "
+            "use their native fixed weight metric."
+        ),
+    )
+
+
+class CpuCallGraphArguments(StrictModel):
+    function: str | None = Field(
+        default=None,
+        description="Bound edges to function or file identities containing this text.",
+        min_length=1,
+        max_length=200,
+    )
+    direction: Literal["callers", "callees", "both"] = Field(
+        default="both",
+        description="Return callers of, callees from, or all edges touching the function filter.",
+    )
+
+
+class ScalingArguments(StrictModel):
+    input_dimension: str = Field(
+        description="Numeric benchmark dimension used as the scaling input axis.",
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    )
     metric: str | None = Field(
         default=None,
-        description="Provider-supported metric to summarize; omit for its default metric.",
-        max_length=120,
-    )
-    group_by: str | None = Field(
-        default=None,
-        description="Provider-supported dimension used to group summary rows.",
-        max_length=120,
+        description="Benchmark series to analyze; omit to analyze every compatible series.",
+        min_length=1,
+        max_length=200,
     )
 
 
@@ -152,7 +185,9 @@ class CompareArguments(StrictModel):
 ArgumentModel = type[
     EmptyArguments
     | PreviewArguments
-    | SummaryArguments
+    | CpuHotspotArguments
+    | CpuCallGraphArguments
+    | ScalingArguments
     | StaticArguments
     | WindowArguments
     | CompareArguments
@@ -293,6 +328,10 @@ class PySpyCaptureArguments(StrictModel):
     )
     native: bool = Field(
         default=False, description="Include native extension frames when supported."
+    )
+    subprocesses: bool = Field(
+        default=False,
+        description="Monitor newly created Python child processes and preserve process markers.",
     )
 
 
@@ -783,12 +822,49 @@ class Capability:
     formats: tuple[str, ...]
     model: ArgumentModel
     limitation: str = "Observed artifact contents do not by themselves prove causality."
+    minimum_sources: int = 1
+    maximum_sources: int = 1
+
+    def validate_source_count(self, count: int) -> None:
+        if self.minimum_sources <= count <= self.maximum_sources:
+            return
+        expected = (
+            str(self.minimum_sources)
+            if self.minimum_sources == self.maximum_sources
+            else f"{self.minimum_sources} to {self.maximum_sources}"
+        )
+        raise RuntimeFailure(
+            "INVALID_INPUT",
+            f"{self.id} requires {expected} analysis source(s); received {count}.",
+            details={
+                "capability_id": self.id,
+                "minimum_sources": self.minimum_sources,
+                "maximum_sources": self.maximum_sources,
+                "actual_sources": count,
+            },
+        )
 
 
 def _caps(
-    ids: Iterable[str], summary: str, formats: tuple[str, ...], model: ArgumentModel
+    ids: Iterable[str],
+    summary: str,
+    formats: tuple[str, ...],
+    model: ArgumentModel,
+    *,
+    minimum_sources: int = 1,
+    maximum_sources: int = 1,
 ) -> list[Capability]:
-    return [Capability(item, summary, formats, model) for item in ids]
+    return [
+        Capability(
+            item,
+            summary,
+            formats,
+            model,
+            minimum_sources=minimum_sources,
+            maximum_sources=maximum_sources,
+        )
+        for item in ids
+    ]
 
 
 CAPABILITIES = tuple(
@@ -805,31 +881,31 @@ CAPABILITIES = tuple(
             "rocprof-pftrace",
             "xctrace",
         ),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("trace.call_graph",),
         "Project bounded caller-callee edges from Chrome, Perfetto, or PyTorch traces.",
         ("perfetto", "chrome-trace", "pytorch"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("trace.pytorch",),
         "Summarize bounded PyTorch operator and event evidence.",
         ("perfetto", "chrome-trace", "pytorch"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("trace.operations",),
         "Summarize bounded operation timing from OTLP or Nsight Systems traces.",
         ("otlp", "nsys-rep", "nsys-parquet"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("trace.lifecycle",),
         "Summarize bounded execution lifecycle events from OTLP or Nsight Systems traces.",
         ("otlp", "nsys-rep", "nsys-parquet"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("trace.window",),
@@ -841,97 +917,117 @@ CAPABILITIES = tuple(
         ("cpu.hotspots",),
         "Rank bounded CPU evidence.",
         ("cpuprofile", "pstats", "py-spy", "perf", "perf-data"),
-        SummaryArguments,
+        CpuHotspotArguments,
+    )
+    + _caps(
+        ("cpu.callers",),
+        "Project bounded caller-callee edges from deterministic pstats evidence.",
+        ("pstats",),
+        CpuCallGraphArguments,
     )
     + _caps(
         ("memory.hotspots",),
         "Rank bounded allocation hotspots from a Memray capture.",
         ("memray",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("memory.retained",),
         "Rank bounded retained-memory evidence from a Memray capture.",
         ("memray",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("benchmark.summary",),
         "Summarize bounded benchmark latency measurements.",
         ("pyperf", "samples", "nvbench"),
-        SummaryArguments,
+        EmptyArguments,
+        maximum_sources=MAX_INPUTS,
     )
     + _caps(
         ("benchmark.scaling",),
-        "Summarize how benchmark measurements scale across declared parameters.",
+        "Estimate how benchmark measurements scale across a declared numeric input axis.",
         ("pyperf", "samples", "nvbench"),
-        SummaryArguments,
+        ScalingArguments,
+        maximum_sources=MAX_INPUTS,
     )
     + _caps(
         ("benchmark.compare",),
         "Compare compatible benchmark artifacts.",
         ("pyperf", "samples", "nvbench"),
         CompareArguments,
+        minimum_sources=2,
+        maximum_sources=MAX_INPUTS,
     )
     + _caps(
         ("inference.summary",),
         "Summarize bounded inference-export measurements.",
         ("aiperf", "vllm-benchmark", "sglang-benchmark", "mooncake-trace"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("inference.compare",),
         "Compare compatible prompt-free inference measurements.",
         ("aiperf", "vllm-benchmark", "sglang-benchmark", "mooncake-trace"),
         CompareArguments,
+        minimum_sources=2,
+        maximum_sources=MAX_INPUTS,
     )
     + _caps(
         ("gpu.launches",),
         "Summarize GPU launch evidence.",
         ("nsys-rep", "nsys-parquet"),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("gpu.kernel_metrics",),
         "Summarize GPU kernel metrics.",
         ("nsight-compute",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("triton.autotune",),
         "Summarize Triton autotune evidence.",
         ("triton",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("sanitizer.failures",),
         "Summarize Compute Sanitizer failures.",
         ("compute-sanitizer",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("kernel.validation",),
         "Summarize semantic kernel validation results.",
         ("kernel-validation",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("kernel.compare",),
         "Compare compatible kernel evidence.",
         ("kernel-validation",),
         CompareArguments,
+        minimum_sources=2,
+        maximum_sources=MAX_INPUTS,
     )
     + _caps(
         ("failures.summary",),
         "Summarize bounded reliability evidence.",
         ("pytest", "observations"),
-        SummaryArguments,
+        EmptyArguments,
+    )
+    + _caps(
+        ("pytest.fixtures",),
+        "Rank bounded pytest fixture setup and finalizer evidence.",
+        ("pytest",),
+        EmptyArguments,
     )
     + _caps(
         ("coverage.summary",),
         "Summarize native coverage.py evidence.",
         ("coverage",),
-        SummaryArguments,
+        EmptyArguments,
     )
     + _caps(
         ("static.performance_candidates",),
@@ -944,6 +1040,7 @@ CAPABILITIES = tuple(
         "Preview a bounded artifact without mutation.",
         ("json", "jsonl", "csv", "text", "parquet"),
         PreviewArguments,
+        maximum_sources=MAX_INPUTS,
     )
 )
 CAPABILITY_BY_ID = {item.id: item for item in CAPABILITIES}

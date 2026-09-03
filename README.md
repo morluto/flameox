@@ -81,11 +81,12 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 The server exposes actual evidence operations for client-side tool search instead of hiding its
 capabilities behind `discover`, `inspect`, or generic `analyze(capability_id, arguments)` calls.
-There are 24 read-only analysis tools, 17 executing capture tools, and three lifecycle tools. For
+There are 26 read-only analysis tools, 18 executing capture tools, and three lifecycle tools. For
 example:
 
 ```text
 analyze_cpu_hotspots       capture_cpu_hotspots
+analyze_cpu_callers
 analyze_gpu_launches       capture_gpu_launches
 analyze_benchmark_compare  capture_benchmark_summary
 analyze_kernel_validation  capture_sanitizer_failures

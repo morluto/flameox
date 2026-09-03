@@ -94,11 +94,23 @@ class PerfettoProvider:
             slices = [row.model_dump(mode="json") for row in response.rows]
             rows = self._project(capability_id, slices)
             slice_count = len(slices)
+        metrics: dict[str, Any] = {"slice_count": slice_count}
+        limitations = [
+            "Slice duration is inclusive and nested slices can overlap.",
+            "Trace nesting does not by itself prove causal dependence.",
+        ]
+        if capability_id == "trace.pytorch":
+            metrics = {
+                "source_slice_count": slice_count,
+                "pytorch_event_count": len(rows),
+            }
+            if not rows:
+                limitations.append("no_pytorch_activity_observed")
         return ProviderAnalysis(
             provider_id="perfetto",
             provider_version=version,
             blocks=[
-                {"type": "metrics", "values": {"slice_count": slice_count}},
+                {"type": "metrics", "values": metrics},
                 {"type": "table", "rows": rows[:max_rows]},
             ],
             rows_observed=(
@@ -107,37 +119,56 @@ class PerfettoProvider:
                 else len(rows) + int(response.truncated)
             ),
             complete=not response.truncated and len(rows) <= max_rows,
-            limitations=[
-                "Slice duration is inclusive and nested slices can overlap.",
-                "Trace nesting does not by itself prove causal dependence.",
-            ],
+            limitations=limitations,
         )
 
     @staticmethod
     def _project(capability_id: str, slices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if capability_id != "trace.call_graph":
-            return slices
-        by_id = {int(row["id"]): row for row in slices}
-        edges: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-        for row in slices:
-            parent_id = row.get("parent_id")
-            if parent_id is None or int(parent_id) not in by_id:
-                continue
-            parent = by_id[int(parent_id)]
-            aggregate = edges[(str(parent["name"]), str(row["name"]))]
-            aggregate[0] += 1
-            aggregate[1] += int(row["dur"])
-        return [
-            {
-                "parent": parent,
-                "child": child,
-                "sample_count": values[0],
-                "inclusive_duration_ns": values[1],
-            }
-            for (parent, child), values in sorted(
-                edges.items(), key=lambda item: (-item[1][1], item[0])
-            )
-        ]
+        if capability_id == "trace.call_graph":
+            by_id = {int(row["id"]): row for row in slices}
+            edges: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+            for row in slices:
+                parent_id = row.get("parent_id")
+                if parent_id is None or int(parent_id) not in by_id:
+                    continue
+                parent = by_id[int(parent_id)]
+                aggregate = edges[(str(parent["name"]), str(row["name"]))]
+                aggregate[0] += 1
+                aggregate[1] += int(row["dur"])
+            return [
+                {
+                    "parent": parent,
+                    "child": child,
+                    "sample_count": values[0],
+                    "inclusive_duration_ns": values[1],
+                }
+                for (parent, child), values in sorted(
+                    edges.items(), key=lambda item: (-item[1][1], item[0])
+                )
+            ]
+        if capability_id == "trace.pytorch":
+            rows = []
+            for row in slices:
+                name = str(row["name"])
+                category = str(row.get("category") or "").casefold()
+                if not (
+                    "pytorch" in category
+                    or "torch" in category
+                    or name.startswith(("aten::", "autograd::", "torch::", "ProfilerStep#"))
+                    or row.get("input_shapes") is not None
+                    or row.get("allocation_bytes") is not None
+                ):
+                    continue
+                event_kind = (
+                    "operator"
+                    if name.startswith(("aten::", "autograd::", "torch::"))
+                    else "profiler_step"
+                    if name.startswith("ProfilerStep#")
+                    else "runtime"
+                )
+                rows.append({"event_kind": event_kind, **row})
+            return rows
+        return slices
 
     @staticmethod
     def _binary() -> Path:

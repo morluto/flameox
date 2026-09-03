@@ -42,6 +42,39 @@ def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) ->
     assert any("no compatibility guarantee" in item for item in result["limitations"])
 
 
+def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "callers.pstats"
+
+    def leaf() -> int:
+        return sum(range(20))
+
+    def caller() -> int:
+        return leaf()
+
+    profiler = cProfile.Profile()
+    profiler.runcall(caller)
+    profiler.dump_stats(profile)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "cpu.callers",
+            [PathSource(path=str(profile), format="pstats", producer="cProfile")],
+            {"function": "leaf", "direction": "callers"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["provider"]["id"] == "python-pstats"
+    assert result["blocks"][0]["values"]["edge_count"] == 1
+    row = result["blocks"][1]["rows"][0]
+    assert row["caller_function"] == "caller"
+    assert row["callee_function"] == "leaf"
+    assert row["total_calls"] == 1
+    assert row["cumulative_time_seconds"] >= row["self_time_seconds"]
+
+
 def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
     profile = tmp_path / "profile.speedscope.json"
     profile.write_text(

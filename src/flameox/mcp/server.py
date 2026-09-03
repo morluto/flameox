@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ from flameox import __version__
 from flameox.mcp.capability_tools import (
     Execution,
     ExperimentExecution,
+    SingleExecution,
     analysis_tool_name,
     capture_provider_type,
     capture_tool_name,
@@ -53,7 +55,7 @@ CAPTURE = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=True,
     idempotent_hint=False,
-    open_world_hint=False,
+    open_world_hint=True,
 )
 PRESERVE = ToolAnnotations(
     read_only_hint=False,
@@ -185,9 +187,54 @@ class QueryOutcome(_ObjectOutcome):
     root: QueryEnvelope | ToolFailureEnvelope
 
 
+def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) -> str:
+    capability_id = value.get("capability_id")
+    if isinstance(capability_id, str):
+        coverage = value.get("coverage")
+        complete = isinstance(coverage, dict) and coverage.get("complete") is True
+        state = "complete" if complete else "bounded or incomplete"
+        continuation = value.get("continuation")
+        preserved = value.get("preserved")
+        next_action = (
+            "follow the returned evidence resource"
+            if resource is not None or isinstance(preserved, dict)
+            else "request the continuation page"
+            if isinstance(continuation, str)
+            else "preserve the session analysis if durable evidence is needed"
+        )
+        return (
+            f"{capability_id}: analysis {state}; analysis_id={value.get('analysis_id')}; "
+            f"next: {next_action}. Full bounded evidence is in structuredContent."
+        )
+    evidence_id = value.get("evidence_id")
+    if isinstance(evidence_id, str):
+        return (
+            f"Evidence {evidence_id} preserved with {value.get('artifact_count', 0)} artifact(s); "
+            "next: follow the returned evidence resource. Full details are in structuredContent."
+        )
+    if "requested_providers" in value:
+        preparation_action = value.get("next_action")
+        action = (
+            "reconnect using the returned launcher" if preparation_action else "continue capture"
+        )
+        return (
+            f"Provider preparation completed; next: {action}. "
+            "Full details are in structuredContent."
+        )
+    if "evidence" in value:
+        evidence = value.get("evidence")
+        count = len(evidence) if isinstance(evidence, list) else 0
+        action = "request the continuation page" if value.get("continuation") else "query complete"
+        return (
+            f"Found {count} evidence record(s); next: {action}. "
+            "Full details are in structuredContent."
+        )
+    return "Operation completed. Full details are in structuredContent."
+
+
 def _success(value: dict[str, Any], *, resource: ResourceLink | None = None) -> CallToolResult:
     content: list[ContentBlock] = [
-        TextContent(type="text", text=json.dumps(value, sort_keys=True, separators=(",", ":")))
+        TextContent(type="text", text=_success_summary(value, resource=resource))
     ]
     if resource is not None:
         content.append(resource)
@@ -231,8 +278,13 @@ def create_server(
             "Pass explicit artifact paths or a typed direct target. Analysis and capture are "
             "session-local unless preserve_evidence is called. If a capture reports a missing "
             "Flameox-managed provider, call prepare_providers with the complete desired provider "
-            "set and reconnect with its returned launcher. Flameox never installs host tools, "
-            "searches parent directories, accepts shell strings, or creates durable jobs."
+            "set and reconnect with its returned launcher. Profiles are exploratory: use "
+            "capture_* with execution.kind=experiment for baseline/candidate cases measured in "
+            "randomized paired blocks with a wall-clock effect and semantic oracle. Use "
+            "benchmark.scaling for measurements across a declared numeric input axis, and "
+            "analyze_*_compare for compatible native artifacts captured separately. Flameox "
+            "never installs host tools, searches parent directories, accepts shell strings, or "
+            "creates durable jobs."
         ),
         lifespan=lifespan,
     )
@@ -306,8 +358,8 @@ def create_server(
                     max_length=32,
                 ),
             ],
-            options: Any,
             ctx: Context[AnalysisRuntime],
+            options: Any = None,
             limits: Annotated[
                 RequestLimits | None,
                 Field(description="Optional bounds that may only lower the server limits."),
@@ -322,6 +374,8 @@ def create_server(
                 ),
             ] = None,
         ) -> Annotated[CallToolResult, AnalysisOutcome]:
+            if options is None:
+                options = capability.model.model_validate({})
             try:
                 return _success(
                     runtime(ctx).analyze(
@@ -339,19 +393,28 @@ def create_server(
 
         # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
         handler.__name__ = analysis_tool_name(capability)
-        minimum_sources = 2 if capability.id.endswith(".compare") else 1
         handler.__annotations__["sources"] = Annotated[
             list[Source],
             Field(
                 description="Native paths or preserved evidence artifacts to analyze.",
-                min_length=minimum_sources,
-                max_length=32,
+                min_length=capability.minimum_sources,
+                max_length=capability.maximum_sources,
             ),
         ]
         handler.__annotations__["options"] = Annotated[
             capability.model,
             Field(description=f"Options for {capability.summary.lower()}"),
         ]
+        if any(field.is_required() for field in capability.model.model_fields.values()):
+            signature = inspect.signature(handler, eval_str=True)
+            parameters = list(signature.parameters.values())
+            option_index = next(
+                index for index, parameter in enumerate(parameters) if parameter.name == "options"
+            )
+            parameters[option_index] = parameters[option_index].replace(
+                default=inspect.Parameter.empty
+            )
+            handler.__signature__ = signature.replace(parameters=parameters)  # type: ignore[attr-defined]
         return handler
 
     def capture_handler(
@@ -363,11 +426,11 @@ def create_server(
                 DirectTarget, Field(description="Process target to execute and capture.")
             ],
             provider: Any,
-            options: Any,
             execution: Annotated[
                 Execution, Field(description="Run once or execute a randomized paired experiment.")
             ],
             ctx: Context[AnalysisRuntime],
+            options: Any = None,
             limits: Annotated[
                 RequestLimits | None,
                 Field(description="Optional bounds that may only lower the server limits."),
@@ -382,6 +445,9 @@ def create_server(
                 ),
             ] = False,
         ) -> Annotated[CallToolResult, AnalysisOutcome]:
+            if options is None:
+                options = capability.model.model_validate({})
+
             async def progress(current: int, total: int, message: str) -> None:
                 await ctx.report_progress(float(current), float(total), message)
 
@@ -440,16 +506,43 @@ def create_server(
             capability.model,
             Field(description=f"Options for {capability.summary.lower()}"),
         ]
+        execution_type = Execution if capability.maximum_sources > 1 else SingleExecution
+        handler.__annotations__["execution"] = Annotated[
+            execution_type,
+            Field(
+                description=(
+                    "Run once or execute a randomized paired experiment."
+                    if capability.maximum_sources > 1
+                    else "Run once; this analysis accepts exactly one captured artifact."
+                )
+            ),
+        ]
+        if any(field.is_required() for field in capability.model.model_fields.values()):
+            signature = inspect.signature(handler, eval_str=True)
+            parameters = list(signature.parameters.values())
+            option_index = next(
+                index for index, parameter in enumerate(parameters) if parameter.name == "options"
+            )
+            parameters[option_index] = parameters[option_index].replace(
+                default=inspect.Parameter.empty
+            )
+            handler.__signature__ = signature.replace(parameters=parameters)  # type: ignore[attr-defined]
         return handler
 
     for capability in CAPABILITIES:
+        analysis_routing = (
+            " Use this for compatible native artifacts already captured separately, not for "
+            "paired baseline/candidate execution."
+            if capability.id.endswith(".compare")
+            else ""
+        )
         server.add_tool(
             analysis_handler(capability),
             name=analysis_tool_name(capability),
             title=capability.summary,
             description=(
                 f"{capability.summary} Accepts: {', '.join(capability.formats)}. "
-                f"Limitation: {capability.limitation}"
+                f"Limitation: {capability.limitation}{analysis_routing}"
             ),
             annotations=READ_ONLY,
             structured_output=True,
@@ -457,13 +550,22 @@ def create_server(
         provider_type = capture_provider_type(capability)
         if provider_type is not None:
             providers = compatible_capture_providers(capability)
+            experiment_routing = (
+                " Set execution.kind=experiment for baseline/candidate cases in randomized "
+                "paired blocks; the experiment effect is wall_time_ns and the semantic oracle "
+                "checks successful captures."
+                if capability.maximum_sources > 1
+                else ""
+            )
             server.add_tool(
                 capture_handler(capability, provider_type),
                 name=capture_tool_name(capability),
                 title=f"Capture and {capability.summary.lower()}",
                 description=(
                     f"Execute typed argv and {capability.summary.lower()} Compatible providers: "
-                    f"{', '.join(provider.id for provider in providers)}."
+                    f"{', '.join(provider.id for provider in providers)}. Flameox bounds and "
+                    "records the process but does not prevent the target's external side effects."
+                    f"{experiment_routing}"
                 ),
                 annotations=CAPTURE,
                 structured_output=True,

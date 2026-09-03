@@ -16,7 +16,7 @@ from flameox.runtime_contracts import (
 from flameox.stateless import AnalysisRuntime
 
 
-def _bundle(root: Path, samples: list[float]) -> Path:
+def _bundle(root: Path, samples: list[float], *, elements: int = 65_536) -> Path:
     root.mkdir()
     sidecar = root / "results.json-bin" / "0.bin"
     sidecar.parent.mkdir()
@@ -35,7 +35,7 @@ def _bundle(root: Path, samples: list[float]) -> Path:
                         "name": "cub.scan",
                         "states": [
                             {
-                                "name": "elements=65536",
+                                "name": f"elements={elements}",
                                 "device": 0,
                                 "is_skipped": False,
                                 "summaries": [
@@ -96,6 +96,30 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path:
         "input:results.json",
         "input:results.json-bin/0.bin",
     }
+
+
+def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:
+    sources = [
+        PathSource(
+            path=str(_bundle(tmp_path / f"size-{elements}", [duration], elements=elements)),
+            format="nvbench",
+        )
+        for elements, duration in ((10, 1.0), (20, 4.0), (40, 16.0))
+    ]
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            sources,
+            {"input_dimension": "elements", "metric": "cub.scan.sample_times"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["status"] == "estimated"
+    assert row["point_count"] == 3
+    assert row["exponent"] == pytest.approx(2.0)
 
 
 def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) -> None:
