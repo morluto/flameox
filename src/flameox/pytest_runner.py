@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 
 pytest = importlib.import_module("pytest")
 
@@ -19,13 +18,11 @@ def main() -> int:
         if parsed.pytest_arguments[:1] == ["--"]
         else parsed.pytest_arguments
     )
-    os.environ["FLAMEOX_PYTEST_OUTPUT"] = parsed.output
-    existing_plugins = os.environ.get("PYTEST_PLUGINS")
-    capture_plugin = "flameox.pytest_capture"
-    os.environ["PYTEST_PLUGINS"] = (
-        f"{existing_plugins},{capture_plugin}" if existing_plugins else capture_plugin
+    return int(
+        pytest.main(
+            ["-p", "flameox.pytest_capture", "--flameox-output", parsed.output, *arguments],
+        )
     )
-    return int(pytest.main(arguments))
 
 
 if __name__ == "__main__":

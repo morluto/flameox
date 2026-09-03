@@ -11,6 +11,7 @@ from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 _OPERATION_TABLE_PREFIXES = (
     "CUDA_API",
     "NVTX",
+    "OSRT",
     "OS_RUNTIME",
     "OPENACC",
     "OPENMP",

@@ -79,7 +79,13 @@ class PerfettoProvider:
                 artifact_path=str(path),
                 binary_path=str(binary),
                 max_rows=max_rows,
-                projection="call_graph" if capability_id == "trace.call_graph" else "slices",
+                projection=(
+                    "call_graph"
+                    if capability_id == "trace.call_graph"
+                    else "pytorch"
+                    if capability_id == "trace.pytorch"
+                    else "slices"
+                ),
             ),
             timeout_seconds=timeout_seconds,
             maximum_rss_bytes=maximum_rss_bytes,

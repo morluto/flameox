@@ -76,7 +76,11 @@ class StructuredWorkerProviders:
                     },
                     {"type": "table", "rows": [dict(row) for row in pstats_result.rows]},
                 ],
-                rows_observed=pstats_result.function_count,
+                rows_observed=(
+                    pstats_result.edge_count
+                    if capability_id == "cpu.callers"
+                    else pstats_result.function_count
+                ),
                 complete=not pstats_result.truncated,
                 limitations=list(pstats_result.limitations),
             )

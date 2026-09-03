@@ -13,7 +13,7 @@ class PerfettoExtractRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
     binary_path: str = Field(min_length=1, max_length=4_096)
     max_rows: Annotated[int, Field(gt=0, le=100_000_000)]
-    projection: Literal["slices", "call_graph"] = "slices"
+    projection: Literal["slices", "call_graph", "pytorch"] = "slices"
 
 
 class PerfettoWindowRequest(ContractModel):

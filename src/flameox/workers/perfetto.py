@@ -88,6 +88,19 @@ _CALL_GRAPH_QUERY = f"""
     LIMIT {{limit:d}}
 """
 
+_PYTORCH_QUERY = f"""
+    SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices
+    WHERE lower(coalesce(category, '')) LIKE '%pytorch%'
+       OR lower(coalesce(category, '')) LIKE '%torch%'
+       OR name LIKE 'aten::%'
+       OR name LIKE 'autograd::%'
+       OR name LIKE 'torch::%'
+       OR name LIKE 'ProfilerStep#%'
+       OR input_shapes IS NOT NULL
+       OR allocation_bytes IS NOT NULL
+    LIMIT {{limit:d}}
+"""
+
 
 def _row(row: Any, names: tuple[str, ...]) -> dict[str, object]:
     return {name: getattr(row, name) for name in names}
@@ -136,11 +149,12 @@ def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
                     ),
                     projected_total=total,
                 )
-            rows = list(
-                processor.query(
-                    f"SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices LIMIT {max_rows + 1:d}"
-                )
+            query = (
+                _PYTORCH_QUERY.format(limit=max_rows + 1)
+                if request.projection == "pytorch"
+                else f"SELECT * FROM ({_SLICE_QUERY}) AS bounded_slices LIMIT {max_rows + 1:d}"
             )
+            rows = list(processor.query(query))
             return PerfettoExtractResult(
                 truncated=len(rows) > max_rows,
                 rows=tuple(

@@ -100,6 +100,10 @@ def test_nsight_systems_trace_projections_select_semantic_table_families(
         parquetdir / "CUDA_API_TRACE.parquet",
     )
     pq.write_table(
+        pa.table({"name": ["poll"], "duration_ns": [5]}),
+        parquetdir / "OSRT_API.parquet",
+    )
+    pq.write_table(
         pa.table({"process_id": [7], "event": ["started"]}),
         parquetdir / "PROCESS_LIFECYCLE.parquet",
     )
@@ -119,9 +123,13 @@ def test_nsight_systems_trace_projections_select_semantic_table_families(
     assert {row["table"] for row in summary["blocks"][1]["rows"]} == {
         "CUDA_API_TRACE",
         "CUDA_GPU_KERN_SUM",
+        "OSRT_API",
         "PROCESS_LIFECYCLE",
     }
-    assert {row["table"] for row in operations["blocks"][1]["rows"]} == {"CUDA_API_TRACE"}
+    assert {row["table"] for row in operations["blocks"][1]["rows"]} == {
+        "CUDA_API_TRACE",
+        "OSRT_API",
+    }
     assert {row["table"] for row in lifecycle["blocks"][1]["rows"]} == {"PROCESS_LIFECYCLE"}
 
 

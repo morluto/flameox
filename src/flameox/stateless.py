@@ -90,6 +90,7 @@ from flameox.runtime_contracts import (
     ExperimentDesign,
     PathSource,
     PreviewArguments,
+    PySpyCaptureArguments,
     RequestLimits,
     RuntimeFailure,
     Source,
@@ -835,9 +836,10 @@ class AnalysisRuntime:
             return result
         cached = self.analyses[str(result["analysis_id"])]
         if target.provider_id == "py-spy":
+            py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
             process_scope = (
                 "the target and newly created Python subprocesses"
-                if bool(target.capture_arguments.get("subprocesses", False))
+                if py_spy_arguments.subprocesses
                 else "the target process only"
             )
             result["limitations"].append(

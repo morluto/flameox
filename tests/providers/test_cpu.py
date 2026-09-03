@@ -68,6 +68,7 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
 
     assert result["provider"]["id"] == "python-pstats"
     assert result["blocks"][0]["values"]["edge_count"] == 1
+    assert result["coverage"]["rows_observed"] == 1
     row = result["blocks"][1]["rows"][0]
     assert row["caller_function"] == "caller"
     assert row["callee_function"] == "leaf"

@@ -1021,6 +1021,49 @@ def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_value
 
 
 @pytest.mark.process
+def test_benchmark_scaling_keeps_non_axis_dimensions_as_distinct_series(tmp_path: Path) -> None:
+    artifact = tmp_path / "variants.samples.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "producer_version": "1.0",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(size), "dtype": dtype},
+                        "samples": [duration],
+                    }
+                    for dtype, size, duration in (
+                        ("float32", 10, 100),
+                        ("float32", 20, 400),
+                        ("float64", 10, 1_000),
+                        ("float64", 20, 2_000),
+                    )
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+
+    rows = result["blocks"][1]["rows"]
+    assert {row["dimensions"]["dtype"] for row in rows} == {"float32", "float64"}
+    assert sorted(row["exponent"] for row in rows) == pytest.approx([1.0, 2.0])
+
+
+@pytest.mark.process
 def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(
@@ -1625,6 +1668,76 @@ def test_pytest_fixture_capture_attributes_session_work_per_xdist_worker(
     assert result["provider"] == {"id": "pytest", "version": "event-stream-v2"}
 
 
+@pytest.mark.process
+def test_pytest_fixture_capture_retains_teardown_failure(tmp_path: Path) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def broken_teardown():\n"
+        "    yield\n"
+        "    raise RuntimeError('teardown failed')\n"
+    )
+    test_file = tmp_path / "test_teardown.py"
+    test_file.write_text("def test_body_passes():\n    pass\n")
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(test_file)],
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "pytest.fixtures",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    metrics = result["blocks"][0]["values"]
+    assert metrics["teardown_failure_count"] == 1
+    invocation = next(
+        row
+        for row in result["blocks"][1]["rows"]
+        if row["row_kind"] == "fixture_invocation" and row["fixture"] == "broken_teardown"
+    )
+    assert invocation["teardown_failure_reported"] is True
+    assert invocation["complete"] is False
+
+
+@pytest.mark.process
+def test_pytest_capture_does_not_instrument_nested_pytest_processes(tmp_path: Path) -> None:
+    nested = tmp_path / "test_nested.py"
+    nested.write_text("def test_nested():\n    pass\n")
+    outer = tmp_path / "test_outer.py"
+    outer.write_text(
+        "import subprocess\n"
+        "import sys\n\n"
+        "def test_outer():\n"
+        f"    completed = subprocess.run([sys.executable, '-m', 'pytest', '-q', {str(nested)!r}])\n"
+        "    assert completed.returncode == 0\n"
+    )
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(outer)],
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "failures.summary",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    assert result["blocks"][0]["values"]["collected"] == 1
+    assert result["blocks"][0]["values"]["executed"] == 1
+
+
 @pytest.mark.unit
 def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
@@ -1672,7 +1785,7 @@ def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_r
             "fixture": "database",
             "scope": "session",
             "phase": "teardown",
-            "outcome": "completed",
+            "outcome": "observed",
             "duration_ns": 5,
             "worker_id": "gw0",
             "invocation_id": "gw0:1",
@@ -1889,8 +2002,15 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path
 
 
 @pytest.mark.process
+@pytest.mark.parametrize(
+    ("subprocesses", "expected_enabled"),
+    [(True, True), ("false", False)],
+)
 def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocesses: bool | str,
+    expected_enabled: bool,
 ) -> None:
     workload_python = sys.executable
     managed_bin = tmp_path / "managed" / "bin"
@@ -1921,7 +2041,7 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
                     environment={"PATH": ""},
                     cwd=str(tmp_path),
                     provider_id="py-spy",
-                    capture_arguments={"subprocesses": True},
+                    capture_arguments={"subprocesses": subprocesses},
                 ),
                 "cpu.hotspots",
                 preserve=True,
@@ -1934,12 +2054,15 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     result, manifest = anyio.run(exercise)
     execution = result["capture"]["executions"][0]
     assert execution["capture_argv"][0] == str(managed_pyspy)
-    assert "--subprocesses" in execution["capture_argv"]
+    assert ("--subprocesses" in execution["capture_argv"]) is expected_enabled
     assert execution["status"] == "succeeded"
     assert result["provider"]["id"] == "py-spy-speedscope"
-    assert any("newly created Python subprocesses" in item for item in result["limitations"])
+    expected_scope = (
+        "newly created Python subprocesses" if expected_enabled else "target process only"
+    )
+    assert any(expected_scope in item for item in result["limitations"])
     assert manifest["body"]["capture_request"]["target"]["capture_arguments"] == {
-        "subprocesses": True
+        "subprocesses": subprocesses
     }
 
 

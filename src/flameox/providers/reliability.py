@@ -31,6 +31,7 @@ class ReliabilityProvider:
         invocations: dict[str, dict[str, Any]] = {}
         finished = False
         interrupted = False
+        teardown_failures: set[tuple[str, str]] = set()
         for index, event in self._events(path):
             event_name = event.get("event")
             if event_name == "run_finished":
@@ -38,6 +39,15 @@ class ReliabilityProvider:
                 continue
             if event_name in {"interrupted", "internal_error"}:
                 interrupted = True
+                continue
+            if (
+                event_name == "test_phase"
+                and event.get("phase") == "teardown"
+                and event.get("outcome") == "failed"
+                and isinstance(event.get("nodeid"), str)
+                and isinstance(event.get("worker_id"), str)
+            ):
+                teardown_failures.add((str(event["worker_id"]), str(event["nodeid"])))
                 continue
             if event_name != "fixture_phase":
                 continue
@@ -85,10 +95,21 @@ class ReliabilityProvider:
                 value for value in (setup_duration, teardown_duration) if isinstance(value, int)
             )
             worker_work[str(invocation["worker_id"])] += known_work
+            may_include_failed_teardown = bool(teardown_failures) and (
+                (str(invocation["worker_id"]), str(invocation["nodeid"])) in teardown_failures
+                or (
+                    str(invocation["scope"]) != "function"
+                    and any(
+                        worker_id == str(invocation["worker_id"])
+                        for worker_id, _nodeid in teardown_failures
+                    )
+                )
+            )
             complete = (
                 isinstance(setup_duration, int)
                 and isinstance(teardown_duration, int)
-                and invocation["teardown_outcome"] == "completed"
+                and invocation["teardown_outcome"] == "observed"
+                and not may_include_failed_teardown
             )
             invocation_rows.append(
                 {
@@ -96,6 +117,7 @@ class ReliabilityProvider:
                     "invocation_id": invocation_id,
                     **invocation,
                     "known_work_ns": known_work,
+                    "teardown_failure_reported": may_include_failed_teardown,
                     "complete": complete,
                 }
             )
@@ -150,6 +172,7 @@ class ReliabilityProvider:
                         "invocation_count": len(invocation_rows),
                         "worker_count": len(worker_work),
                         "incomplete_invocation_count": incomplete_count,
+                        "teardown_failure_count": len(teardown_failures),
                         "summed_fixture_work_ns": sum(worker_work.values()),
                         "max_worker_fixture_work_ns": max(worker_work.values(), default=0),
                     },
@@ -165,6 +188,8 @@ class ReliabilityProvider:
                 "critical-path measurement.",
                 "Interrupted runs retain incomplete fixture invocations instead of treating "
                 "missing finalizers as zero duration.",
+                "Pytest reports teardown failures per test rather than per fixture; affected "
+                "function fixtures and broader-scope fixtures on that worker remain incomplete.",
             ],
         )
 

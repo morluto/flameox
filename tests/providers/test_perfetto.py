@@ -12,8 +12,10 @@ from flameox.workers.perfetto_contract import PerfettoExtractResult, PerfettoSli
 class _Harness:
     def __init__(self, response: PerfettoExtractResult) -> None:
         self.response = response
+        self.requests: list[Any] = []
 
-    def run_typed_sync(self, *_args: Any, **_kwargs: Any) -> PerfettoExtractResult:
+    def run_typed_sync(self, _worker: Any, request: Any, **_kwargs: Any) -> PerfettoExtractResult:
+        self.requests.append(request)
         return self.response
 
 
@@ -57,7 +59,8 @@ def test_pytorch_projection_excludes_generic_perfetto_slices(
             _slice(3, "ProfilerStep#1", category="pytorch"),
         ),
     )
-    provider = PerfettoProvider(_Harness(response))  # type: ignore[arg-type]
+    harness = _Harness(response)
+    provider = PerfettoProvider(harness)  # type: ignore[arg-type]
     binary = tmp_path / "trace_processor"
     binary.write_bytes(b"binary")
     monkeypatch.setattr(PerfettoProvider, "_binary", staticmethod(lambda: binary))
@@ -92,6 +95,7 @@ def test_pytorch_projection_excludes_generic_perfetto_slices(
         "ProfilerStep#1",
     ]
     assert pytorch.blocks[0]["values"]["pytorch_event_count"] == 2
+    assert harness.requests[-1].projection == "pytorch"
 
 
 def test_pytorch_projection_does_not_replace_existing_call_graph_projection() -> None:

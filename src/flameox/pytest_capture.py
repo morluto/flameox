@@ -12,20 +12,30 @@ from typing import Any
 
 pytest = importlib.import_module("pytest")
 
-_OUTPUT_ENVIRONMENT = "FLAMEOX_PYTEST_OUTPUT"
 _MAX_TEXT = 4096
 _MAX_EVENT_BYTES = 64 * 1024
 _FIXTURE_INVOCATIONS = itertools.count(1)
+_output_path: Path | None = None
+_current_worker_id = "main"
+
+
+def pytest_addoption(parser: Any) -> None:
+    parser.addoption("--flameox-output", required=True, help="Flameox event stream path")
+
+
+def pytest_configure(config: Any) -> None:
+    global _current_worker_id, _output_path
+    _output_path = Path(str(config.getoption("--flameox-output")))
+    _current_worker_id = _worker_id(config)
 
 
 def _write(event: dict[str, Any]) -> None:
-    output = os.environ.get(_OUTPUT_ENVIRONMENT)
-    if output is None:
-        raise pytest.UsageError(f"{_OUTPUT_ENVIRONMENT} is required by the Flameox plugin")
+    if _output_path is None:
+        raise pytest.UsageError("--flameox-output is required by the Flameox plugin")
     encoded = (json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n").encode()
     if len(encoded) > _MAX_EVENT_BYTES:
         raise pytest.UsageError("Flameox pytest event exceeds 64 KiB")
-    destination = Path(output)
+    destination = _output_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(destination, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
@@ -62,7 +72,7 @@ def pytest_fixture_setup(fixturedef: Any, request: Any) -> Any:
                 "fixture": fixture,
                 "scope": scope,
                 "phase": "teardown",
-                "outcome": "completed" if teardown_started_ns is not None else "incomplete",
+                "outcome": "observed" if teardown_started_ns is not None else "incomplete",
                 "duration_ns": (
                     max(0, finished_ns - teardown_started_ns)
                     if teardown_started_ns is not None
@@ -138,7 +148,8 @@ def pytest_collectreport(report: Any) -> None:
 
 
 def pytest_runtest_logreport(report: Any) -> None:
-    worker = getattr(report, "worker_id", "main")
+    if _current_worker_id == "main" and hasattr(report, "worker_id"):
+        return
     _write(
         {
             "event": "test_phase",
@@ -146,7 +157,7 @@ def pytest_runtest_logreport(report: Any) -> None:
             "phase": _text(report.when),
             "outcome": _text(report.outcome),
             "duration_ns": max(0, round(report.duration * 1_000_000_000)),
-            "worker_id": _text(worker),
+            "worker_id": _current_worker_id,
         }
     )
 

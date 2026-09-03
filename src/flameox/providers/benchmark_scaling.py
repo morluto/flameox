@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -21,8 +22,10 @@ def scaling_projection(
 
     input_dimension = str(arguments["input_dimension"])
     requested_metric = arguments.get("metric")
-    series: dict[tuple[str, str], dict[float, list[float]]] = defaultdict(lambda: defaultdict(list))
-    identities: set[tuple[str, str]] = set()
+    series: dict[tuple[str, str, str], dict[float, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    identity_dimensions: dict[tuple[str, str, str], dict[str, Any]] = {}
     omitted_measurements = 0
     for row in rows:
         if row.get("is_warmup") is True:
@@ -33,10 +36,18 @@ def scaling_projection(
             continue
         if requested_metric is not None and benchmark != requested_metric:
             continue
-        identity = (benchmark, unit)
-        identities.add(identity)
         dimensions = row.get("dimensions")
         raw_input = dimensions.get(input_dimension) if isinstance(dimensions, Mapping) else None
+        non_axis_dimensions = (
+            {str(key): value for key, value in dimensions.items() if key != input_dimension}
+            if isinstance(dimensions, Mapping)
+            else {}
+        )
+        dimension_identity = json.dumps(
+            non_axis_dimensions, sort_keys=True, separators=(",", ":"), default=str
+        )
+        identity = (benchmark, unit, dimension_identity)
+        identity_dimensions[identity] = non_axis_dimensions
         value = row.get("value_int")
         if value is None:
             value = row.get("value_float")
@@ -66,16 +77,18 @@ def scaling_projection(
 
     output: list[dict[str, Any]] = []
     estimated = 0
-    for benchmark, unit in sorted(identities):
+    for identity in sorted(identity_dimensions):
+        benchmark, unit, _dimension_identity = identity
+        dimensions = identity_dimensions[identity]
         points = sorted(
-            (input_value, fmean(values))
-            for input_value, values in series[(benchmark, unit)].items()
+            (input_value, fmean(values)) for input_value, values in series[identity].items()
         )
         if len(points) < 2:
             output.append(
                 {
                     "benchmark": benchmark,
                     "unit": unit,
+                    "dimensions": dimensions,
                     "status": "inconclusive",
                     "input_dimension": input_dimension,
                     "point_count": len(points),
@@ -111,6 +124,7 @@ def scaling_projection(
             {
                 "benchmark": benchmark,
                 "unit": unit,
+                "dimensions": dimensions,
                 "status": "estimated",
                 "input_dimension": input_dimension,
                 "point_count": len(points),
@@ -146,9 +160,9 @@ def scaling_projection(
                 "values": {
                     "scaling_status": "estimated" if estimated else "inconclusive",
                     "input_dimension": input_dimension,
-                    "series_count": len(identities),
+                    "series_count": len(identity_dimensions),
                     "estimated_series_count": estimated,
-                    "inconclusive_series_count": len(identities) - estimated,
+                    "inconclusive_series_count": len(identity_dimensions) - estimated,
                 },
             },
             {"type": "table", "rows": output[:max_rows]},
