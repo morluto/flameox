@@ -66,6 +66,21 @@ provider arguments, and effective limits. They return typed observed/derived
 blocks, staged native outputs, coverage, truncation, and limitations. They never
 look up runs or mutable records.
 
+Semantic selection happens before bounding. A provider must filter for the requested projection
+before applying row, byte, or worker limits, and `rows_observed`, `complete`, and truncation must
+describe that same projected population. A bounded prefix of unrelated native rows is not evidence
+that the requested activity is absent.
+
+Projection identity includes every non-axis dimension that can distinguish a series, including
+device, dtype, variant, scope, and worker identity where applicable. Providers must not blend those
+series. When a composite native label is successfully decomposed into named dimensions, the raw
+label must not remain as a redundant identity that changes with the selected axis.
+
+Native selectors such as table families, event categories, and field names require a representative
+artifact or authoritative format fixture. Unmatched selectors stay incomplete or explicitly limited;
+they must not silently become complete negative evidence. Adding a projection also requires a
+regression check for sibling projections that share its reader or dispatch path.
+
 The runtime projects provider blocks into the RFC 8785 JSON domain before
 bounding or preservation. Native integers outside JSON's interoperable safe
 integer range are represented as exact decimal strings; they are never rounded

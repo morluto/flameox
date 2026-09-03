@@ -37,6 +37,11 @@ Provider tests use explicit native fixture paths without a repository. Optional
 tests must state the actual provider/version and skip rather than claim evidence
 when the host capability is absent.
 
+Tests for Rich or Typer human-readable output must remove ANSI styling and normalize wrapping
+whitespace before asserting a multi-token message. Prefer structured JSON assertions when that is
+the supported contract. Recovery commands that must remain readable should also be exercised at a
+narrow terminal width matching CI.
+
 ## Performance evidence
 
 Representative performance cases include 1,000-member identity accumulation,

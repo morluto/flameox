@@ -68,6 +68,11 @@ the attempted tool returns typed remediation. The separately invoked CLI setup c
 Python provider set; neither creates project state nor owns a durable operation or provider
 inventory. Host profilers, drivers, and permissions remain external and receive guidance only.
 
+Request validation is also a normalization boundary. Runtime admission constructs the typed
+capability and provider models once; execution, provenance, limitations, and result descriptions
+must consume those validated models. They must not reinterpret truthiness or coercible values from
+the caller's original mapping after admission.
+
 Direct capture is trusted local execution, not containment. Typed argv prevents
 shell interpretation, while the broker provides process-group cleanup, bounded
 output, timeouts, resource observation, and exact executable identity. Those bounds do not provide

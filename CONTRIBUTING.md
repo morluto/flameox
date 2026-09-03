@@ -72,6 +72,17 @@ Prefer a maintained public interface or an existing repository helper over a
 custom abstraction. Fix the condition that caused a defect rather than adding a
 fixture-specific workaround.
 
+For provider and projection changes, check these invariants before implementation:
+
+- apply semantic filtering before row, byte, or worker limits;
+- make `rows_observed`, `coverage.complete`, truncation, and the returned table describe the same
+  semantic population;
+- retain every dimension that distinguishes an evidence series, except an explicitly selected
+  analysis axis;
+- consume validated request models after admission rather than rereading raw mappings; and
+- exercise neighboring projections and a realistic native artifact so a new branch cannot turn
+  existing evidence into an incorrect complete result with zero rows.
+
 ## Make and test the change
 
 Use complete type annotations and Python 3.12 syntax. Ruff enforces formatting,

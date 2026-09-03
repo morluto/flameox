@@ -65,7 +65,8 @@ and repeated measurements within one request.
 
 `benchmark.scaling` is distinct from both workflows. The caller names a declared numeric benchmark
 dimension such as `elements`; Flameox groups positive measurements for each compatible benchmark
-series, averages repeated samples at each input value, and fits
+series while retaining all non-axis dimensions, averages repeated samples at each input value,
+and fits
 `measurement = coefficient * input ** exponent` in log space. The result reports the observed
 input range, point count, exponent, and goodness of fit. A series with fewer than two distinct
 positive input values is explicitly inconclusive rather than falling back to a generic benchmark
@@ -81,6 +82,12 @@ mistaken for one global invocation. Aggregate work is summed evidence and can ov
 workers; Flameox reports the maximum accumulated worker work separately and does not label either
 quantity as wall-clock critical-path duration. Interrupted runs preserve incomplete invocations
 instead of assigning missing finalizers a zero duration.
+
+The capture plugin is scoped to the owned pytest invocation and propagated through pytest arguments
+to xdist workers; it does not export plugin state that would instrument nested pytest processes.
+A completed timing callback proves only that teardown was observed. Fixture success or failure is
+combined with pytest's teardown report, and attribution that pytest cannot identify precisely
+remains incomplete rather than being reported as a successful finalizer.
 
 Randomization and blocking reduce ordering and environmental bias; they do not
 make an unrepresentative workload representative. Failed and partial trials are
