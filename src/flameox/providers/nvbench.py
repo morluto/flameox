@@ -343,6 +343,7 @@ def _state_dimensions(state: Mapping[str, Any]) -> dict[str, Any]:
         "device": state.get("device"),
         "type_config_index": state.get("type_config_index"),
     }
+    parsed_name = False
     if isinstance(name, str):
         for component in name.split(","):
             key, separator, value = component.strip().partition("=")
@@ -355,6 +356,9 @@ def _state_dimensions(state: Mapping[str, Any]) -> dict[str, Any]:
                 and all(character.isalnum() or character in "._:/-" for character in key)
             ):
                 dimensions.setdefault(key, value)
+                parsed_name = True
+    if parsed_name:
+        dimensions.pop("state")
     return dimensions
 
 
