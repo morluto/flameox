@@ -20,7 +20,7 @@ from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
-from mcp_types import TextResourceContents
+from mcp_types import TextContent, TextResourceContents
 from pydantic import ValidationError
 
 from flameox import __version__
@@ -96,6 +96,56 @@ def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_analysis_rejects_source_cardinality_before_resolving_paths(tmp_path: Path) -> None:
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "memory.hotspots",
+                [
+                    PathSource(path=str(tmp_path / "missing-a.bin"), format="memray"),
+                    PathSource(path=str(tmp_path / "missing-b.bin"), format="memray"),
+                ],
+                {},
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "INVALID_INPUT"
+    assert failure.value.details == {
+        "capability_id": "memory.hotspots",
+        "minimum_sources": 1,
+        "maximum_sources": 1,
+        "actual_sources": 2,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("capability_id", "arguments"),
+    [
+        ("failures.summary", {"group_by": "not-a-dimension"}),
+        ("cpu.hotspots", {"metric": "not-a-metric"}),
+    ],
+)
+def test_analysis_rejects_options_not_declared_by_the_capability(
+    tmp_path: Path,
+    capability_id: str,
+    arguments: dict[str, str],
+) -> None:
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(ValidationError):
+            runtime.analyze(
+                capability_id,
+                [PathSource(path=str(tmp_path / "missing.json"), format="observations")],
+                arguments,
+            )
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
 def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     tmp_path: Path,
 ) -> None:
@@ -158,6 +208,48 @@ def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path:
         finally:
             runtime.close()
         assert failure.value.code == "LIMIT_EXCEEDED"
+
+    anyio.run(exercise)
+    assert not marker.exists()
+
+
+@pytest.mark.unit
+def test_capture_rejects_experiment_unsupported_by_single_source_analysis(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "executed"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+                        cwd=str(tmp_path),
+                        provider_id="coverage",
+                    ),
+                    "coverage.summary",
+                    mode="experiment",
+                    experiment=ExperimentDesign(
+                        cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
+                        blocks=1,
+                        seed=1,
+                        metric="wall_time_ns",
+                        estimand="median_difference",
+                        practical_threshold=0,
+                    ),
+                )
+        finally:
+            runtime.close()
+
+        assert failure.value.code == "INVALID_INPUT"
+        assert failure.value.details == {
+            "capability_id": "coverage.summary",
+            "minimum_sources": 1,
+            "maximum_sources": 1,
+            "actual_sources": 2,
+        }
 
     anyio.run(exercise)
     assert not marker.exists()
@@ -758,6 +850,29 @@ def _write_benchmark_samples(path: Path, values: list[int]) -> None:
     )
 
 
+def _write_scaling_samples(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "producer_version": "1.0",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(elements)},
+                        "samples": [duration, duration],
+                    }
+                    for elements, duration in ((10, 100), (20, 400), (40, 1_600))
+                ],
+            }
+        )
+    )
+
+
 @pytest.mark.process
 def test_pyperf_summary_uses_native_isolated_reader(tmp_path: Path) -> None:
     artifact = tmp_path / "benchmark.json"
@@ -858,6 +973,97 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
 
 
 @pytest.mark.process
+def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "scaling.samples.json"
+    _write_scaling_samples(artifact)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements", "metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    metrics = result["blocks"][0]["values"]
+    assert metrics["scaling_status"] == "estimated"
+    assert metrics["input_dimension"] == "elements"
+    row = result["blocks"][1]["rows"][0]
+    assert row["benchmark"] == "operation"
+    assert row["point_count"] == 3
+    assert row["exponent"] == pytest.approx(2.0)
+    assert row["r_squared"] == pytest.approx(1.0)
+
+
+@pytest.mark.process
+def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_values(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "benchmark.json"
+    _write_pyperf_suite(artifact, [0.01, 0.02])
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="pyperf")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"]["scaling_status"] == "inconclusive"
+    assert result["blocks"][1]["rows"][0]["status"] == "inconclusive"
+    assert result["blocks"][1]["rows"][0]["exponent"] is None
+    assert any("numeric 'elements'" in item for item in result["limitations"])
+
+
+@pytest.mark.process
+def test_benchmark_scaling_keeps_non_axis_dimensions_as_distinct_series(tmp_path: Path) -> None:
+    artifact = tmp_path / "variants.samples.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "producer_version": "1.0",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(size), "dtype": dtype},
+                        "samples": [duration],
+                    }
+                    for dtype, size, duration in (
+                        ("float32", 10, 100),
+                        ("float32", 20, 400),
+                        ("float64", 10, 1_000),
+                        ("float64", 20, 2_000),
+                    )
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+
+    rows = result["blocks"][1]["rows"]
+    assert {row["dimensions"]["dtype"] for row in rows} == {"float32", "float64"}
+    assert sorted(row["exponent"] for row in rows) == pytest.approx([1.0, 2.0])
+
+
+@pytest.mark.process
 def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(
@@ -951,7 +1157,7 @@ def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> 
         composed = runtime.analyze(
             "benchmark.scaling",
             [EvidenceSource(kind="evidence", evidence_id=value) for value in evidence_ids],
-            {},
+            {"input_dimension": "elements"},
         )
         preserved = runtime.preserve_evidence(composed["analysis_id"])
         manifest = runtime.read_evidence(preserved["evidence_id"])
@@ -1132,7 +1338,7 @@ def test_native_nsight_report_uses_cached_parquetdir_export(
     assert not (tmp_path / ".flameox").exists()
 
 
-def _write_otlp_trace(path: Path) -> None:
+def _write_otlp_trace(path: Path, *, include_event: bool = False) -> None:
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
         ExportTraceServiceRequest,
     )
@@ -1148,6 +1354,10 @@ def _write_otlp_trace(path: Path) -> None:
         span.name = f"span-{index}"
         span.start_time_unix_nano = start
         span.end_time_unix_nano = start + 10
+        if include_event and index == 2:
+            event = span.events.add()
+            event.name = "checkpoint"
+            event.time_unix_nano = start + 5
     path.write_bytes(request.SerializeToString())
 
 
@@ -1196,6 +1406,40 @@ def test_otlp_window_filters_inside_isolated_parser(tmp_path: Path) -> None:
 
     span_rows = [row for row in result["blocks"][1]["rows"] if row["table"] == "spans"]
     assert [row["name"] for row in span_rows] == ["span-2"]
+
+
+@pytest.mark.process
+def test_otlp_operation_and_lifecycle_projections_are_semantically_distinct(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.otlp"
+    _write_otlp_trace(trace, include_event=True)
+    source = [PathSource(path=str(trace), format="otlp")]
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        summary = runtime.analyze("trace.summary", source, {})
+        operations = runtime.analyze("trace.operations", source, {})
+        lifecycle = runtime.analyze("trace.lifecycle", source, {})
+    finally:
+        runtime.close()
+
+    assert {row["table"] for row in summary["blocks"][1]["rows"]} >= {"spans", "events"}
+    assert [row["operation"] for row in operations["blocks"][1]["rows"]] == [
+        "span-1",
+        "span-2",
+        "span-3",
+    ]
+    assert all("total_duration_ns" in row for row in operations["blocks"][1]["rows"])
+    transitions = lifecycle["blocks"][1]["rows"]
+    assert {row["transition"] for row in transitions} == {
+        "span_started",
+        "span_event",
+        "span_ended",
+    }
+    assert (
+        next(row for row in transitions if row["transition"] == "span_event")["operation"]
+        == "checkpoint"
+    )
 
 
 @pytest.mark.unit
@@ -1367,6 +1611,133 @@ def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> 
     assert not (tmp_path / ".flameox").exists()
 
 
+@pytest.mark.process
+def test_pytest_fixture_capture_attributes_session_work_per_xdist_worker(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import time\n\n"
+        "import pytest\n\n"
+        "@pytest.fixture(scope='session', autouse=True)\n"
+        "def database():\n"
+        "    time.sleep(0.01)\n"
+        "    yield\n"
+        "    time.sleep(0.01)\n"
+    )
+    test_file = tmp_path / "test_parallel.py"
+    test_file.write_text(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('case', range(4))\n"
+        "def test_case(case):\n"
+        "    assert case >= 0\n"
+    )
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", "-n", "2", str(test_file)],
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "pytest.fixtures",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    rows = result["blocks"][1]["rows"]
+    aggregate = next(
+        row
+        for row in rows
+        if row["row_kind"] == "fixture_aggregate" and row["fixture"] == "database"
+    )
+    assert aggregate["scope"] == "session"
+    assert aggregate["invocation_count"] == 2
+    assert aggregate["worker_count"] == 2
+    assert aggregate["setup_work_ns"] > 0
+    assert aggregate["teardown_work_ns"] > 0
+    assert aggregate["incomplete_invocation_count"] == 0
+    invocations = [
+        row
+        for row in rows
+        if row["row_kind"] == "fixture_invocation" and row["fixture"] == "database"
+    ]
+    assert {row["worker_id"] for row in invocations} == {"gw0", "gw1"}
+    assert result["provider"] == {"id": "pytest", "version": "event-stream-v2"}
+
+
+@pytest.mark.process
+def test_pytest_fixture_capture_retains_teardown_failure(tmp_path: Path) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def broken_teardown():\n"
+        "    yield\n"
+        "    raise RuntimeError('teardown failed')\n"
+    )
+    test_file = tmp_path / "test_teardown.py"
+    test_file.write_text("def test_body_passes():\n    pass\n")
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(test_file)],
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "pytest.fixtures",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    metrics = result["blocks"][0]["values"]
+    assert metrics["teardown_failure_count"] == 1
+    invocation = next(
+        row
+        for row in result["blocks"][1]["rows"]
+        if row["row_kind"] == "fixture_invocation" and row["fixture"] == "broken_teardown"
+    )
+    assert invocation["teardown_failure_reported"] is True
+    assert invocation["complete"] is False
+
+
+@pytest.mark.process
+def test_pytest_capture_does_not_instrument_nested_pytest_processes(tmp_path: Path) -> None:
+    nested = tmp_path / "test_nested.py"
+    nested.write_text("def test_nested():\n    pass\n")
+    outer = tmp_path / "test_outer.py"
+    outer.write_text(
+        "import subprocess\n"
+        "import sys\n\n"
+        "def test_outer():\n"
+        f"    completed = subprocess.run([sys.executable, '-m', 'pytest', '-q', {str(nested)!r}])\n"
+        "    assert completed.returncode == 0\n"
+    )
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(outer)],
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "failures.summary",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    assert result["blocks"][0]["values"]["collected"] == 1
+    assert result["blocks"][0]["values"]["executed"] == 1
+
+
 @pytest.mark.unit
 def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
@@ -1390,6 +1761,75 @@ def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path
         runtime.close()
 
     assert result["blocks"][0]["values"]["completion"] == "interrupted"
+
+
+@pytest.mark.unit
+def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_runs(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "pytest.jsonl"
+    fixture_events = [
+        {
+            "event": "fixture_phase",
+            "fixture": "database",
+            "scope": "session",
+            "phase": "setup",
+            "outcome": "passed",
+            "duration_ns": 10,
+            "worker_id": "gw0",
+            "invocation_id": "gw0:1",
+            "nodeid": "",
+        },
+        {
+            "event": "fixture_phase",
+            "fixture": "database",
+            "scope": "session",
+            "phase": "teardown",
+            "outcome": "observed",
+            "duration_ns": 5,
+            "worker_id": "gw0",
+            "invocation_id": "gw0:1",
+            "nodeid": "",
+        },
+        {
+            "event": "fixture_phase",
+            "fixture": "database",
+            "scope": "session",
+            "phase": "setup",
+            "outcome": "passed",
+            "duration_ns": 12,
+            "worker_id": "gw1",
+            "invocation_id": "gw1:1",
+            "nodeid": "",
+        },
+        {"event": "interrupted"},
+    ]
+    events.write_text("\n".join(json.dumps(event) for event in fixture_events) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+
+    metrics = result["blocks"][0]["values"]
+    assert metrics["completion"] == "interrupted"
+    assert metrics["worker_count"] == 2
+    assert metrics["invocation_count"] == 2
+    assert metrics["incomplete_invocation_count"] == 1
+    aggregate = result["blocks"][1]["rows"][0]
+    assert aggregate == {
+        "row_kind": "fixture_aggregate",
+        "fixture": "database",
+        "scope": "session",
+        "invocation_count": 2,
+        "worker_count": 2,
+        "setup_work_ns": 22,
+        "teardown_work_ns": 5,
+        "known_work_ns": 27,
+        "incomplete_invocation_count": 1,
+    }
 
 
 @pytest.mark.unit
@@ -1562,8 +2002,15 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path
 
 
 @pytest.mark.process
+@pytest.mark.parametrize(
+    ("subprocesses", "expected_enabled"),
+    [(True, True), ("false", False)],
+)
 def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocesses: bool | str,
+    expected_enabled: bool,
 ) -> None:
     workload_python = sys.executable
     managed_bin = tmp_path / "managed" / "bin"
@@ -1585,26 +2032,38 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     managed_pyspy.chmod(0o755)
     monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
 
-    async def exercise() -> dict[str, Any]:
+    async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
-            return await runtime.capture_and_analyze(
+            result = await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[workload_python, "-c", "sum(range(100))"],
                     environment={"PATH": ""},
                     cwd=str(tmp_path),
                     provider_id="py-spy",
+                    capture_arguments={"subprocesses": subprocesses},
                 ),
                 "cpu.hotspots",
+                preserve=True,
             )
+            manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
+            return result, manifest
         finally:
             runtime.close()
 
-    result = anyio.run(exercise)
+    result, manifest = anyio.run(exercise)
     execution = result["capture"]["executions"][0]
     assert execution["capture_argv"][0] == str(managed_pyspy)
+    assert ("--subprocesses" in execution["capture_argv"]) is expected_enabled
     assert execution["status"] == "succeeded"
     assert result["provider"]["id"] == "py-spy-speedscope"
+    expected_scope = (
+        "newly created Python subprocesses" if expected_enabled else "target process only"
+    )
+    assert any(expected_scope in item for item in result["limitations"])
+    assert manifest["body"]["capture_request"]["target"]["capture_arguments"] == {
+        "subprocesses": subprocesses
+    }
 
 
 @pytest.mark.unit
@@ -1623,14 +2082,60 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
         assert {tool.name for tool in tools} == set(expected)
         assert all(tool.output_schema is not None for tool in tools)
         by_name = {tool.name: tool for tool in tools}
+        multi_source_capabilities = {
+            "artifact.preview": (1, 32),
+            "benchmark.summary": (1, 32),
+            "benchmark.scaling": (1, 32),
+            "benchmark.compare": (2, 32),
+            "inference.compare": (2, 32),
+            "kernel.compare": (2, 32),
+        }
+        for capability in CAPABILITIES:
+            source_schema = by_name[analysis_tool_name(capability)].input_schema["properties"][
+                "sources"
+            ]
+            expected_minimum, expected_maximum = multi_source_capabilities.get(
+                capability.id, (1, 1)
+            )
+            assert source_schema["minItems"] == expected_minimum
+            assert source_schema["maxItems"] == expected_maximum
+            if compatible_capture_providers(capability):
+                execution_schema = by_name[capture_tool_name(capability)].input_schema[
+                    "properties"
+                ]["execution"]
+                if expected_maximum == 1:
+                    assert execution_schema["$ref"].endswith("/SingleExecution")
+                else:
+                    assert execution_schema["discriminator"]["propertyName"] == "kind"
         analysis_schema = by_name["analyze_cpu_hotspots"].input_schema
+        cpu_options = analysis_schema["$defs"]["CpuHotspotArguments"]["properties"]
+        assert set(cpu_options) == {"metric"}
+        assert cpu_options["metric"]["anyOf"][0]["enum"] == [
+            "self_time_seconds",
+            "cumulative_time_seconds",
+            "total_calls",
+            "primitive_calls",
+        ]
+        failures_schema = by_name["analyze_failures_summary"].input_schema
+        assert failures_schema["$defs"]["EmptyArguments"]["properties"] == {}
+        assert failures_schema["properties"]["options"]["$ref"].endswith("/EmptyArguments")
         assert set(analysis_schema["properties"]) == {
             "sources",
             "options",
             "limits",
             "continuation",
         }
-        assert analysis_schema["required"] == ["sources", "options"]
+        assert analysis_schema["required"] == ["sources"]
+        assert by_name["analyze_trace_window"].input_schema["required"] == [
+            "sources",
+            "options",
+        ]
+        scaling_schema = by_name["analyze_benchmark_scaling"].input_schema
+        assert scaling_schema["required"] == ["sources", "options"]
+        assert set(scaling_schema["$defs"]["ScalingArguments"]["properties"]) == {
+            "input_dimension",
+            "metric",
+        }
         capture_schema = by_name["capture_cpu_hotspots"].input_schema
         assert set(capture_schema["properties"]) == {
             "target",
@@ -1645,12 +2150,19 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             "perf": "#/$defs/PerfProvider",
             "py-spy": "#/$defs/PySpyProvider",
         }
-        assert capture_schema["required"] == ["target", "provider", "options", "execution"]
+        assert capture_schema["required"] == ["target", "provider", "execution"]
+        assert by_name["capture_trace_window"].input_schema["required"] == [
+            "target",
+            "provider",
+            "execution",
+            "options",
+        ]
         target_schema = capture_schema["$defs"]["DirectTarget"]["properties"]
         assert "without a shell" in target_schema["argv"]["description"]
         assert "existing absolute directory" in target_schema["cwd"]["description"].lower()
         assert "minimal allowlisted environment" in target_schema["environment"]["description"]
-        experiment_schema = capture_schema["$defs"]["ExperimentDesign"]["properties"]
+        benchmark_capture = by_name["capture_benchmark_summary"].input_schema
+        experiment_schema = benchmark_capture["$defs"]["ExperimentDesign"]["properties"]
         assert "first case is the baseline" in experiment_schema["cases"]["description"]
         assert "nanoseconds" in experiment_schema["practical_threshold"]["description"]
         assert (
@@ -1672,17 +2184,44 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             by_name["analyze_benchmark_compare"].input_schema["properties"]["sources"]["minItems"]
             == 2
         )
+        assert (
+            by_name["analyze_memory_hotspots"].input_schema["properties"]["sources"]["maxItems"]
+            == 1
+        )
+        assert by_name["preview_artifact"].input_schema["properties"]["sources"]["maxItems"] == 32
+        assert (
+            by_name["analyze_benchmark_summary"].input_schema["properties"]["sources"]["maxItems"]
+            == 32
+        )
+        assert capture_schema["properties"]["execution"]["$ref"].endswith("/SingleExecution")
+        assert (
+            benchmark_capture["properties"]["execution"]["discriminator"]["propertyName"] == "kind"
+        )
         assert "capture_benchmark_compare" not in by_name
         analysis_annotations = by_name["analyze_cpu_hotspots"].annotations
         capture_annotations = by_name["capture_cpu_hotspots"].annotations
         assert analysis_annotations and analysis_annotations.read_only_hint is True
         assert capture_annotations and capture_annotations.destructive_hint is True
+        assert capture_annotations.open_world_hint is True
+        assert "external side effects" in (by_name["capture_cpu_hotspots"].description or "")
+        assert "randomized paired blocks" in (
+            by_name["capture_benchmark_summary"].description or ""
+        )
+        assert "numeric input axis" in (by_name["analyze_benchmark_scaling"].description or "")
+        assert "already captured separately" in (
+            by_name["analyze_benchmark_compare"].description or ""
+        )
         prepare = next(tool for tool in tools if tool.name == "prepare_providers")
         assert prepare.annotations and prepare.annotations.open_world_hint is True
         assert prepare.annotations.read_only_hint is False
         assert prepare.annotations.destructive_hint is False
+        capture_names = {
+            capture_tool_name(capability)
+            for capability in CAPABILITIES
+            if compatible_capture_providers(capability)
+        }
         assert all(
-            tool.annotations and tool.annotations.open_world_hint is False
+            tool.annotations and tool.annotations.open_world_hint is (tool.name in capture_names)
             for tool in tools
             if tool.name != "prepare_providers"
         )
@@ -1774,6 +2313,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             )
 
         assert result.is_error is False
+        assert len(result.content) == 1
+        assert isinstance(result.content[0], TextContent)
+        assert "Provider preparation completed" in result.content[0].text
+        assert "requested_providers" not in result.content[0].text
         assert result.structured_content["requested_providers"] == [
             "memray",
             "nsight-compute",
@@ -1837,7 +2380,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             artifact.write_text('[{"value":1}]')
             inspected = await session.call_tool(
                 "preview_artifact",
-                {"sources": [{"kind": "path", "path": str(artifact)}], "options": {}},
+                {"sources": [{"kind": "path", "path": str(artifact)}]},
             )
             invalid = await session.call_tool(
                 "preview_artifact", {"sources": [], "options": {}, "unexpected": True}
@@ -1850,7 +2393,6 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
                         "cwd": str(tmp_path),
                     },
                     "provider": {"kind": "direct"},
-                    "options": {},
                     "execution": {"kind": "single"},
                 },
             )
@@ -1858,7 +2400,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 44
+        assert len(tools.tools) == 47
         assert "preview_artifact" in [tool.name for tool in tools.tools]
         assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)

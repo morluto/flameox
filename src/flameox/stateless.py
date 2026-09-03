@@ -84,11 +84,13 @@ from flameox.runtime_contracts import (
     Capability,
     CaptureArguments,
     CaptureTarget,
+    CpuHotspotArguments,
     EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
     PathSource,
     PreviewArguments,
+    PySpyCaptureArguments,
     RequestLimits,
     RuntimeFailure,
     Source,
@@ -302,6 +304,7 @@ class AnalysisRuntime:
         capability = CAPABILITY_BY_ID.get(capability_id)
         if capability is None:
             raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {capability_id}")
+        capability.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         validated = TypeAdapter(capability.model).validate_python(arguments)
         resolved = self._resolve_sources(sources, selected_limits)
@@ -311,6 +314,20 @@ class AnalysisRuntime:
             )
         ):
             raise RuntimeFailure("UNSUPPORTED_FORMAT", f"Unsupported format: {bad}")
+        if (
+            isinstance(validated, CpuHotspotArguments)
+            and validated.metric is not None
+            and any(item.format != "pstats" for item in resolved)
+        ):
+            raise RuntimeFailure(
+                "INVALID_INPUT",
+                "cpu.hotspots metric selection is supported only for pstats artifacts",
+                details={
+                    "capability_id": capability.id,
+                    "option": "metric",
+                    "accepted_formats": ["pstats"],
+                },
+            )
         identity = {
             "capability_id": capability_id,
             "inputs": [
@@ -493,6 +510,7 @@ class AnalysisRuntime:
                     f"the limit is {MAX_INPUTS}."
                 ),
             )
+        capability.validate_source_count(source_count)
         return ValidatedCaptureRequest(
             capability=capability,
             capture_arguments=capture_arguments,
@@ -817,6 +835,17 @@ class AnalysisRuntime:
             result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
             return result
         cached = self.analyses[str(result["analysis_id"])]
+        if target.provider_id == "py-spy":
+            py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
+            process_scope = (
+                "the target and newly created Python subprocesses"
+                if py_spy_arguments.subprocesses
+                else "the target process only"
+            )
+            result["limitations"].append(
+                f"py-spy sampled {process_scope}; sampled stacks are not complete process-tree "
+                "execution evidence."
+            )
         cached.sources = captured
         cached.manifest_body["capture_request"] = {
             "target": target.model_dump(mode="json"),
@@ -1672,10 +1701,15 @@ class AnalysisRuntime:
                 len(sources) == 1
                 and sources[0].format in {"pytest", "observations"}
                 and capability_id
-                in {"failures.summary", "coverage.summary", "static.performance_candidates"}
+                in {
+                    "failures.summary",
+                    "pytest.fixtures",
+                    "coverage.summary",
+                    "static.performance_candidates",
+                }
             ):
                 return self.reliability.analyze(
-                    sources[0].path, sources[0].format, max_rows=max_rows
+                    capability_id, sources[0].path, sources[0].format, max_rows=max_rows
                 )
             if (
                 len(sources) == 1

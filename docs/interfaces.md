@@ -10,12 +10,12 @@ search/inspect protocol in front of its operations. A caller that knows the evid
 invoke its tool directly; an unfamiliar caller relies on the MCP client's ordinary tool search and
 then receives the selected tool's complete schema.
 
-There are exactly 44 tools:
+There are exactly 47 tools:
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
-| Existing-artifact analysis | 24 | `analyze_cpu_hotspots`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_kernel_validation`, `preview_artifact` | Read-only and idempotent. |
-| Capture and immediate analysis | 17 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_sanitizer_failures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
+| Existing-artifact analysis | 26 | `analyze_cpu_hotspots`, `analyze_cpu_callers`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_pytest_fixtures`, `preview_artifact` | Read-only and idempotent. |
+| Capture and immediate analysis | 18 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 3 | `prepare_providers`, `preserve_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
 The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
@@ -23,14 +23,32 @@ registration API. The SDK derives each top-level input schema directly from the 
 A generated analysis tool has `sources`, capability-specific typed `options`, optional lowered
 `limits`, and an optional `continuation`. A generated capture tool has `target`, a discriminated
 `provider` union containing only compatible capture providers, capability-specific typed `options`,
-an explicit `single` or `experiment` execution union, optional lowered `limits`, and optional
-`preserve`. There is no extra request envelope and there are no free-form provider or analysis
-argument objects.
+an explicit execution model, optional lowered `limits`, and optional `preserve`. Capabilities that
+can analyze the multiple artifacts produced by paired cases expose the `single` or `experiment`
+union; single-artifact analyses expose only `single`. There is no extra request envelope and there
+are no free-form provider or analysis argument objects.
 
 Field descriptions are part of the public MCP contract. Shared source, target, limit, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
 runtime validation, and every generated capability tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
+
+Successful calls keep the complete validated result in `structuredContent`. Their text block is a
+short compatibility summary with the capability, completion or truncation state, session handle,
+and next action; it does not serialize the evidence tables a second time. Content-only clients can
+still identify the outcome and recovery path, while structured clients retain the authoritative
+bounded evidence. Preserved results also return a resource link.
+
+Each capability declaration also owns its accepted source cardinality. MCP encodes that range in
+the generated `sources` schema, and the runtime checks the same range before resolving paths or
+starting capture. Single-artifact summaries require exactly one source, comparison operations
+require at least two, and only intentional aggregations accept a larger bounded collection.
+
+`options` is optional when the capability model can be constructed entirely from documented
+defaults, including operations whose option model is empty. It remains required when omission
+would leave the request incomplete, such as the start and end bounds for `trace.window`. Unknown
+fields are rejected rather than ignored, and pstats CPU metrics use a closed vocabulary in the
+generated schema.
 
 For example, a single Nsight Compute capture for kernel metrics has this argument shape:
 
@@ -70,9 +88,11 @@ metrics and rows remain open JSON values. Success uses structured content direct
 details. MCP SDK argument-validation errors occur before tool execution and therefore use the
 protocol error shape rather than the tool's output schema.
 
-`prepare_providers` is the only open-world tool. It resolves the exact package requirement through
-`uvx`, verifies that environment by running Flameox's version command, and returns the same
-requirement in a global, version-pinned MCP launcher. The request names the complete managed
+`prepare_providers` and the capture tools are open-world. Preparation resolves the exact package
+requirement through `uvx`, verifies that environment by running Flameox's version command, and
+returns the same requirement in a global, version-pinned MCP launcher. Capture tools execute an
+explicit caller-supplied target that may itself access external services. The request names the
+complete managed
 provider set; Flameox keeps no installed-provider inventory or setup receipt. System profilers,
 drivers, device access, and OS permissions remain external requirements. Flameox returns guidance
 for them but does not invoke a system package manager or elevate privileges. Preparation creates no

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from flameox import __version__
@@ -250,7 +251,7 @@ def test_setup_without_a_tty_requires_an_explicit_client(tmp_path: Path) -> None
 
     assert result.exit_code == 2
     assert "No MCP client selected" in result.output
-    assert "--client codex --yes" in result.output
+    assert "--client codex --yes" in " ".join(unstyle(result.output).split())
     assert not (tmp_path / "flameox-data").exists()
 
 

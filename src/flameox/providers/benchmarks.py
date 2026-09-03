@@ -5,6 +5,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.benchmark_samples_contract import (
     BENCHMARK_SAMPLES_WORKER,
@@ -40,6 +41,7 @@ class BenchmarkProvider:
             return self._structured_samples(
                 paths,
                 compare_arguments=arguments if capability_id == "benchmark.compare" else None,
+                scaling_arguments=arguments if capability_id == "benchmark.scaling" else None,
                 max_rows=max_rows,
                 timeout_seconds=timeout_seconds,
                 maximum_rss_bytes=maximum_rss_bytes,
@@ -59,6 +61,19 @@ class BenchmarkProvider:
         ]
         if capability_id == "benchmark.compare":
             return self._compare(parsed, arguments, max_rows=max_rows)
+        if capability_id == "benchmark.scaling":
+            if any(result.truncated for result in parsed):
+                raise ProviderFailure(
+                    "LIMIT_EXCEEDED",
+                    "benchmark.scaling requires complete samples; raise the startup row limit",
+                )
+            return scaling_projection(
+                [dict(row) for result in parsed for row in result.rows],
+                arguments,
+                provider_id="pyperf",
+                provider_version=parsed[0].reader_version,
+                max_rows=max_rows,
+            )
         rows: list[dict[str, Any]] = []
         observed = 0
         limitations: list[str] = []
@@ -95,6 +110,7 @@ class BenchmarkProvider:
         paths: Sequence[Path],
         *,
         compare_arguments: Mapping[str, Any] | None,
+        scaling_arguments: Mapping[str, Any] | None,
         max_rows: int,
         timeout_seconds: float,
         maximum_rss_bytes: int,
@@ -122,6 +138,19 @@ class BenchmarkProvider:
                 max_rows=max_rows,
                 provider_id="benchmark-samples",
                 provider_version="flameox.benchmark-samples.v1",
+            )
+        if scaling_arguments is not None:
+            if any(item.truncated for item in parsed):
+                raise ProviderFailure(
+                    "LIMIT_EXCEEDED",
+                    "benchmark.scaling requires complete samples; raise the startup row limit",
+                )
+            return scaling_projection(
+                [dict(row) for result in parsed for row in result.rows],
+                scaling_arguments,
+                provider_id="benchmark-samples",
+                provider_version="flameox.benchmark-samples.v1",
+                max_rows=max_rows,
             )
         rows: list[dict[str, Any]] = []
         limitations: list[str] = []
