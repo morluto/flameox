@@ -150,6 +150,7 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
     sample_count = 0
     total_sampled_bytes = 0
     node_ids: set[int] = set()
+    sample_node_ids: set[int] = set()
     node_stack: list[dict[str, Any]] = []
     sample: dict[str, Any] | None = None
     with path.open("rb") as stream:
@@ -206,8 +207,7 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 sample_node_id = _strict_int(sample.get("nodeId"), "sample node id")
                 if size < 0:
                     _malformed("V8 heap sample size cannot be negative.")
-                if sample_node_id not in node_ids:
-                    _malformed("V8 heap sample references an unknown node.")
+                sample_node_ids.add(sample_node_id)
                 total_sampled_bytes += size
                 sample_count += 1
                 sample = None
@@ -241,6 +241,8 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 node_count += 1
     if node_stack or sample is not None:
         _malformed("V8 heap profile contains an incomplete object.")
+    if not sample_node_ids.issubset(node_ids):
+        _malformed("V8 heap sample references an unknown node.")
     frames, measurements, truncated = _bounded_profile_rows(request, frame_rows, aggregates)
     return V8ProfileResult(
         profile_kind="heap",

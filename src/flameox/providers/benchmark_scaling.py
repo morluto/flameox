@@ -48,8 +48,8 @@ def scaling_projection(
         )
         identity = (benchmark, unit, dimension_identity)
         identity_dimensions[identity] = non_axis_dimensions
-        sample_sum = row.get("sample_sum")
-        sample_count = row.get("sample_count")
+        sample_sum = row.get("positive_sample_sum", row.get("sample_sum"))
+        sample_count = row.get("positive_sample_count", row.get("sample_count"))
         value = row.get("value_int") if sample_sum is None else sample_sum
         if value is None:
             value = row.get("value_float")

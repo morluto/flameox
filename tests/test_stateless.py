@@ -32,11 +32,12 @@ from flameox.mcp.capability_tools import (
     capture_tool_name,
 )
 from flameox.providers.contracts import ProviderAnalysis
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository, RepositoryError
 from flameox.runtime_contracts import (
     CAPABILITIES,
     MAX_ROWS,
     CaptureTarget,
+    CompareArguments,
     EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
@@ -49,6 +50,38 @@ from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 from flameox.stateless import AnalysisRuntime
 from flameox.workers.v8_profiles_contract import V8_PROFILE_WORKER, V8ProfileRequest
+
+
+@pytest.mark.unit
+def test_compare_metric_rejects_empty_value_at_public_contract() -> None:
+    with pytest.raises(ValidationError):
+        CompareArguments(metric="")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [("argv", [{}]), ("environment", {"NAME": 1})],
+)
+def test_repository_rejects_invalid_nested_capture_target(field: str, invalid: Any) -> None:
+    target: dict[str, Any] = {
+        "argv": ["python"],
+        "cwd": "/workspace",
+        "environment": {},
+        "provider_id": "direct",
+        "capture_arguments": {},
+        "analysis_arguments": {},
+    }
+    request: dict[str, Any] = {
+        "target": target,
+        "mode": "single",
+        "experiment": None,
+        "executions": [],
+    }
+    target[field] = invalid
+
+    with pytest.raises(RepositoryError):
+        EvidenceRepository._validate_capture_request(request)
 
 
 @pytest.mark.unit
@@ -1490,6 +1523,45 @@ def test_benchmark_scaling_aggregates_beyond_the_sample_row_ceiling(tmp_path: Pa
 
 
 @pytest.mark.process
+def test_benchmark_scaling_excludes_nonpositive_samples_from_series_aggregates(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "scaling.samples.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(elements)},
+                        "samples": samples,
+                    }
+                    for elements, samples in ((10, [10, -10]), (20, [40, -1]))
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements", "metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["point_count"] == 2
+    assert row["exponent"] == pytest.approx(2.0)
+
+
+@pytest.mark.process
 def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_values(
     tmp_path: Path,
 ) -> None:
@@ -2397,6 +2469,31 @@ def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_pytest_rerun_outcome_is_flaky_attempt(tmp_path: Path) -> None:
+    events = tmp_path / "pytest.jsonl"
+    payloads = [
+        {"event": "test_collected", "nodeid": "test_flaky"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "setup", "outcome": "passed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "rerun"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "passed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "teardown", "outcome": "passed"},
+        {"event": "run_finished", "exitstatus": 0},
+    ]
+    events.write_text("\n".join(json.dumps(event) for event in payloads) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"]["flaky"] == 1
+    assert result["blocks"][1]["rows"][0]["classification"] == "flaky"
+    assert result["blocks"][1]["rows"][0]["failing_phase"] == "call"
+
+
+@pytest.mark.unit
 def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_runs(
     tmp_path: Path,
 ) -> None:
@@ -2900,6 +2997,32 @@ def test_mcp_analysis_does_not_expose_unexpected_exception_details(
         assert result.structured_content["code"] == "DECODE_FAILURE"
         assert result.structured_content["message"] == "Input could not be read during analysis."
         assert secret_path not in json.dumps(result.structured_content)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.unit
+def test_mcp_analysis_wraps_unexpected_provider_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("private provider state")
+
+    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            result = await client.call_tool(
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(tmp_path / "input.json")}]},
+            )
+
+        assert result.is_error is True
+        assert result.structured_content["code"] == "ANALYSIS_FAILURE"
+        assert result.structured_content["message"] == "Analysis failed unexpectedly."
+        assert "private provider state" not in json.dumps(result.structured_content)
 
     anyio.run(exercise)
 

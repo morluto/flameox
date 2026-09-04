@@ -74,7 +74,15 @@ def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
     assert "private endpoint" not in json.dumps(summary)
     assert comparison["blocks"][1]["rows"][0]["ratio"] == 2.0
     assert comparison["blocks"][1]["rows"][0]["compatibility"] == "partial"
-    assert comparison["blocks"][1]["rows"][0]["identity_unavailable"] == ["system"]
+    assert comparison["blocks"][1]["rows"][0]["identity_unavailable"] == [
+        "system.backend",
+        "system.model",
+        "system.tokenizer",
+        "workload.dataset_name",
+        "workload.max_concurrency",
+        "workload.num_prompts",
+        "workload.request_rate",
+    ]
 
 
 def test_inference_compare_rejects_known_differences_unless_explicit(tmp_path: Path) -> None:
@@ -107,13 +115,41 @@ def test_inference_compare_rejects_known_differences_unless_explicit(tmp_path: P
         runtime.close()
 
     assert failure.value.code == "INVALID_INPUT"
-    assert failure.value.details == {"differing_fields": ["system", "workload"]}
+    assert failure.value.details == {"differing_fields": ["system.model", "workload.dataset_name"]}
     row = exploratory["blocks"][1]["rows"][0]
     assert row["ratio"] == 2.0
     assert row["compatibility"] == "heterogeneous"
-    assert set(row["identity_differences"]) == {"system", "workload"}
+    assert set(row["identity_differences"]) == {"system.model", "workload.dataset_name"}
     assert "model-a" not in json.dumps(exploratory)
     assert "model-b" not in json.dumps(exploratory)
+
+
+def test_inference_compare_treats_one_sided_optional_identity_as_partial(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    baseline_payload = _vllm_payload(throughput=5.0)
+    baseline_payload["model"] = "model-a"
+    candidate_payload = _vllm_payload(throughput=10.0)
+    candidate_payload.update({"model": "model-a", "backend": "ray"})
+    baseline.write_text(json.dumps(baseline_payload))
+    candidate.write_text(json.dumps(candidate_payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "inference.compare",
+            [
+                PathSource(path=str(baseline), format="vllm-benchmark"),
+                PathSource(path=str(candidate), format="vllm-benchmark"),
+            ],
+            {"metric": "vllm.request_throughput"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["compatibility"] == "partial"
+    assert row["identity_differences"] == {}
+    assert "system.backend" in row["identity_unavailable"]
 
 
 def test_sglang_rejects_detailed_output_and_projects_scalars(tmp_path: Path) -> None:

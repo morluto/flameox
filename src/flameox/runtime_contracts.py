@@ -172,6 +172,7 @@ class CompareArguments(StrictModel):
     metric: str | None = Field(
         default=None,
         description="Metric to compare; omit for the capability's default metric.",
+        min_length=1,
         max_length=120,
     )
     baseline_index: int = Field(

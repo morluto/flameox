@@ -7,7 +7,7 @@ import anyio
 import pytest
 
 from flameox.providers.capture import CAPTURE_BUILDERS
-from flameox.runtime_contracts import CAPTURE_PROVIDER_CONTRACTS, CaptureTarget
+from flameox.runtime_contracts import CAPTURE_PROVIDER_CONTRACTS, CaptureTarget, PathSource
 from flameox.stateless import AnalysisRuntime
 
 
@@ -71,3 +71,21 @@ name = next(
     assert capture_argv[1] == "--heap-prof"
     assert any(value == "--heap-prof-name=profile.heapprofile" for value in capture_argv)
     assert result["provider"]["id"] == "v8-heap-profile"
+
+
+def test_heap_profile_accepts_samples_before_referenced_nodes(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.heapprofile"
+    profile.write_text(
+        '{"samples":[{"size":128,"nodeId":1}],"head":'
+        '{"callFrame":{"functionName":"work","url":"app.js",'
+        '"lineNumber":0,"columnNumber":0},"selfSize":128,"id":1,"children":[]}}'
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "memory.hotspots", [PathSource(path=str(profile), format="heapprofile")], {}
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"]["sample_count"] == 1

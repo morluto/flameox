@@ -18,7 +18,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from flameox.canonical import canonical_bytes
-from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN
+from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN, CaptureTarget, ExperimentDesign
 
 REPOSITORY_FORMAT = "1"
 EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=1"
@@ -728,15 +728,104 @@ class EvidenceRepository:
             return
         if not isinstance(value, dict):
             raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        if set(value) != {"target", "mode", "experiment", "executions"}:
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
         target = value.get("target")
         executions = value.get("executions")
+        try:
+            CaptureTarget.model_validate(target)
+            experiment = value.get("experiment")
+            if experiment is not None:
+                ExperimentDesign.model_validate(experiment)
+        except (TypeError, ValueError) as error:
+            raise RepositoryError(
+                "REPOSITORY_CORRUPTION", "Evidence capture request is invalid."
+            ) from error
+        if value.get("mode") not in {"single", "experiment"} or not isinstance(executions, list):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        for execution in executions:
+            EvidenceRepository._validate_capture_execution(execution)
+
+    @staticmethod
+    def _validate_capture_execution(value: Any) -> None:
+        fields = {
+            "case",
+            "block",
+            "argv",
+            "capture_argv",
+            "cwd",
+            "returncode",
+            "status",
+            "failure_code",
+            "missing_artifact_roles",
+            "semantic_oracle",
+            "wall_time_ns",
+            "containment",
+            "limit",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        argv_fields = (value.get("argv"), value.get("capture_argv"))
+        missing_roles = value.get("missing_artifact_roles")
+        scalar_valid = (
+            isinstance(value.get("case"), str)
+            and type(value.get("block")) is int
+            and value["block"] >= 1
+            and isinstance(value.get("cwd"), str)
+            and Path(value["cwd"]).is_absolute()
+            and (value.get("returncode") is None or type(value["returncode"]) is int)
+            and value.get("status") in {"pending", "succeeded", "failed"}
+            and (value.get("failure_code") is None or isinstance(value["failure_code"], str))
+            and (value.get("wall_time_ns") is None or type(value["wall_time_ns"]) is int)
+            and isinstance(value.get("containment"), str)
+        )
         if (
-            not isinstance(target, dict)
-            or not isinstance(target.get("provider_id"), str)
-            or not isinstance(target.get("argv"), list)
-            or not isinstance(target.get("environment"), dict)
-            or not isinstance(executions, list)
-            or any(not isinstance(item, dict) for item in executions)
+            not scalar_valid
+            or any(
+                not isinstance(argv, list)
+                or not argv
+                or any(not isinstance(item, str) or not item or "\x00" in item for item in argv)
+                for argv in argv_fields
+            )
+            or not isinstance(missing_roles, list)
+            or any(not isinstance(role, str) or not role for role in missing_roles)
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        limit = value.get("limit")
+        if limit is not None and (
+            not isinstance(limit, dict)
+            or set(limit)
+            != {"kind", "configured", "observed", "unit", "observation_available", "recovery"}
+            or not isinstance(limit.get("kind"), str)
+            or not isinstance(limit.get("configured"), int | float)
+            or isinstance(limit.get("configured"), bool)
+            or (
+                limit.get("observed") is not None
+                and (
+                    not isinstance(limit["observed"], int | float)
+                    or isinstance(limit["observed"], bool)
+                )
+            )
+            or not isinstance(limit.get("unit"), str)
+            or type(limit.get("observation_available")) is not bool
+            or not isinstance(limit.get("recovery"), str)
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        oracle = value.get("semantic_oracle")
+        if oracle is not None and (
+            not isinstance(oracle, dict)
+            or set(oracle) != {"argv", "returncode", "status", "failure_code"}
+            or not isinstance(oracle.get("argv"), list)
+            or not oracle["argv"]
+            or any(
+                not isinstance(item, str) or not item or "\x00" in item for item in oracle["argv"]
+            )
+            or (oracle.get("returncode") is not None and type(oracle["returncode"]) is not int)
+            or oracle.get("status") not in {"passed", "failed"}
+            or (
+                oracle.get("failure_code") is not None
+                and not isinstance(oracle["failure_code"], str)
+            )
         ):
             raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
 

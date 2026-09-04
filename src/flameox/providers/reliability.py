@@ -329,9 +329,12 @@ class ReliabilityProvider:
 
     @staticmethod
     def _pytest_classification(reports: dict[str, str]) -> str:
-        if reports.get("setup") == "failed" or reports.get("teardown") == "failed":
+        if reports.get("setup") in {"failed", "rerun"} or reports.get("teardown") in {
+            "failed",
+            "rerun",
+        }:
             return "errored"
-        if reports.get("call") == "failed":
+        if reports.get("call") in {"failed", "rerun"}:
             return "failed"
         if "skipped" in reports.values():
             return "skipped"
@@ -348,13 +351,16 @@ class ReliabilityProvider:
         }
         outcomes = {phase: values[-1] for phase, values in attempts.items()}
         classification = cls._pytest_classification(outcomes)
-        if classification == "passed" and any("failed" in values for values in attempts.values()):
+        failed_attempts = {"failed", "rerun"}
+        if classification == "passed" and any(
+            failed_attempts.intersection(values) for values in attempts.values()
+        ):
             classification = "flaky"
         failing_phase = next(
             (
                 phase
                 for phase in ("setup", "call", "teardown")
-                if "failed" in attempts.get(phase, [])
+                if failed_attempts.intersection(attempts.get(phase, []))
             ),
             None,
         )

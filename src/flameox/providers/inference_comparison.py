@@ -3,10 +3,28 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from flameox.canonical import canonical_bytes
+from flameox.canonical import canonical_bytes, digest_model
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 type Compatibility = Literal["compatible", "partial", "heterogeneous"]
+
+
+def field_identities(
+    groups: Mapping[str, tuple[Mapping[str, Any], Sequence[str]]],
+) -> tuple[dict[str, str], list[str]]:
+    """Digest identity fields independently so absent metadata remains distinguishable."""
+    identity: dict[str, str] = {}
+    unavailable: list[str] = []
+    for group, (values, fields) in groups.items():
+        for field in fields:
+            name = f"{group}.{field}"
+            if field not in values:
+                unavailable.append(name)
+                continue
+            identity[name] = digest_model(
+                {field: values[field]}, projection=f"flameox.inference.{name}/v1"
+            )
+    return identity, unavailable
 
 
 def comparison_identity(analysis: ProviderAnalysis) -> tuple[dict[str, Any], set[str]]:

@@ -71,10 +71,15 @@ def _handle(request: PyperfWorkerRequest, _job_root: Path) -> PyperfWorkerResult
                                 "is_warmup": False,
                                 "sample_sum": 0.0,
                                 "sample_count": 0,
+                                "positive_sample_sum": 0.0,
+                                "positive_sample_count": 0,
                             }
                             series_rows[key] = aggregate
                         aggregate["sample_sum"] += float(normalized_value)
                         aggregate["sample_count"] += 1
+                        if normalized_value > 0:
+                            aggregate["positive_sample_sum"] += float(normalized_value)
+                            aggregate["positive_sample_count"] += 1
                     continue
                 if len(rows) < request.max_rows:
                     rows.append(

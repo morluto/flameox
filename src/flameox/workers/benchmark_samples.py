@@ -68,6 +68,9 @@ def _series_row(series: BenchmarkSeries, *, series_index: int) -> dict[str, Any]
     row["value_float"] = None
     row["sample_sum"] = sum(series.samples)
     row["sample_count"] = len(series.samples)
+    positive_samples = [value for value in series.samples if value > 0]
+    row["positive_sample_sum"] = sum(positive_samples)
+    row["positive_sample_count"] = len(positive_samples)
     return row
 
 

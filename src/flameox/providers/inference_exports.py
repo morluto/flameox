@@ -10,9 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from flameox.canonical import canonical_bytes, digest_model, sha256_id
+from flameox.canonical import canonical_bytes, sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
-from flameox.providers.inference_comparison import assess_comparison
+from flameox.providers.inference_comparison import assess_comparison, field_identities
 
 _VLLM_MAX_BYTES = 16 * 1024 * 1024
 _SGLANG_MAX_BYTES = 1024 * 1024
@@ -225,10 +225,13 @@ class InferenceExportProvider:
                 "num_prompts",
             ),
         )
-        system = {
-            name: observed[name]
-            for name in ("model", "served_model_name", "tokenizer", "backend")
-            if name in observed
+        system: dict[str, Any] = {
+            **(
+                {"model": observed.get("model", observed.get("served_model_name"))}
+                if "model" in observed or "served_model_name" in observed
+                else {}
+            ),
+            **{name: observed[name] for name in ("tokenizer", "backend") if name in observed},
         }
         workload: dict[str, Any] = {
             "total_requests": document.total_requests,
@@ -241,16 +244,24 @@ class InferenceExportProvider:
                 if name in observed
             },
         }
-        comparison_identity = {
-            "workload": digest_model(workload, projection="flameox.inference.workload/v1")
-        }
-        unavailable: list[str] = []
-        if system:
-            comparison_identity["system"] = digest_model(
-                system, projection="flameox.inference.system/v1"
-            )
-        else:
-            unavailable.append("system")
+        comparison_identity, unavailable = field_identities(
+            {
+                "system": (system, ("model", "tokenizer", "backend")),
+                "workload": (
+                    workload,
+                    (
+                        "total_requests",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "time_scale",
+                        "dataset_name",
+                        "request_rate",
+                        "max_concurrency",
+                        "num_prompts",
+                    ),
+                ),
+            }
+        )
         rows: list[dict[str, Any]] = []
 
         def add(name: str, value: int | float | None, unit: str, aggregation: str) -> None:
@@ -365,7 +376,7 @@ class InferenceExportProvider:
                 "max_concurrency",
             ),
         )
-        system = {
+        system: dict[str, Any] = {
             name: observed[name] for name in ("model", "tokenizer", "backend") if name in observed
         }
         workload: dict[str, Any] = {
@@ -386,16 +397,24 @@ class InferenceExportProvider:
                 if name in observed
             }
         )
-        comparison_identity = {
-            "workload": digest_model(workload, projection="flameox.inference.workload/v1")
-        }
-        unavailable: list[str] = []
-        if system:
-            comparison_identity["system"] = digest_model(
-                system, projection="flameox.inference.system/v1"
-            )
-        else:
-            unavailable.append("system")
+        comparison_identity, unavailable = field_identities(
+            {
+                "system": (system, ("model", "tokenizer", "backend")),
+                "workload": (
+                    workload,
+                    (
+                        "completed",
+                        "num_prompts",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "concurrency",
+                        "dataset_name",
+                        "request_rate",
+                        "max_concurrency",
+                    ),
+                ),
+            }
+        )
         return ProviderAnalysis(
             provider_id="sglang-benchmark",
             provider_version="aggregate-v1",

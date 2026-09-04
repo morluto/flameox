@@ -402,6 +402,8 @@ def create_server(
                 return _failure(
                     RuntimeFailure("DECODE_FAILURE", "Input could not be decoded during analysis.")
                 )
+            except Exception:
+                return _failure(RuntimeFailure("ANALYSIS_FAILURE", "Analysis failed unexpectedly."))
 
         # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
         handler.__name__ = analysis_tool_name(capability)
