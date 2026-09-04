@@ -2,6 +2,31 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.5] - 2026-09-04
+
+### Bug Fixes
+
+- **evidence:** Enforce trustworthy projection contracts ([#455](https://github.com/morluto/flameox/pull/455))
+- **mcp:** Clarify runtime evidence contracts
+- **setup:** Migrate project-bound launchers
+- **setup:** Require explicit clients without a terminal
+
+### Documentation
+
+- Codify projection correctness invariants
+
+### Features
+
+- **evidence:** Complete typed investigation workflows ([#440](https://github.com/morluto/flameox/pull/440))
+- **cli:** Expose experiments and setup version advice
+
+### Refactoring
+
+- **workers:** Remove retired nsight systems rejection worker
+
+### Testing
+
+- **setup:** Remove unused tmp-path fixtures
 ## [0.2.4] - 2026-09-02
 
 ### Bug Fixes
