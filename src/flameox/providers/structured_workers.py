@@ -16,6 +16,9 @@ from flameox.workers.v8_profiles_contract import (
     V8ProfileRequest,
 )
 
+_V8_MAX_NODES = 100_000
+_V8_MAX_SAMPLES = 1_000_000
+
 
 class StructuredWorkerProviders:
     """Explicit adapters for workers whose result is already bounded structured evidence."""
@@ -91,8 +94,8 @@ class StructuredWorkerProviders:
                     profile_kind="cpu",
                     artifact_path=str(path),
                     artifact_id=input_sha256,
-                    max_nodes=max_rows,
-                    max_samples=max_rows,
+                    max_nodes=_V8_MAX_NODES,
+                    max_samples=_V8_MAX_SAMPLES,
                     max_rows=max_rows,
                 ),
                 timeout_seconds=timeout_seconds,
@@ -113,8 +116,42 @@ class StructuredWorkerProviders:
                     },
                     {"type": "table", "rows": rows},
                 ],
-                rows_observed=result.node_count,
-                complete=len(rows) >= result.node_count,
+                rows_observed=result.frame_count,
+                complete=not result.truncated,
+                limitations=list(result.limitations),
+            )
+        if capability_id == "memory.hotspots" and format_name == "heapprofile":
+            result = self.harness.run_typed_sync(
+                V8_PROFILE_WORKER,
+                V8ProfileRequest(
+                    profile_kind="heap",
+                    artifact_path=str(path),
+                    artifact_id=input_sha256,
+                    max_nodes=_V8_MAX_NODES,
+                    max_samples=_V8_MAX_SAMPLES,
+                    max_rows=max_rows,
+                ),
+                timeout_seconds=timeout_seconds,
+                maximum_rss_bytes=maximum_rss_bytes,
+                maximum_writable_growth_bytes=maximum_output_bytes,
+            )
+            rows = [dict(row) for row in result.frame_measurements]
+            return ProviderAnalysis(
+                provider_id="v8-heap-profile",
+                provider_version=V8_PROFILE_WORKER.implementation,
+                blocks=[
+                    {
+                        "type": "metrics",
+                        "values": {
+                            "node_count": result.node_count,
+                            "sample_count": result.sample_count,
+                            "total_sampled_bytes": result.total_sampled_bytes,
+                        },
+                    },
+                    {"type": "table", "rows": rows},
+                ],
+                rows_observed=result.frame_count,
+                complete=not result.truncated,
                 limitations=list(result.limitations),
             )
         if capability_id == "sanitizer.failures" and format_name == "compute-sanitizer":

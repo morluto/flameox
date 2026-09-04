@@ -68,6 +68,7 @@ class SarifCoverage:
 @dataclass(frozen=True, slots=True)
 class SarifParseResult:
     supported: bool
+    complete: bool
     candidates: tuple[SarifCandidate, ...]
     analyzers: tuple[SarifAnalyzer, ...]
     exit_status: int | None
@@ -327,6 +328,7 @@ def _normalize_document(
         limitations.append("Only provider-native SARIF 2.1.0 reports can be normalized.")
         return SarifParseResult(
             supported=False,
+            complete=parse_error is None and document.root_finished,
             candidates=(),
             analyzers=(),
             exit_status=None,
@@ -373,6 +375,7 @@ def _normalize_document(
         limitations.append("SARIF runs reported multiple analyzer exit statuses.")
     return SarifParseResult(
         supported=True,
+        complete=parse_error is None and document.root_finished,
         candidates=tuple(normalization.candidates),
         analyzers=tuple(document.analyzers),
         exit_status=exit_status,

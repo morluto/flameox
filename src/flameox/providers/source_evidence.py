@@ -92,6 +92,6 @@ class SourceEvidenceProvider:
                 {"type": "table", "rows": rows},
             ],
             rows_observed=coverage.normalized_count + coverage.omitted_count,
-            complete=coverage.omitted_count == 0,
+            complete=parsed.complete and coverage.omitted_count == 0,
             limitations=list(parsed.limitations),
         )

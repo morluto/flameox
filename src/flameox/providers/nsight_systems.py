@@ -19,6 +19,12 @@ _OPERATION_TABLE_PREFIXES = (
     "VULKAN",
     "DX12",
 )
+_ACCELERATOR_TABLE_PREFIXES = (
+    "CUDA_GPU_",
+    "CUDA_KERNEL",
+    "CUDA_MEM",
+    "CUPTI_ACTIVITY_",
+)
 _LIFECYCLE_TABLE_PREFIXES = (
     "PROCESS",
     "THREAD",
@@ -49,7 +55,9 @@ class NsightSystemsParquetProvider:
                 "UNSUPPORTED_FORMAT", "Nsight Systems Parquet directory contains no tables"
             )
         if capability_id == "gpu.launches":
-            files = [file for file in files if file.stem.upper().startswith(("CUDA_", "CUPTI_"))]
+            files = [
+                file for file in files if file.stem.upper().startswith(_ACCELERATOR_TABLE_PREFIXES)
+            ]
         elif capability_id == "trace.operations":
             files = [
                 file for file in files if file.stem.upper().startswith(_OPERATION_TABLE_PREFIXES)

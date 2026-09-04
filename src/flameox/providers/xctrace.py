@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from defusedxml.ElementTree import iterparse  # type: ignore[import-untyped]
+from defusedxml.ElementTree import ParseError, iterparse  # type: ignore[import-untyped]
 
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
@@ -32,7 +32,7 @@ class XctraceProvider:
                         }
                     )
                 element.clear()
-        except (OSError, ValueError) as error:
+        except (OSError, ParseError, ValueError) as error:
             raise ProviderFailure(
                 "DECODE_FAILURE", "xctrace table-of-contents XML is invalid"
             ) from error

@@ -90,6 +90,32 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
     assert preserved["evidence_id"]
 
 
+def test_nsight_systems_cuda_api_only_is_negative_accelerator_evidence(tmp_path: Path) -> None:
+    parquetdir = tmp_path / "report.parquetdir"
+    parquetdir.mkdir()
+    pq.write_table(
+        pa.table({"name": ["cudaGetDeviceCount"]}),
+        parquetdir / "CUDA_API_TRACE.parquet",
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "gpu.launches",
+            [PathSource(path=str(parquetdir), format="nsys-parquet")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"] == {
+        "table_count": 0,
+        "row_count": 0,
+        "accelerator_activity_observed": False,
+    }
+    assert result["blocks"][1]["rows"] == []
+    assert "no_accelerator_activity_observed" in result["limitations"]
+
+
 def test_nsight_systems_trace_projections_select_semantic_table_families(
     tmp_path: Path,
 ) -> None:

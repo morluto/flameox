@@ -21,6 +21,8 @@ class V8ProfileResult(ContractModel):
     profile_kind: Literal["cpu", "heap"]
     node_count: Annotated[int, Field(ge=0)]
     sample_count: Annotated[int, Field(ge=0)]
+    frame_count: Annotated[int, Field(ge=0)]
+    truncated: bool = False
     total_sampled_bytes: Annotated[int, Field(ge=0)] = 0
     frames: tuple[dict[str, JsonValue], ...]
     frame_measurements: tuple[dict[str, JsonValue], ...]

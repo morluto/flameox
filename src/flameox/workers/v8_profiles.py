@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -44,17 +45,22 @@ def _parse_cpu(request: V8ProfileRequest) -> V8ProfileResult:
             }
     if not nodes:
         _malformed("V8 CPU profile nodes array cannot be empty.")
-    sample_count = _count_cpu_samples(Path(request.artifact_path), request.max_samples)
+    sample_count = _count_cpu_samples(
+        Path(request.artifact_path), request.max_samples, known_node_ids=nodes.keys()
+    )
     return _aggregate_cpu(request, nodes, sample_count)
 
 
-def _count_cpu_samples(path: Path, limit: int) -> int:
+def _count_cpu_samples(path: Path, limit: int, *, known_node_ids: Collection[int]) -> int:
+    known = frozenset(known_node_ids)
     count = 0
     with path.open("rb") as stream:
         for sample in ijson.items(stream, "samples.item"):
             if count >= limit:
                 _limit("V8 CPU profile sample limit exceeded.")
-            _strict_int(sample, "sample node id")
+            sample_id = _strict_int(sample, "sample node id")
+            if sample_id not in known:
+                _malformed("V8 CPU profile sample references an unknown node.")
             count += 1
     return count
 
@@ -109,27 +115,26 @@ def _aggregate_cpu(
 
     if len(visited) != len(nodes):
         _malformed("V8 CPU profile contains disconnected or unreachable nodes.")
-    _check_rows(request, len(frame_rows), len(aggregates))
+    frames, measurements, truncated = _bounded_profile_rows(request, frame_rows, aggregates)
     return V8ProfileResult(
         profile_kind="cpu",
         node_count=len(nodes),
         sample_count=sample_count,
-        frames=tuple(frame_rows.values()),
+        frame_count=len(aggregates),
+        truncated=truncated,
+        frames=frames,
         frame_measurements=tuple(
-            {
-                "frame_id": frame_id,
-                "metric": "cpu.hit_count",
-                "self_value": values["self"],
-                "inclusive_value": values["inclusive"],
-                "unit": "count",
-                "sample_count": values["samples"],
-            }
-            for frame_id, values in sorted(aggregates.items())
+            {**row, "metric": "cpu.hit_count", "unit": "count"} for row in measurements
         ),
         limitations=(
             "V8 CPU samples represent execution time, not allocation or memory evidence.",
             "The CPU profile contains sampled stack locations; source-map resolution is not "
             "applied.",
+            *(
+                (f"V8 hotspot rows were truncated to {request.max_rows} entries.",)
+                if truncated
+                else ()
+            ),
         ),
     )
 
@@ -144,15 +149,22 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
     node_count = 0
     sample_count = 0
     total_sampled_bytes = 0
+    node_ids: set[int] = set()
     node_stack: list[dict[str, Any]] = []
     sample: dict[str, Any] | None = None
     with path.open("rb") as stream:
         for prefix, event, value in ijson.parse(stream):
             if event == "start_map" and (prefix == "head" or prefix.endswith(".children.item")):
-                if len(node_stack) >= request.max_nodes:
+                if node_count + len(node_stack) >= request.max_nodes:
                     _limit("V8 heap profile node limit exceeded.")
                 node_stack.append(
-                    {"call_frame": None, "self_size": None, "children": False, "child_total": 0}
+                    {
+                        "call_frame": None,
+                        "id": None,
+                        "self_size": None,
+                        "children": False,
+                        "child_total": 0,
+                    }
                 )
                 continue
             if event == "start_map" and prefix == "samples.item":
@@ -167,6 +179,8 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 elif event in {"string", "number", "null"}:
                     if prefix.endswith(".selfSize"):
                         current["self_size"] = value
+                    elif prefix.endswith(".id"):
+                        current["id"] = value
                     elif prefix.endswith(".callFrame.functionName"):
                         current.setdefault("call_frame_values", {})["functionName"] = value
                     elif prefix.endswith(".callFrame.url"):
@@ -189,9 +203,11 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 if sample_count >= request.max_samples:
                     _limit("V8 heap profile sample limit exceeded.")
                 size = _strict_int(sample.get("size"), "sample size")
-                _strict_int(sample.get("nodeId"), "sample node id")
+                sample_node_id = _strict_int(sample.get("nodeId"), "sample node id")
                 if size < 0:
                     _malformed("V8 heap sample size cannot be negative.")
+                if sample_node_id not in node_ids:
+                    _malformed("V8 heap sample references an unknown node.")
                 total_sampled_bytes += size
                 sample_count += 1
                 sample = None
@@ -206,8 +222,12 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 if not isinstance(call_frame, dict) or not current["children"]:
                     _malformed("V8 heap profile node is missing callFrame or children.")
                 self_size = _strict_int(current["self_size"], "self size")
+                node_id = _strict_int(current["id"], "node id")
                 if self_size < 0:
                     _malformed("V8 heap profile selfSize cannot be negative.")
+                if node_id in node_ids:
+                    _malformed("V8 heap profile contains duplicate node IDs.")
+                node_ids.add(node_id)
                 if node_stack:
                     node_stack[-1]["child_total"] += self_size + current["child_total"]
                 identity = _frame_identity(call_frame, request)
@@ -221,23 +241,17 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 node_count += 1
     if node_stack or sample is not None:
         _malformed("V8 heap profile contains an incomplete object.")
-    _check_rows(request, len(frame_rows), len(aggregates))
+    frames, measurements, truncated = _bounded_profile_rows(request, frame_rows, aggregates)
     return V8ProfileResult(
         profile_kind="heap",
         node_count=node_count,
         sample_count=sample_count,
+        frame_count=len(aggregates),
+        truncated=truncated,
         total_sampled_bytes=total_sampled_bytes,
-        frames=tuple(frame_rows.values()),
+        frames=frames,
         frame_measurements=tuple(
-            {
-                "frame_id": frame_id,
-                "metric": "memory.self_size",
-                "self_value": values["self"],
-                "inclusive_value": values["inclusive"],
-                "unit": "bytes",
-                "sample_count": values["samples"],
-            }
-            for frame_id, values in sorted(aggregates.items())
+            {**row, "metric": "memory.self_size", "unit": "bytes"} for row in measurements
         ),
         limitations=(
             "Sampled allocation bytes are an estimate from V8's sampling heap profiler, not "
@@ -245,6 +259,11 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
             "Only allocations sampled by V8 are reported; small or short-lived allocations "
             "may be underrepresented.",
             "Source-map resolution is not applied by this extractor.",
+            *(
+                (f"V8 hotspot rows were truncated to {request.max_rows} entries.",)
+                if truncated
+                else ()
+            ),
         ),
     )
 
@@ -322,9 +341,33 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
     }
 
 
-def _check_rows(request: V8ProfileRequest, frame_count: int, measurement_count: int) -> None:
-    if frame_count + measurement_count > request.max_rows:
-        _limit("V8 profile normalized row limit exceeded.")
+def _bounded_profile_rows(
+    request: V8ProfileRequest,
+    frame_rows: dict[str, dict[str, Any]],
+    aggregates: dict[str, dict[str, int]],
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], bool]:
+    measurements: list[dict[str, Any]] = [
+        {
+            "frame_id": frame_id,
+            "self_value": values["self"],
+            "inclusive_value": values["inclusive"],
+            "sample_count": values["samples"],
+        }
+        for frame_id, values in aggregates.items()
+    ]
+    measurements.sort(
+        key=lambda row: (
+            -cast(int, row["self_value"]),
+            -cast(int, row["inclusive_value"]),
+            str(row["frame_id"]),
+        ),
+    )
+    selected = measurements[: request.max_rows]
+    return (
+        tuple(frame_rows[str(row["frame_id"])] for row in selected),
+        tuple(selected),
+        len(measurements) > len(selected),
+    )
 
 
 def _malformed(message: str) -> NoReturn:

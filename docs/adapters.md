@@ -20,6 +20,20 @@ roles and formats, and selection description. Generated MCP schemas, pre-executi
 checks, and capture argument validation consume that same contract so their format claims cannot
 drift.
 
+Adding or removing a format is complete only when these surfaces agree:
+
+1. the capability's accepted formats;
+2. the capture-provider contract and invocation builder, when capture is supported;
+3. explicit-path suffix detection;
+4. analysis dispatch into the provider or isolated worker;
+5. generated MCP analysis and capture schemas;
+6. the support table below.
+
+Tests exercise explicit-path analysis and, when applicable, capture through the public runtime.
+They also assert that the capture-contract and invocation-builder registries have identical provider
+IDs. A parser or worker that is not reachable through a declared capability is either intentionally
+internal and documented as such, or an incomplete registration—not latent support.
+
 Capability tools remain discoverable when a provider is absent. Capture validates the selected
 provider's package, executable, platform, version, permission, and required external resources as
 part of the attempted operation, before workload execution. An unavailable provider returns a typed
@@ -35,7 +49,7 @@ Artifact analysis and typed capture are separate contracts:
 | Evidence family | Explicit artifact analysis | Typed capture provider |
 | --- | --- | --- |
 | CPU profiles | Node/V8, cProfile pstats, py-spy Speedscope, perf collapsed stacks, perf data | `node-cpu-profile`, `py-spy`, `perf` |
-| Memory profiles | Memray | `memray` |
+| Memory profiles | Memray, Node/V8 sampling heap profiles | `memray`, `node-heap-profile` |
 | Benchmarks | pyperf, benchmark samples, PyTorch samples, NVBench | `pyperf`, `benchmark-samples`, `nvbench` |
 | Execution traces | Perfetto/Chrome, PyTorch, OTLP, ROCprof PFTrace, xctrace, Nsight Systems | `torch-profiler`, `rocprofv3`, `xctrace`, `nsight-systems` |
 | GPU and kernels | Nsight Systems, Nsight Compute, Compute Sanitizer, Triton, kernel validation | `nsight-systems`, `nsight-compute`, `compute-sanitizer` |
@@ -69,17 +83,33 @@ look up runs or mutable records.
 Semantic selection happens before bounding. A provider must filter for the requested projection
 before applying row, byte, or worker limits, and `rows_observed`, `complete`, and truncation must
 describe that same projected population. A bounded prefix of unrelated native rows is not evidence
-that the requested activity is absent.
+that the requested activity is absent. OTLP time windows apply their span predicate before resource
+and scope rows consume the normalization budget; only owning context for retained spans is emitted.
 
 Projection identity includes every non-axis dimension that can distinguish a series, including
 device, dtype, variant, scope, and worker identity where applicable. Providers must not blend those
 series. When a composite native label is successfully decomposed into named dimensions, the raw
 label must not remain as a redundant identity that changes with the selected axis.
 
+Numeric aggregation requires compatible semantic units. Providers normalize convertible units to
+one declared output unit before pooling and reject incompatible dimensions; for example, seconds
+and nanoseconds may become seconds, while bytes and elapsed time cannot share a CPU-hotspot total.
+Rows and metrics expose the normalized unit so consumers never have to infer it from the format.
+
 Native selectors such as table families, event categories, and field names require a representative
 artifact or authoritative format fixture. Unmatched selectors stay incomplete or explicitly limited;
 they must not silently become complete negative evidence. Adding a projection also requires a
 regression check for sibling projections that share its reader or dispatch path.
+
+Raw parser safety limits are independent from normalized output limits. In particular, V8 node and
+sample ceilings bound native traversal, while the hotspot row limit bounds the ranked aggregate
+projection. A partial SARIF document is likewise incomplete even when every parsed result fits in
+the returned table.
+
+Native references are validated before aggregation. Sample-to-node, edge-to-frame, parent-to-child,
+and similar identifiers must resolve inside the same artifact unless the format explicitly defines
+an external reference. A syntactically valid but unresolved identifier is corrupt evidence, not an
+ignorable sample.
 
 The runtime projects provider blocks into the RFC 8785 JSON domain before
 bounding or preservation. Native integers outside JSON's interoperable safe
