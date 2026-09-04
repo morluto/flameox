@@ -8,8 +8,21 @@ from typing import Any
 import anyio
 import pytest
 
+from flameox.providers.contracts import ProviderFailure
+from flameox.providers.xctrace import XctraceProvider
 from flameox.runtime_contracts import CaptureTarget
 from flameox.stateless import AnalysisRuntime
+
+
+@pytest.mark.unit
+def test_xctrace_malformed_toc_is_a_typed_decode_failure(tmp_path: Path) -> None:
+    toc = tmp_path / "toc.xml"
+    toc.write_text("<trace><run></trace>")
+
+    with pytest.raises(ProviderFailure) as failure:
+        XctraceProvider.analyze(toc, max_rows=10, provider_version="test")
+
+    assert failure.value.code == "DECODE_FAILURE"
 
 
 @pytest.mark.process

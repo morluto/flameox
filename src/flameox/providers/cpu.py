@@ -12,6 +12,12 @@ _MAX_PROFILE_BYTES = 64 * 1024 * 1024
 _MAX_FRAMES = 100_000
 _MAX_SAMPLES = 1_000_000
 _MAX_LINE_BYTES = 256 * 1024
+_SPEEDSCOPE_TIME_SCALES = {
+    "nanoseconds": 1e-9,
+    "microseconds": 1e-6,
+    "milliseconds": 1e-3,
+    "seconds": 1.0,
+}
 
 
 class CpuProfileProvider:
@@ -47,6 +53,7 @@ class CpuProfileProvider:
         inclusive_weights: defaultdict[int, float] = defaultdict(float)
         sample_count = 0
         unresolved_sample_count = 0
+        weight_units: set[str] = set()
         for profile_value in profiles:
             profile = _object(profile_value, "Speedscope sampled profile")
             if profile.get("type") != "sampled":
@@ -61,6 +68,13 @@ class CpuProfileProvider:
                 raise ProviderFailure("DECODE_FAILURE", "Speedscope samples are invalid")
             if weights is not None and len(weights) != len(samples):
                 raise ProviderFailure("DECODE_FAILURE", "Speedscope weights do not match samples")
+            weight_unit, weight_scale = _speedscope_weight_unit(profile.get("unit", "none"))
+            weight_units.add(weight_unit)
+            if len(weight_units) > 1:
+                raise ProviderFailure(
+                    "UNSUPPORTED_FORMAT",
+                    "Speedscope CPU profiles cannot mix time weights with sample counts",
+                )
             sample_count += len(samples)
             if sample_count > _MAX_SAMPLES:
                 raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope sample count exceeds the limit")
@@ -71,7 +85,9 @@ class CpuProfileProvider:
                     unresolved_sample_count += 1
                     continue
                 stack = [_frame_index(value, len(normalized_frames)) for value in stack_value]
-                weight = 1.0 if weights is None else _number(weights[sample_index], "sample weight")
+                weight = (
+                    1.0 if weights is None else _number(weights[sample_index], "sample weight")
+                ) * weight_scale
                 self_weights[stack[-1]] += weight
                 for frame_index in set(stack):
                     inclusive_weights[frame_index] += weight
@@ -80,6 +96,7 @@ class CpuProfileProvider:
                 **normalized_frames[index],
                 "self_weight": self_weights[index],
                 "inclusive_weight": inclusive_weights[index],
+                "unit": next(iter(weight_units)),
             }
             for index in inclusive_weights
         ]
@@ -96,7 +113,11 @@ class CpuProfileProvider:
                 f"{unresolved_sample_count} of {sample_count} samples had no resolved Python "
                 "frames and were excluded from frame aggregation."
             )
-        metrics = {"frame_count": len(frames), "sample_count": sample_count}
+        metrics = {
+            "frame_count": len(frames),
+            "sample_count": sample_count,
+            "weight_unit": next(iter(weight_units)),
+        }
         if unresolved_sample_count:
             metrics["unresolved_sample_count"] = unresolved_sample_count
         return ProviderAnalysis(
@@ -175,6 +196,19 @@ def _object(value: object, subject: str) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def _speedscope_weight_unit(value: object) -> tuple[str, float]:
+    if value == "bytes":
+        raise ProviderFailure(
+            "UNSUPPORTED_FORMAT",
+            "Byte-weighted Speedscope profiles are not CPU hotspot evidence",
+        )
+    if value == "none":
+        return "samples", 1.0
+    if isinstance(value, str) and value in _SPEEDSCOPE_TIME_SCALES:
+        return "seconds", _SPEEDSCOPE_TIME_SCALES[value]
+    raise ProviderFailure("DECODE_FAILURE", "Speedscope weight unit is invalid")
+
+
 def _frame(value: object, index: int) -> dict[str, Any]:
     frame = _object(value, "Speedscope frame")
     name = frame.get("name")
@@ -198,7 +232,10 @@ def _frame_index(value: object, frame_count: int) -> int:
 def _number(value: object, subject: str) -> float:
     if not isinstance(value, int | float) or isinstance(value, bool):
         raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid") from error
     if not math.isfinite(result) or result < 0:
         raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid")
     return result

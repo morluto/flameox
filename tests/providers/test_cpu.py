@@ -113,9 +113,83 @@ def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
         runtime.close()
 
     assert result["provider"]["id"] == "py-spy-speedscope"
-    assert result["blocks"][0]["values"] == {"frame_count": 2, "sample_count": 3}
+    assert result["blocks"][0]["values"] == {
+        "frame_count": 2,
+        "sample_count": 3,
+        "weight_unit": "seconds",
+    }
     assert result["blocks"][1]["rows"][0]["function"] == "work"
     assert result["blocks"][1]["rows"][0]["self_weight"] == 2
+
+
+def test_speedscope_profiles_with_different_units_are_not_pooled(tmp_path: Path) -> None:
+    profile = tmp_path / "mixed-units.speedscope.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "work"}]},
+                "profiles": [
+                    {
+                        "type": "sampled",
+                        "name": "time",
+                        "unit": "seconds",
+                        "samples": [[0]],
+                        "weights": [1],
+                    },
+                    {
+                        "type": "sampled",
+                        "name": "allocations",
+                        "unit": "bytes",
+                        "samples": [[0]],
+                        "weights": [1_000],
+                    },
+                ],
+            }
+        )
+    )
+    with pytest.raises(RuntimeFailure) as failure:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            runtime.analyze(
+                "cpu.hotspots",
+                [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
+                {},
+            )
+        finally:
+            runtime.close()
+
+    assert failure.value.code == "UNSUPPORTED_FORMAT"
+
+
+def test_speedscope_rejects_a_weight_that_cannot_be_represented(tmp_path: Path) -> None:
+    profile = tmp_path / "overflow.speedscope.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "work"}]},
+                "profiles": [
+                    {
+                        "type": "sampled",
+                        "unit": "seconds",
+                        "samples": [[0]],
+                        "weights": [10**400],
+                    }
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "cpu.hotspots",
+                [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
+                {},
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "DECODE_FAILURE"
 
 
 def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty(
@@ -149,6 +223,7 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
     assert result["blocks"][0]["values"] == {
         "frame_count": 1,
         "sample_count": 2,
+        "weight_unit": "samples",
         "unresolved_sample_count": 1,
     }
     assert result["blocks"][1]["rows"] == [
@@ -160,6 +235,7 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
             "column": None,
             "self_weight": 2.0,
             "inclusive_weight": 2.0,
+            "unit": "samples",
         }
     ]
     assert any("1 of 2" in limitation for limitation in result["limitations"])

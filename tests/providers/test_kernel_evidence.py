@@ -99,6 +99,37 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path)
     assert not (tmp_path / ".flameox").exists()
 
 
+def test_kernel_compare_requires_complete_semantic_identity(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    baseline.write_text(json.dumps(_kernel_document(1.0)))
+    changed = _kernel_document(2.0)
+    changed_output = changed["cases"][0]["outputs"][0]  # type: ignore[index]
+    changed_output["shape"] = [1_024]
+    changed_output["dtype"] = "int8"
+    changed_output["metrics"][0]["unit"] = "percent"
+    candidate.write_text(json.dumps(changed))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "kernel.compare",
+            [
+                PathSource(path=str(baseline), format="kernel-validation"),
+                PathSource(path=str(candidate), format="kernel-validation"),
+            ],
+            {"metric": "max_abs_error"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"] == []
+    assert result["blocks"][0]["values"] == {
+        "input_count": 2,
+        "compatible_metric_count": 0,
+        "unmatched_identity_count": 2,
+    }
+
+
 def test_kernel_validation_rejects_an_unknown_native_schema(tmp_path: Path) -> None:
     artifact = tmp_path / "validation.json"
     document = _kernel_document(0.0)

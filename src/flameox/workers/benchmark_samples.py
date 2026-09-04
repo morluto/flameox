@@ -55,6 +55,25 @@ def _row(
     }
 
 
+def _series_row(series: BenchmarkSeries, *, series_index: int) -> dict[str, Any]:
+    row = _row(
+        series,
+        series_index=series_index,
+        value_index=0,
+        value=series.samples[0],
+        is_warmup=False,
+    )
+    row.pop("value_index")
+    row["value_int"] = None
+    row["value_float"] = None
+    row["sample_sum"] = sum(series.samples)
+    row["sample_count"] = len(series.samples)
+    positive_samples = [value for value in series.samples if value > 0]
+    row["positive_sample_sum"] = sum(positive_samples)
+    row["positive_sample_count"] = len(positive_samples)
+    return row
+
+
 def _handle(
     request: BenchmarkSamplesWorkerRequest, _job_root: Path
 ) -> BenchmarkSamplesWorkerResult:
@@ -73,6 +92,12 @@ def _handle(
                 f"{series.name} uses asynchronous device timing with "
                 f"synchronization={series.synchronization}."
             )
+        if request.projection == "series":
+            measurement_count += len(series.samples)
+            warmup_count += len(series.warmups)
+            if request.metric in {None, series.name} and len(rows) < request.max_rows:
+                rows.append(_series_row(series, series_index=series_index))
+            continue
         for is_warmup, values in ((True, series.warmups), (False, series.samples)):
             for value_index, value in enumerate(values):
                 if is_warmup:
@@ -90,8 +115,17 @@ def _handle(
                         )
                     )
     observed = measurement_count + warmup_count
-    if observed > len(rows):
-        limitations.append(f"Benchmark rows were truncated to {request.max_rows} entries.")
+    selected_series_count = sum(
+        request.metric in {None, series.name} for series in payload.benchmarks
+    )
+    truncated = (
+        selected_series_count > len(rows)
+        if request.projection == "series"
+        else observed > len(rows)
+    )
+    if truncated:
+        subject = "series" if request.projection == "series" else "rows"
+        limitations.append(f"Benchmark {subject} were truncated to {request.max_rows} entries.")
     return BenchmarkSamplesWorkerResult(
         producer=payload.producer,
         producer_version=payload.producer_version,
@@ -99,7 +133,7 @@ def _handle(
         measurement_count=measurement_count,
         warmup_count=warmup_count,
         rows=cast(tuple[dict[str, JsonValue], ...], tuple(rows)),
-        truncated=observed > len(rows),
+        truncated=truncated,
         limitations=tuple(dict.fromkeys(limitations)),
     )
 

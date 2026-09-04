@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -31,11 +32,12 @@ from flameox.mcp.capability_tools import (
     capture_tool_name,
 )
 from flameox.providers.contracts import ProviderAnalysis
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository, RepositoryError
 from flameox.runtime_contracts import (
     CAPABILITIES,
     MAX_ROWS,
     CaptureTarget,
+    CompareArguments,
     EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
@@ -44,8 +46,42 @@ from flameox.runtime_contracts import (
     RuntimeFailure,
     compatible_capture_providers,
 )
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 from flameox.stateless import AnalysisRuntime
+from flameox.workers.v8_profiles_contract import V8_PROFILE_WORKER, V8ProfileRequest
+
+
+@pytest.mark.unit
+def test_compare_metric_rejects_empty_value_at_public_contract() -> None:
+    with pytest.raises(ValidationError):
+        CompareArguments(metric="")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [("argv", [{}]), ("environment", {"NAME": 1})],
+)
+def test_repository_rejects_invalid_nested_capture_target(field: str, invalid: Any) -> None:
+    target: dict[str, Any] = {
+        "argv": ["python"],
+        "cwd": "/workspace",
+        "environment": {},
+        "provider_id": "direct",
+        "capture_arguments": {},
+        "analysis_arguments": {},
+    }
+    request: dict[str, Any] = {
+        "target": target,
+        "mode": "single",
+        "experiment": None,
+        "executions": [],
+    }
+    target[field] = invalid
+
+    with pytest.raises(RepositoryError):
+        EvidenceRepository._validate_capture_request(request)
 
 
 @pytest.mark.unit
@@ -355,6 +391,92 @@ def test_analysis_is_bounded_deterministic_and_does_not_change_input(tmp_path: P
     assert first["continuation"]
     assert first["truncation"] == {"reason": "row_limit", "next_offset": 2}
     assert artifact.read_bytes() == before
+
+
+@pytest.mark.unit
+def test_analysis_rejects_a_negative_continuation_offset(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        limits = RequestLimits(max_rows=2)
+        first = runtime.analyze(
+            "artifact.preview", [PathSource(path=str(artifact))], {}, limits=limits
+        )
+        decoded = json.loads(
+            base64.urlsafe_b64decode(
+                first["continuation"] + "=" * (-len(first["continuation"]) % 4)
+            )
+        )
+        decoded["payload"]["offset"] = -1
+        decoded["checksum"] = hashlib.sha256(canonical_bytes(decoded["payload"])).hexdigest()
+        continuation = base64.urlsafe_b64encode(canonical_bytes(decoded)).decode().rstrip("=")
+
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "artifact.preview",
+                [PathSource(path=str(artifact))],
+                {},
+                limits=limits,
+                continuation=continuation,
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "INVALID_INPUT"
+
+
+@pytest.mark.unit
+def test_analysis_rejects_a_continuation_beyond_the_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        limits = RequestLimits(max_rows=2)
+        first = runtime.analyze(
+            "artifact.preview", [PathSource(path=str(artifact))], {}, limits=limits
+        )
+        decoded = json.loads(
+            base64.urlsafe_b64decode(
+                first["continuation"] + "=" * (-len(first["continuation"]) % 4)
+            )
+        )
+        decoded["payload"]["offset"] = 100
+        decoded["checksum"] = hashlib.sha256(canonical_bytes(decoded["payload"])).hexdigest()
+        continuation = base64.urlsafe_b64encode(canonical_bytes(decoded)).decode().rstrip("=")
+
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "artifact.preview",
+                [PathSource(path=str(artifact))],
+                {},
+                limits=limits,
+                continuation=continuation,
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "INVALID_INPUT"
+
+
+@pytest.mark.unit
+def test_analysis_rejects_a_row_that_cannot_fit_the_result_byte_limit(tmp_path: Path) -> None:
+    artifact = tmp_path / "oversized.jsonl"
+    artifact.write_text(json.dumps({"value": "x" * 20_000}) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "artifact.preview",
+                [PathSource(path=str(artifact))],
+                {},
+                limits=RequestLimits(max_rows=10, max_result_bytes=4_096),
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "LIMIT_EXCEEDED"
+    assert "row" in failure.value.message.lower()
 
 
 @pytest.mark.unit
@@ -684,6 +806,226 @@ def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: 
 
 
 @pytest.mark.process
+def test_cpu_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> None:
+    profile = tmp_path / "cpu.cpuprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "callFrame": {
+                            "functionName": "main",
+                            "url": "app.js",
+                            "scriptId": "1",
+                            "lineNumber": 1,
+                            "columnNumber": 0,
+                        },
+                        "hitCount": 1,
+                        "children": [],
+                    }
+                ],
+                "samples": [2],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "cpu.hotspots",
+                [PathSource(path=str(profile), format="cpuprofile")],
+                {},
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "DECODE_FAILURE"
+
+
+@pytest.mark.process
+def test_v8_heap_profile_is_registered_as_memory_hotspot_evidence(tmp_path: Path) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "callFrame": {
+                        "functionName": "allocate",
+                        "url": "app.js",
+                        "scriptId": "1",
+                        "lineNumber": 1,
+                        "columnNumber": 0,
+                    },
+                    "selfSize": 64,
+                    "id": 1,
+                    "children": [],
+                },
+                "samples": [{"size": 64, "nodeId": 1}],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+    finally:
+        runtime.close()
+
+    assert result["provider"]["id"] == "v8-heap-profile"
+    assert result["blocks"][0]["values"] == {
+        "node_count": 1,
+        "sample_count": 1,
+        "total_sampled_bytes": 64,
+    }
+    assert result["blocks"][1]["rows"][0]["unit"] == "bytes"
+
+
+@pytest.mark.process
+def test_v8_heap_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "callFrame": {"functionName": "allocate", "url": "app.js"},
+                    "selfSize": 64,
+                    "id": 1,
+                    "children": [],
+                },
+                "samples": [{"size": 64, "nodeId": 2}],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "DECODE_FAILURE"
+
+
+@pytest.mark.process
+def test_v8_heap_profile_enforces_total_node_limit(tmp_path: Path) -> None:
+    profile = tmp_path / "wide.heapprofile"
+    child = {
+        "callFrame": {"functionName": "child", "url": "app.js"},
+        "id": 2,
+        "selfSize": 1,
+        "children": [],
+    }
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "callFrame": {"functionName": "root", "url": "app.js"},
+                    "id": 1,
+                    "selfSize": 0,
+                    "children": [child, child],
+                },
+                "samples": [],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(DomainError) as failure:
+            runtime.workers.run_typed_sync(
+                V8_PROFILE_WORKER,
+                V8ProfileRequest(
+                    profile_kind="heap",
+                    artifact_path=str(profile),
+                    artifact_id="test",
+                    max_nodes=2,
+                    max_samples=10,
+                    max_rows=10,
+                ),
+                timeout_seconds=5,
+                maximum_rss_bytes=256 * 1024 * 1024,
+                maximum_writable_growth_bytes=1024,
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code is ErrorCode.LIMIT_EXCEEDED
+
+
+@pytest.mark.process
+def test_v8_raw_node_bound_is_independent_from_hotspot_row_limit(tmp_path: Path) -> None:
+    profile = tmp_path / "large.cpuprofile"
+    nodes = [
+        {
+            "id": index,
+            "callFrame": {
+                "functionName": "shared",
+                "url": "app.js",
+                "scriptId": "1",
+                "lineNumber": 1,
+                "columnNumber": 0,
+            },
+            "hitCount": 1 if index == 1 else 0,
+            "children": [index + 1] if index < 1_002 else [],
+        }
+        for index in range(1, 1_003)
+    ]
+    profile.write_text(json.dumps({"nodes": nodes, "samples": [1]}))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "cpu.hotspots",
+            [PathSource(path=str(profile), format="cpuprofile")],
+            {},
+            limits=RequestLimits(max_rows=10),
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"] == {"node_count": 1_002, "sample_count": 1}
+    assert len(result["blocks"][1]["rows"]) == 1
+    assert result["coverage"] == {"rows_returned": 1, "rows_observed": 1, "complete": True}
+
+
+@pytest.mark.process
+def test_v8_hotspot_projection_bounds_distinct_aggregated_frames(tmp_path: Path) -> None:
+    profile = tmp_path / "many-frames.cpuprofile"
+    nodes = [
+        {
+            "id": index,
+            "callFrame": {
+                "functionName": f"frame-{index}",
+                "url": "app.js",
+                "scriptId": "1",
+                "lineNumber": index,
+                "columnNumber": 0,
+            },
+            "hitCount": 1 if index == 1 else 0,
+            "children": [index + 1] if index < 1_002 else [],
+        }
+        for index in range(1, 1_003)
+    ]
+    profile.write_text(json.dumps({"nodes": nodes, "samples": [1]}))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "cpu.hotspots",
+            [PathSource(path=str(profile), format="cpuprofile")],
+            {},
+            limits=RequestLimits(max_rows=10),
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"] == {"node_count": 1_002, "sample_count": 1}
+    assert result["coverage"] == {
+        "rows_returned": 10,
+        "rows_observed": 1_002,
+        "complete": False,
+    }
+    assert result["blocks"][1]["rows"][0]["self_value"] == 1
+
+
+@pytest.mark.process
 def test_coverage_data_uses_isolated_reader_and_continuation(tmp_path: Path) -> None:
     source = tmp_path / "module.py"
     source.write_text("one = 1\ntwo = 2\nthree = 3\n")
@@ -820,6 +1162,44 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
     assert not (tmp_path / ".flameox").exists()
 
 
+@pytest.mark.unit
+def test_truncated_sarif_never_reports_complete_coverage(tmp_path: Path) -> None:
+    artifact = tmp_path / "truncated.sarif"
+    payload = json.dumps(
+        {
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {"driver": {"name": "scanner"}},
+                    "results": [
+                        {
+                            "ruleId": "slow-loop",
+                            "message": {"text": "candidate"},
+                            "locations": [
+                                {"physicalLocation": {"artifactLocation": {"uri": "src/slow.py"}}}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    artifact.write_text(payload[:-1])
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "static.performance_candidates",
+            [PathSource(path=str(artifact), format="sarif")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"]
+    assert result["coverage"]["complete"] is False
+    assert any("stopped before the document ended" in item for item in result["limitations"])
+
+
 def _write_pyperf_suite(path: Path, values: list[float]) -> None:
     run = pyperf.Run(
         values,
@@ -943,6 +1323,28 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
 
 
 @pytest.mark.process
+def test_pyperf_compare_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    _write_pyperf_suite(baseline, [0.010] * 1_002)
+    _write_pyperf_suite(candidate, [0.005] * 1_002)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.compare",
+            [
+                PathSource(path=str(baseline), format="pyperf"),
+                PathSource(path=str(candidate), format="pyperf"),
+            ],
+            {"metric": "workload"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"][0]["ratio"] == 0.5
+
+
+@pytest.mark.process
 def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.samples.json"
     candidate = tmp_path / "candidate.samples.json"
@@ -973,6 +1375,66 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
 
 
 @pytest.mark.process
+def test_benchmark_compare_retains_series_dimensions_and_timing_protocol(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.samples.json"
+    candidate = tmp_path / "candidate.samples.json"
+
+    def write(path: Path, small: int, large: int, *, clock: str = "host_monotonic") -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "flameox.benchmark-samples.v1",
+                    "producer": "example-benchmark",
+                    "benchmarks": [
+                        {
+                            "name": "operation",
+                            "unit": "ns",
+                            "measurement_clock": clock,
+                            "synchronization": "not_required",
+                            "dimensions": {"size": size},
+                            "samples": [value],
+                        }
+                        for size, value in (("small", small), ("large", large))
+                    ],
+                }
+            )
+        )
+
+    write(baseline, 1, 100)
+    write(candidate, 2, 50)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        comparison = runtime.analyze(
+            "benchmark.compare",
+            [
+                PathSource(path=str(baseline), format="samples"),
+                PathSource(path=str(candidate), format="samples"),
+            ],
+            {"metric": "operation"},
+        )
+        write(candidate, 2, 50, clock="cuda_event")
+        incompatible = runtime.analyze(
+            "benchmark.compare",
+            [
+                PathSource(path=str(baseline), format="samples"),
+                PathSource(path=str(candidate), format="samples"),
+            ],
+            {"metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    rows = comparison["blocks"][1]["rows"]
+    assert {row["dimensions"]["size"]: row["ratio"] for row in rows} == {
+        "small": 2.0,
+        "large": 0.5,
+    }
+    assert all(row["dimensions"]["measurement_clock"] == "host_monotonic" for row in rows)
+    assert incompatible["blocks"][1]["rows"] == []
+    assert incompatible["blocks"][0]["values"]["unmatched_identity_count"] == 4
+
+
+@pytest.mark.process
 def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
     tmp_path: Path,
 ) -> None:
@@ -996,6 +1458,107 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
     assert row["point_count"] == 3
     assert row["exponent"] == pytest.approx(2.0)
     assert row["r_squared"] == pytest.approx(1.0)
+
+
+@pytest.mark.process
+def test_benchmark_compare_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.samples.json"
+    candidate = tmp_path / "candidate.samples.json"
+    _write_benchmark_samples(baseline, [10] * 1_002)
+    _write_benchmark_samples(candidate, [5] * 1_002)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.compare",
+            [
+                PathSource(path=str(baseline), format="samples"),
+                PathSource(path=str(candidate), format="samples"),
+            ],
+            {"metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["baseline_mean"] == 10
+    assert row["candidate_mean"] == 5
+    assert row["ratio"] == 0.5
+
+
+@pytest.mark.process
+def test_benchmark_scaling_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
+    artifact = tmp_path / "scaling.samples.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(elements)},
+                        "samples": [duration] * 1_002,
+                    }
+                    for elements, duration in ((10, 100), (20, 400))
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements", "metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["point_count"] == 2
+    assert row["exponent"] == pytest.approx(2.0)
+
+
+@pytest.mark.process
+def test_benchmark_scaling_excludes_nonpositive_samples_from_series_aggregates(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "scaling.samples.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "flameox.benchmark-samples.v1",
+                "producer": "example-benchmark",
+                "benchmarks": [
+                    {
+                        "name": "operation",
+                        "unit": "ns",
+                        "measurement_clock": "host_monotonic",
+                        "synchronization": "not_required",
+                        "dimensions": {"elements": str(elements)},
+                        "samples": samples,
+                    }
+                    for elements, samples in ((10, [10, -10]), (20, [40, -1]))
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(artifact), format="samples")],
+            {"input_dimension": "elements", "metric": "operation"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["point_count"] == 2
+    assert row["exponent"] == pytest.approx(2.0)
 
 
 @pytest.mark.process
@@ -1214,6 +1777,33 @@ def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: P
 
 
 @pytest.mark.process
+def test_unpreserved_capture_analysis_failure_removes_request_scratch(tmp_path: Path) -> None:
+    code = "import os,pathlib; pathlib.Path(os.environ['FLAMEOX_BENCHMARK_OUTPUT']).write_text('{')"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            for _attempt in range(2):
+                with pytest.raises(RuntimeFailure) as failure:
+                    await runtime.capture_and_analyze(
+                        CaptureTarget(
+                            argv=[sys.executable, "-c", code],
+                            cwd=str(tmp_path),
+                            provider_id="benchmark-samples",
+                        ),
+                        "benchmark.summary",
+                        preserve=False,
+                    )
+                assert failure.value.code == "DECODE_FAILURE"
+                assert list(runtime.scratch.glob("capture-*")) == []
+                assert runtime.analyses == {}
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
 def test_coverage_capture_uses_explicit_empty_config_and_native_data(tmp_path: Path) -> None:
     script = tmp_path / "covered.py"
     script.write_text("value = 1\nprint(value)\n")
@@ -1406,6 +1996,41 @@ def test_otlp_window_filters_inside_isolated_parser(tmp_path: Path) -> None:
 
     span_rows = [row for row in result["blocks"][1]["rows"] if row["table"] == "spans"]
     assert [row["name"] for row in span_rows] == ["span-2"]
+
+
+@pytest.mark.process
+def test_otlp_window_filters_before_applying_the_normalization_row_limit(tmp_path: Path) -> None:
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+    )
+
+    request = ExportTraceServiceRequest()
+    for _index in range(1_001):
+        request.resource_spans.add().scope_spans.add()
+    matching_scope = request.resource_spans.add().scope_spans.add()
+    matching = matching_scope.spans.add()
+    matching.trace_id = bytes.fromhex("01" * 16)
+    matching.span_id = bytes.fromhex("02" * 8)
+    matching.name = "matching-span"
+    matching.start_time_unix_nano = 200
+    matching.end_time_unix_nano = 210
+    trace = tmp_path / "trace.otlp"
+    trace.write_bytes(request.SerializeToString())
+
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "trace.window",
+            [PathSource(path=str(trace), format="otlp")],
+            {"start_ns": 150, "end_ns": 250},
+        )
+    finally:
+        runtime.close()
+
+    assert result["coverage"]["complete"] is True
+    assert [row["name"] for row in result["blocks"][1]["rows"] if row["table"] == "spans"] == [
+        "matching-span"
+    ]
 
 
 @pytest.mark.process
@@ -1757,10 +2382,115 @@ def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path
         result = runtime.analyze(
             "failures.summary", [PathSource(path=str(events), format="pytest")], {}
         )
+        fixtures = runtime.analyze(
+            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+        )
     finally:
         runtime.close()
 
     assert result["blocks"][0]["values"]["completion"] == "interrupted"
+    assert fixtures["blocks"][0]["values"]["completion"] == "interrupted"
+
+
+@pytest.mark.unit
+def test_pytest_nonzero_session_exit_remains_visible(tmp_path: Path) -> None:
+    events = tmp_path / "pytest.jsonl"
+    events.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {"event": "run_started", "run_started_at_ns": 1},
+                {"event": "run_finished", "exitstatus": 5},
+            )
+        )
+        + "\n"
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+        )
+        fixtures = runtime.analyze(
+            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+
+    metrics = result["blocks"][0]["values"]
+    assert metrics["completion"] == "failed"
+    assert metrics["exit_status"] == 5
+    assert fixtures["blocks"][0]["values"]["completion"] == "failed"
+    assert fixtures["blocks"][0]["values"]["exit_status"] == 5
+
+
+@pytest.mark.unit
+def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
+    events = tmp_path / "pytest.jsonl"
+    payloads = [
+        {"event": "test_collected", "nodeid": "test_flaky"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "setup", "outcome": "passed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "failed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "passed"},
+        {
+            "event": "test_phase",
+            "nodeid": "test_flaky",
+            "phase": "teardown",
+            "outcome": "passed",
+        },
+        {"event": "run_finished", "exitstatus": 0},
+    ]
+    events.write_text("\n".join(json.dumps(event) for event in payloads) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+
+    metrics = result["blocks"][0]["values"]
+    assert metrics["passed"] == 1
+    assert metrics["flaky"] == 1
+    assert metrics["retried"] == 1
+    assert result["blocks"][1]["rows"] == [
+        {
+            "index": 1,
+            "nodeid": "test_flaky",
+            "classification": "flaky",
+            "failing_phase": "call",
+            "phase_outcomes": {"setup": "passed", "call": "passed", "teardown": "passed"},
+            "phase_attempts": {
+                "setup": ["passed"],
+                "call": ["failed", "passed"],
+                "teardown": ["passed"],
+            },
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_pytest_rerun_outcome_is_flaky_attempt(tmp_path: Path) -> None:
+    events = tmp_path / "pytest.jsonl"
+    payloads = [
+        {"event": "test_collected", "nodeid": "test_flaky"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "setup", "outcome": "passed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "rerun"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "passed"},
+        {"event": "test_phase", "nodeid": "test_flaky", "phase": "teardown", "outcome": "passed"},
+        {"event": "run_finished", "exitstatus": 0},
+    ]
+    events.write_text("\n".join(json.dumps(event) for event in payloads) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"]["flaky"] == 1
+    assert result["blocks"][1]["rows"][0]["classification"] == "flaky"
+    assert result["blocks"][1]["rows"][0]["failing_phase"] == "call"
 
 
 @pytest.mark.unit
@@ -2150,6 +2880,11 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             "perf": "#/$defs/PerfProvider",
             "py-spy": "#/$defs/PySpyProvider",
         }
+        memory_capture_schema = by_name["capture_memory_hotspots"].input_schema
+        assert memory_capture_schema["properties"]["provider"]["discriminator"]["mapping"] == {
+            "memray": "#/$defs/MemrayProvider",
+            "node-heap-profile": "#/$defs/NodeHeapProfileProvider",
+        }
         assert capture_schema["required"] == ["target", "provider", "execution"]
         assert by_name["capture_trace_window"].input_schema["required"] == [
             "target",
@@ -2236,6 +2971,99 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
     anyio.run(inspect)
+
+
+@pytest.mark.unit
+def test_mcp_analysis_does_not_expose_unexpected_exception_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_path = "/private/agent-workspace/customer-secret.json"
+
+    def fail(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise OSError(2, "No such file", secret_path)
+
+    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            result = await client.call_tool(
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(tmp_path / "input.json")}]},
+            )
+
+        assert result.is_error is True
+        assert result.structured_content["code"] == "DECODE_FAILURE"
+        assert result.structured_content["message"] == "Input could not be read during analysis."
+        assert secret_path not in json.dumps(result.structured_content)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.unit
+def test_mcp_analysis_wraps_unexpected_provider_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("private provider state")
+
+    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            result = await client.call_tool(
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(tmp_path / "input.json")}]},
+            )
+
+        assert result.is_error is True
+        assert result.structured_content["code"] == "ANALYSIS_FAILURE"
+        assert result.structured_content["message"] == "Analysis failed unexpectedly."
+        assert "private provider state" not in json.dumps(result.structured_content)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_path: Path) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("\n" * (MAX_ROWS + 204))
+    artifact = tmp_path / ".coverage"
+    data = CoverageData(basename=str(artifact))
+    data.add_lines({str(source): set(range(1, MAX_ROWS + 205))})
+    data.write()
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            continuation: str | None = None
+            terminal = None
+            for _ in range(12):
+                terminal = await client.call_tool(
+                    "analyze_coverage_summary",
+                    {
+                        "sources": [{"kind": "path", "path": str(artifact), "format": "coverage"}],
+                        "limits": {"max_rows": 100},
+                        "continuation": continuation,
+                    },
+                )
+                continuation = terminal.structured_content["continuation"]
+                if continuation is None:
+                    break
+
+        assert terminal is not None
+        assert terminal.structured_content["truncation"]["reason"] == "provider_limit"
+        summary = terminal.content[0]
+        assert isinstance(summary, TextContent)
+        assert "no continuation is available" in summary.text
+        assert "narrow" in summary.text
+        assert "preserve" not in summary.text
+
+    anyio.run(exercise)
 
 
 @pytest.mark.unit
@@ -3219,6 +4047,35 @@ def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
 
 
 @pytest.mark.integration
+def test_repository_rejects_invalid_nested_analysis_request_before_projection(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+        evidence_id = preserved["evidence_id"]
+        bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
+        manifest = json.loads((bundle / "manifest.json").read_text())
+        manifest["body"]["analysis_request"]["inputs"] = ["not-an-input"]
+        malformed_id = hashlib.sha256(canonical_bytes(manifest["body"])).hexdigest()
+        manifest["evidence_id"] = malformed_id
+        malformed_bundle = bundle.parent.parent / malformed_id[:2] / malformed_id
+        malformed_bundle.parent.mkdir()
+        bundle.rename(malformed_bundle)
+        (malformed_bundle / "manifest.json").write_bytes(canonical_bytes(manifest))
+
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.read_evidence_agent_projection(malformed_id)
+
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
 def test_repeated_preservation_revalidates_bundle_and_returns_defensive_reference(
     tmp_path: Path,
 ) -> None:
@@ -3259,6 +4116,25 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
         assert ids == sorted(ids)
         assert len(ids) == 3
         assert second["continuation"] is None
+
+        decoded_cursor = json.loads(
+            base64.urlsafe_b64decode(
+                first["continuation"] + "=" * (-len(first["continuation"]) % 4)
+            )
+        )
+        decoded_cursor["offset"] = 100
+        beyond_inventory = (
+            base64.urlsafe_b64encode(canonical_bytes(decoded_cursor)).decode().rstrip("=")
+        )
+        with pytest.raises(RuntimeFailure) as invalid_offset:
+            runtime.query_evidence(limit=2, cursor=beyond_inventory)
+        assert invalid_offset.value.code == "INVALID_INPUT"
+
+        decoded_cursor["offset"] = "1"
+        non_integer_offset = base64.urlsafe_b64encode(canonical_bytes(decoded_cursor)).decode()
+        with pytest.raises(RuntimeFailure) as invalid_type:
+            runtime.query_evidence(limit=2, cursor=non_integer_offset)
+        assert invalid_type.value.code == "INVALID_INPUT"
 
         filtered = runtime.query_evidence(limit=1, capability_id="artifact.preview")
         with pytest.raises(RuntimeFailure) as changed_filters:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
@@ -9,7 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from flameox.canonical import canonical_bytes, sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
+from flameox.providers.inference_comparison import assess_comparison, field_identities
 
 _VLLM_MAX_BYTES = 16 * 1024 * 1024
 _SGLANG_MAX_BYTES = 1024 * 1024
@@ -90,6 +93,21 @@ class _VllmDocument(_Model):
         if not math.isfinite(self.actual_duration) or not math.isfinite(self.time_scale):
             raise ValueError("duration and time scale must be finite")
         return self
+
+
+def _observed_scalars(payload: Mapping[str, Any], names: Sequence[str]) -> dict[str, Any]:
+    observed: dict[str, Any] = {}
+    for name in names:
+        value = payload.get(name)
+        is_text = isinstance(value, str) and bool(value) and len(value) <= 4_096
+        is_number = (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+        if is_text or is_number:
+            observed[name] = value
+    return observed
 
 
 _SGLANG_REQUIRED = {"duration", "completed", "total_input_tokens", "total_output_tokens"}
@@ -194,6 +212,56 @@ class InferenceExportProvider:
         except ValidationError as error:
             raise ProviderFailure("DECODE_FAILURE", "Invalid vLLM benchmark export") from error
         metrics = document.metrics
+        observed = _observed_scalars(
+            payload,
+            (
+                "model",
+                "served_model_name",
+                "tokenizer",
+                "backend",
+                "dataset_name",
+                "request_rate",
+                "max_concurrency",
+                "num_prompts",
+            ),
+        )
+        system: dict[str, Any] = {
+            **(
+                {"model": observed.get("model", observed.get("served_model_name"))}
+                if "model" in observed or "served_model_name" in observed
+                else {}
+            ),
+            **{name: observed[name] for name in ("tokenizer", "backend") if name in observed},
+        }
+        workload: dict[str, Any] = {
+            "total_requests": document.total_requests,
+            "total_input_tokens": metrics.total_input,
+            "total_output_tokens": metrics.total_output,
+            "time_scale": document.time_scale,
+            **{
+                name: observed[name]
+                for name in ("dataset_name", "request_rate", "max_concurrency", "num_prompts")
+                if name in observed
+            },
+        }
+        comparison_identity, unavailable = field_identities(
+            {
+                "system": (system, ("model", "tokenizer", "backend")),
+                "workload": (
+                    workload,
+                    (
+                        "total_requests",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "time_scale",
+                        "dataset_name",
+                        "request_rate",
+                        "max_concurrency",
+                        "num_prompts",
+                    ),
+                ),
+            }
+        )
         rows: list[dict[str, Any]] = []
 
         def add(name: str, value: int | float | None, unit: str, aggregation: str) -> None:
@@ -258,6 +326,8 @@ class InferenceExportProvider:
                         "successful_requests": document.successful_requests,
                         "failed_requests": document.failed_requests,
                         "measurement_count": len(rows),
+                        "comparison_identity": comparison_identity,
+                        "comparison_identity_unavailable": unavailable,
                     },
                 },
                 {"type": "table", "rows": returned},
@@ -295,6 +365,56 @@ class InferenceExportProvider:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise ProviderFailure("DECODE_FAILURE", "Invalid aggregate SGLang export") from error
         rows = [self._sglang_row(name, selected[name]) for name in sorted(selected)]
+        observed = _observed_scalars(
+            payload,
+            (
+                "model",
+                "tokenizer",
+                "backend",
+                "dataset_name",
+                "request_rate",
+                "max_concurrency",
+            ),
+        )
+        system: dict[str, Any] = {
+            name: observed[name] for name in ("model", "tokenizer", "backend") if name in observed
+        }
+        workload: dict[str, Any] = {
+            name: selected[name]
+            for name in (
+                "completed",
+                "num_prompts",
+                "total_input_tokens",
+                "total_output_tokens",
+                "concurrency",
+            )
+            if name in selected
+        }
+        workload.update(
+            {
+                name: observed[name]
+                for name in ("dataset_name", "request_rate", "max_concurrency")
+                if name in observed
+            }
+        )
+        comparison_identity, unavailable = field_identities(
+            {
+                "system": (system, ("model", "tokenizer", "backend")),
+                "workload": (
+                    workload,
+                    (
+                        "completed",
+                        "num_prompts",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "concurrency",
+                        "dataset_name",
+                        "request_rate",
+                        "max_concurrency",
+                    ),
+                ),
+            }
+        )
         return ProviderAnalysis(
             provider_id="sglang-benchmark",
             provider_version="aggregate-v1",
@@ -304,6 +424,8 @@ class InferenceExportProvider:
                     "values": {
                         "completed_requests": int(selected["completed"]),
                         "measurement_count": len(rows),
+                        "comparison_identity": comparison_identity,
+                        "comparison_identity_unavailable": unavailable,
                     },
                 },
                 {"type": "table", "rows": rows[:max_rows]},
@@ -348,6 +470,7 @@ class InferenceExportProvider:
         first_timestamp: int | None = None
         max_input_length = 0
         max_output_length = 0
+        workload_digest = hashlib.sha256()
         try:
             with path.open("rb") as stream:
                 for line_index, raw in enumerate(stream):
@@ -367,6 +490,17 @@ class InferenceExportProvider:
                     observed += 1
                     max_input_length = max(max_input_length, int(row["input_length"]))
                     max_output_length = max(max_output_length, int(row["output_length"]))
+                    workload_digest.update(
+                        canonical_bytes(
+                            [
+                                row["timestamp_ms"],
+                                row["input_length"],
+                                row["output_length"],
+                                row["prefix_hash_count"],
+                            ]
+                        )
+                        + b"\n"
+                    )
                     if len(rows) < max_rows:
                         rows.append(row)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
@@ -387,6 +521,8 @@ class InferenceExportProvider:
                         "request_count": observed,
                         "max_input_length": max_input_length,
                         "max_output_length": max_output_length,
+                        "comparison_identity": {"workload": sha256_id(workload_digest.hexdigest())},
+                        "comparison_identity_unavailable": ["system"],
                     },
                 },
                 {"type": "table", "rows": rows},
@@ -452,6 +588,9 @@ class InferenceExportProvider:
                 "INVALID_INPUT", f"Every input must expose the numeric metric {metric}"
             )
         baseline = statistics.fmean(series[baseline_index])
+        compatibility, identity_differences, identity_unavailable = assess_comparison(
+            analyses, arguments
+        )
         rows = []
         for index, values in enumerate(series):
             if index == baseline_index:
@@ -467,18 +606,45 @@ class InferenceExportProvider:
                     "ratio": candidate / baseline if baseline else None,
                     "baseline_samples": len(series[baseline_index]),
                     "candidate_samples": len(values),
+                    "compatibility": compatibility,
+                    "identity_differences": identity_differences,
+                    "identity_unavailable": identity_unavailable,
                 }
             )
         return ProviderAnalysis(
             provider_id=format_name,
             provider_version=analyses[0].provider_version,
             blocks=[
-                {"type": "metrics", "values": {"input_count": len(analyses), "metric": metric}},
+                {
+                    "type": "metrics",
+                    "values": {
+                        "input_count": len(analyses),
+                        "metric": metric,
+                        "compatibility": compatibility,
+                        "identity_differences": identity_differences,
+                        "identity_unavailable": identity_unavailable,
+                    },
+                },
                 {"type": "table", "rows": rows[:max_rows]},
             ],
             rows_observed=len(rows),
             complete=len(rows) <= max_rows,
-            limitations=["Comparisons use arithmetic means of prompt-free normalized metrics."],
+            limitations=[
+                "Comparisons use arithmetic means of prompt-free normalized metrics.",
+                *(
+                    ["The inference system identity is unavailable from one or more exports."]
+                    if identity_unavailable
+                    else []
+                ),
+                *(
+                    [
+                        "Known-different identities were compared only because heterogeneous "
+                        "mode was explicit."
+                    ]
+                    if compatibility == "heterogeneous"
+                    else []
+                ),
+            ],
         )
 
     @staticmethod

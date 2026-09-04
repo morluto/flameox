@@ -98,41 +98,35 @@ def _normalize(
         table.append(row)
 
     source_ordinal = 0
+    windowed = start_ns is not None and end_ns is not None
     for resource_ordinal, resource_spans in enumerate(request.resource_spans):
         resource = resource_spans.resource
-        append(
-            resources,
-            "resources",
-            {
-                "resource_ordinal": resource_ordinal,
-                "schema_url": resource_spans.schema_url or None,
-                "attributes_json": _json(_attributes(resource.attributes)),
-                "dropped_attributes_count": resource.dropped_attributes_count,
-            },
-        )
+        resource_row = {
+            "resource_ordinal": resource_ordinal,
+            "schema_url": resource_spans.schema_url or None,
+            "attributes_json": _json(_attributes(resource.attributes)),
+            "dropped_attributes_count": resource.dropped_attributes_count,
+        }
+        resource_added = False
+        if not windowed:
+            append(resources, "resources", resource_row)
+            resource_added = True
         for scope_ordinal, scope_spans in enumerate(resource_spans.scope_spans):
             scope = scope_spans.scope
-            append(
-                scopes,
-                "scopes",
-                {
-                    "resource_ordinal": resource_ordinal,
-                    "scope_ordinal": scope_ordinal,
-                    "name": scope.name,
-                    "version": scope.version or None,
-                    "schema_url": scope_spans.schema_url or None,
-                    "attributes_json": _json(_attributes(scope.attributes)),
-                    "dropped_attributes_count": scope.dropped_attributes_count,
-                },
-            )
+            scope_row = {
+                "resource_ordinal": resource_ordinal,
+                "scope_ordinal": scope_ordinal,
+                "name": scope.name,
+                "version": scope.version or None,
+                "schema_url": scope_spans.schema_url or None,
+                "attributes_json": _json(_attributes(scope.attributes)),
+                "dropped_attributes_count": scope.dropped_attributes_count,
+            }
+            scope_added = False
+            if not windowed:
+                append(scopes, "scopes", scope_row)
+                scope_added = True
             for span in scope_spans.spans:
-                trace_id = _id(span.trace_id, 16, "trace_id", limitations)
-                span_id = _id(span.span_id, 8, "span_id", limitations)
-                parent_id = (
-                    _id(span.parent_span_id, 8, "parent_span_id", limitations)
-                    if span.parent_span_id
-                    else None
-                )
                 start = int(span.start_time_unix_nano)
                 end = int(span.end_time_unix_nano)
                 duration = end - start if start and end and end >= start else None
@@ -143,6 +137,19 @@ def _normalize(
                 ):
                     source_ordinal += 1
                     continue
+                if not resource_added:
+                    append(resources, "resources", resource_row)
+                    resource_added = True
+                if not scope_added:
+                    append(scopes, "scopes", scope_row)
+                    scope_added = True
+                trace_id = _id(span.trace_id, 16, "trace_id", limitations)
+                span_id = _id(span.span_id, 8, "span_id", limitations)
+                parent_id = (
+                    _id(span.parent_span_id, 8, "parent_span_id", limitations)
+                    if span.parent_span_id
+                    else None
+                )
                 if start == 0 or end == 0:
                     limitations.append(f"span:{source_ordinal}:missing_timestamp")
                 elif end < start:

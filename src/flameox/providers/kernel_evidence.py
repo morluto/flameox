@@ -195,46 +195,63 @@ class KernelEvidenceProvider:
         if baseline_index >= len(documents):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
         requested_metric = arguments.get("metric")
-        series: list[dict[tuple[str, str, str], float]] = []
-        statuses: list[dict[tuple[str, str, str], str]] = []
+        series: list[dict[bytes, float]] = []
+        identities: list[dict[bytes, dict[str, Any]]] = []
+        statuses: list[dict[bytes, str]] = []
         for document in documents:
-            values: dict[tuple[str, str, str], float] = {}
-            state: dict[tuple[str, str, str], str] = {}
+            values: dict[bytes, float] = {}
+            members: dict[bytes, dict[str, Any]] = {}
+            state: dict[bytes, str] = {}
             for row in self._kernel_rows(document):
                 if row["evidence_kind"] != "measurement":
                     continue
-                identity = (str(row["case_id"]), str(row["output"]), str(row["metric"]))
-                if requested_metric is not None and identity[2] != requested_metric:
+                identity = {
+                    "case_id": str(row["case_id"]),
+                    "dimensions": row["dimensions"],
+                    "seed": row["seed"],
+                    "device": row["device"],
+                    "output": str(row["output"]),
+                    "dtype": str(row["dtype"]),
+                    "shape": row["shape"],
+                    "metric": str(row["metric"]),
+                    "comparator": row["comparator"],
+                    "threshold": row["threshold"],
+                    "unit": str(row["unit"]),
+                }
+                if requested_metric is not None and identity["metric"] != requested_metric:
                     continue
                 value = row["value"]
                 if isinstance(value, int | float) and not isinstance(value, bool):
-                    values[identity] = float(value)
-                    state[identity] = str(row["metric_status"])
+                    key = canonical_bytes(identity)
+                    values[key] = float(value)
+                    members[key] = identity
+                    state[key] = str(row["metric_status"])
             series.append(values)
+            identities.append(members)
             statuses.append(state)
         common = set(series[baseline_index])
         for values in series:
             common.intersection_update(values)
+        all_identities = set().union(*(set(values) for values in series))
+        unmatched = all_identities.difference(common)
         rows: list[dict[str, Any]] = []
-        for identity in sorted(common):
-            baseline = series[baseline_index][identity]
+        for key in sorted(common):
+            baseline = series[baseline_index][key]
             for input_index, values in enumerate(series):
                 if input_index == baseline_index:
                     continue
-                candidate = values[identity]
+                candidate = values[key]
                 rows.append(
                     {
-                        "case_id": identity[0],
-                        "output": identity[1],
-                        "metric": identity[2],
+                        **identities[baseline_index][key],
                         "baseline_index": baseline_index,
                         "candidate_index": input_index,
                         "baseline_value": baseline,
                         "candidate_value": candidate,
                         "delta": candidate - baseline,
                         "ratio": candidate / baseline if baseline else None,
-                        "baseline_status": statuses[baseline_index][identity],
-                        "candidate_status": statuses[input_index][identity],
+                        "baseline_status": statuses[baseline_index][key],
+                        "candidate_status": statuses[input_index][key],
                     }
                 )
         return ProviderAnalysis(
@@ -246,6 +263,7 @@ class KernelEvidenceProvider:
                     "values": {
                         "input_count": len(documents),
                         "compatible_metric_count": len(common),
+                        "unmatched_identity_count": len(unmatched),
                     },
                 },
                 {"type": "table", "rows": rows[:max_rows]},
@@ -254,7 +272,12 @@ class KernelEvidenceProvider:
             complete=len(rows) <= max_rows,
             limitations=[
                 "Metric deltas compare declared validation outputs; they do not establish "
-                "performance."
+                "performance.",
+                *(
+                    ["Measurements absent from one or more inputs were not compared."]
+                    if unmatched
+                    else []
+                ),
             ],
         )
 

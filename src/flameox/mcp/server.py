@@ -195,11 +195,17 @@ def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) ->
         state = "complete" if complete else "bounded or incomplete"
         continuation = value.get("continuation")
         preserved = value.get("preserved")
+        truncation = value.get("truncation")
+        provider_limited = (
+            isinstance(truncation, dict) and truncation.get("reason") == "provider_limit"
+        )
         next_action = (
             "follow the returned evidence resource"
             if resource is not None or isinstance(preserved, dict)
             else "request the continuation page"
             if isinstance(continuation, str)
+            else "narrow the semantic query or recapture; no continuation is available"
+            if provider_limited
             else "preserve the session analysis if durable evidence is needed"
         )
         return (
@@ -388,8 +394,16 @@ def create_server(
                 )
             except RuntimeFailure as error:
                 return _failure(error)
-            except (OSError, ValueError, json.JSONDecodeError) as error:
-                return _failure(RuntimeFailure("DECODE_FAILURE", str(error)))
+            except OSError:
+                return _failure(
+                    RuntimeFailure("DECODE_FAILURE", "Input could not be read during analysis.")
+                )
+            except (ValueError, json.JSONDecodeError):
+                return _failure(
+                    RuntimeFailure("DECODE_FAILURE", "Input could not be decoded during analysis.")
+                )
+            except Exception:
+                return _failure(RuntimeFailure("ANALYSIS_FAILURE", "Analysis failed unexpectedly."))
 
         # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
         handler.__name__ = analysis_tool_name(capability)
@@ -493,9 +507,12 @@ def create_server(
                 return _failure(error)
             except asyncio.CancelledError:
                 raise
-            except Exception as error:
+            except Exception:
                 return _failure(
-                    RuntimeFailure("EXECUTION_FAILURE", str(error) or type(error).__name__)
+                    RuntimeFailure(
+                        "EXECUTION_FAILURE",
+                        "Capture failed unexpectedly without trustworthy evidence.",
+                    )
                 )
 
         handler.__name__ = capture_tool_name(capability)

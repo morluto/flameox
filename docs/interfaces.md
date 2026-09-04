@@ -88,6 +88,11 @@ metrics and rows remain open JSON values. Success uses structured content direct
 details. MCP SDK argument-validation errors occur before tool execution and therefore use the
 protocol error shape rather than the tool's output schema.
 
+Failure messages and details are protocol data. MCP handlers project typed `RuntimeFailure` values
+but never serialize arbitrary exception text: filesystem exceptions may contain host paths, and
+dependency exceptions may contain argv or environment-derived values. Unexpected failures use a
+stable operation-specific summary; cancellation remains a control path and is re-raised.
+
 `prepare_providers` and the capture tools are open-world. Preparation resolves the exact package
 requirement through `uvx`, verifies that environment by running Flameox's version command, and
 returns the same requirement in a global, version-pinned MCP launcher. Capture tools execute an
@@ -122,11 +127,18 @@ can choose which of its rows to request. They can cross process boundaries, so
 a CLI invocation can resume a previous page. A changed input cannot reuse a
 continuation.
 
+Decoded offsets must be integers within the available bounded population. Negative offsets and
+offsets at or beyond the end fail with `INVALID_INPUT`; they never use Python slicing semantics or
+produce empty complete evidence. Continuation tests cover wrong-request, changed-input, negative,
+non-integer, and beyond-end cases.
+
 Projection providers may expose a bounded prefix when their native reader cannot
 resume safely. Such results keep `coverage.complete=false`, identify
 `truncation.reason=provider_limit`, and do not emit a continuation after the last
 retrievable row. A continuation therefore always names a consumable next page;
-it never promises access beyond a provider's declared projection bound.
+it never promises access beyond a provider's declared projection bound. MCP summaries direct that
+terminal case toward a narrower semantic query or a reduced recapture; preservation cannot recover
+rows the provider never returned.
 
 Requests may lower startup row, result-byte, timeout, output-byte, and durable
 provenance-byte limits. Durable provenance bounds the captured argv and execution

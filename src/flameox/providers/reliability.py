@@ -31,11 +31,15 @@ class ReliabilityProvider:
         invocations: dict[str, dict[str, Any]] = {}
         finished = False
         interrupted = False
+        exit_status: int | None = None
         teardown_failures: set[tuple[str, str]] = set()
         for index, event in self._events(path):
             event_name = event.get("event")
             if event_name == "run_finished":
                 finished = True
+                reported_status = event.get("exitstatus")
+                if isinstance(reported_status, int) and not isinstance(reported_status, bool):
+                    exit_status = reported_status
                 continue
             if event_name in {"interrupted", "internal_error"}:
                 interrupted = True
@@ -158,24 +162,29 @@ class ReliabilityProvider:
             key=lambda row: (-int(row["known_work_ns"]), str(row["invocation_id"]))
         )
         rows = [*aggregate_rows, *invocation_rows]
-        completion = "interrupted" if interrupted else "complete" if finished else "incomplete"
+        completion = self._pytest_completion(
+            finished=finished, interrupted=interrupted, exit_status=exit_status
+        )
         incomplete_count = sum(not bool(row["complete"]) for row in invocation_rows)
+        metrics: dict[str, Any] = {
+            "completion": completion,
+            "fixture_count": len(aggregate_rows),
+            "invocation_count": len(invocation_rows),
+            "worker_count": len(worker_work),
+            "incomplete_invocation_count": incomplete_count,
+            "teardown_failure_count": len(teardown_failures),
+            "summed_fixture_work_ns": sum(worker_work.values()),
+            "max_worker_fixture_work_ns": max(worker_work.values(), default=0),
+        }
+        if exit_status not in {None, 0}:
+            metrics["exit_status"] = exit_status
         return ProviderAnalysis(
             provider_id="pytest",
             provider_version="event-stream-v2",
             blocks=[
                 {
                     "type": "metrics",
-                    "values": {
-                        "completion": completion,
-                        "fixture_count": len(aggregate_rows),
-                        "invocation_count": len(invocation_rows),
-                        "worker_count": len(worker_work),
-                        "incomplete_invocation_count": incomplete_count,
-                        "teardown_failure_count": len(teardown_failures),
-                        "summed_fixture_work_ns": sum(worker_work.values()),
-                        "max_worker_fixture_work_ns": max(worker_work.values(), default=0),
-                    },
+                    "values": metrics,
                 },
                 {"type": "table", "rows": rows[:max_rows]},
             ],
@@ -195,11 +204,12 @@ class ReliabilityProvider:
 
     def _pytest(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         collected: set[str] = set()
-        phase_events: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        phase_events: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(dict)
         collection_errors: list[dict[str, Any]] = []
         global_failures: list[dict[str, Any]] = []
         finished = False
         interrupted = False
+        exit_status: int | None = None
         for index, event in self._events(path):
             event_name = event.get("event")
             if event_name == "test_collected" and isinstance(event.get("nodeid"), str):
@@ -209,7 +219,8 @@ class ReliabilityProvider:
                 phase = event.get("phase")
                 outcome = event.get("outcome")
                 if all(isinstance(item, str) for item in (nodeid, phase, outcome)):
-                    phase_events[str(nodeid)][str(phase)] = self._pytest_row(index, event)
+                    reports = phase_events[str(nodeid)]
+                    reports.setdefault(str(phase), []).append(self._pytest_row(index, event))
             elif event_name == "collection_error" and isinstance(event.get("nodeid"), str):
                 collection_errors.append(
                     {
@@ -222,21 +233,34 @@ class ReliabilityProvider:
                 )
             elif event_name == "run_finished":
                 finished = True
+                reported_status = event.get("exitstatus")
+                if isinstance(reported_status, int) and not isinstance(reported_status, bool):
+                    exit_status = reported_status
             elif event_name in {"interrupted", "internal_error"}:
                 interrupted = True
                 global_failures.append(
                     {"index": index, "classification": str(event_name), "nodeid": None}
                 )
         phases = {
-            nodeid: {phase: str(event["outcome"]) for phase, event in reports.items()}
+            nodeid: {phase: str(events[-1]["outcome"]) for phase, events in reports.items()}
             for nodeid, reports in phase_events.items()
         }
         outcomes = self._outcomes(phases)
         outcomes["errored"] += len(collection_errors)
+        retried = sum(
+            max(0, len(events) - 1)
+            for reports in phase_events.values()
+            for events in reports.values()
+        )
+        outcome_rows = [
+            self._pytest_outcome_row(nodeid, reports) for nodeid, reports in phase_events.items()
+        ]
+        flaky = sum(row["classification"] == "flaky" for row in outcome_rows)
+        if retried:
+            outcomes["retried"] = retried
+            outcomes["flaky"] = flaky
         diagnostic_rows = [
-            self._pytest_outcome_row(nodeid, reports)
-            for nodeid, reports in phase_events.items()
-            if self._pytest_classification(phases[nodeid]) in {"failed", "errored"}
+            row for row in outcome_rows if row["classification"] in {"failed", "errored", "flaky"}
         ]
         diagnostic_rows.extend(global_failures)
         diagnostic_rows.extend(collection_errors)
@@ -255,7 +279,8 @@ class ReliabilityProvider:
             "failed": 1,
             "internal_error": 2,
             "interrupted": 3,
-            "unexecuted": 4,
+            "flaky": 4,
+            "unexecuted": 5,
         }
         diagnostic_rows.sort(
             key=lambda row: (
@@ -263,20 +288,25 @@ class ReliabilityProvider:
                 str(row.get("nodeid") or ""),
             )
         )
-        completion = "interrupted" if interrupted else "complete" if finished else "incomplete"
+        completion = self._pytest_completion(
+            finished=finished, interrupted=interrupted, exit_status=exit_status
+        )
+        metrics: dict[str, Any] = {
+            "completion": completion,
+            "collected": len(collected),
+            "executed": len(phases),
+            "unexecuted": len(collected.difference(phases)),
+            **outcomes,
+        }
+        if exit_status not in {None, 0}:
+            metrics["exit_status"] = exit_status
         return ProviderAnalysis(
             provider_id="pytest",
             provider_version="event-stream-v1",
             blocks=[
                 {
                     "type": "metrics",
-                    "values": {
-                        "completion": completion,
-                        "collected": len(collected),
-                        "executed": len(phases),
-                        "unexecuted": len(collected.difference(phases)),
-                        **outcomes,
-                    },
+                    "values": metrics,
                 },
                 {"type": "table", "rows": diagnostic_rows[:max_rows]},
             ],
@@ -290,10 +320,21 @@ class ReliabilityProvider:
         )
 
     @staticmethod
+    def _pytest_completion(*, finished: bool, interrupted: bool, exit_status: int | None) -> str:
+        if interrupted:
+            return "interrupted"
+        if exit_status not in {None, 0}:
+            return "failed"
+        return "complete" if finished else "incomplete"
+
+    @staticmethod
     def _pytest_classification(reports: dict[str, str]) -> str:
-        if reports.get("setup") == "failed" or reports.get("teardown") == "failed":
+        if reports.get("setup") in {"failed", "rerun"} or reports.get("teardown") in {
+            "failed",
+            "rerun",
+        }:
             return "errored"
-        if reports.get("call") == "failed":
+        if reports.get("call") in {"failed", "rerun"}:
             return "failed"
         if "skipped" in reports.values():
             return "skipped"
@@ -302,20 +343,37 @@ class ReliabilityProvider:
         return "errored"
 
     @classmethod
-    def _pytest_outcome_row(cls, nodeid: str, reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        outcomes = {phase: str(event["outcome"]) for phase, event in reports.items()}
+    def _pytest_outcome_row(
+        cls, nodeid: str, reports: dict[str, list[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        attempts = {
+            phase: [str(event["outcome"]) for event in events] for phase, events in reports.items()
+        }
+        outcomes = {phase: values[-1] for phase, values in attempts.items()}
         classification = cls._pytest_classification(outcomes)
+        failed_attempts = {"failed", "rerun"}
+        if classification == "passed" and any(
+            failed_attempts.intersection(values) for values in attempts.values()
+        ):
+            classification = "flaky"
         failing_phase = next(
-            (phase for phase in ("setup", "call", "teardown") if outcomes.get(phase) == "failed"),
+            (
+                phase
+                for phase in ("setup", "call", "teardown")
+                if failed_attempts.intersection(attempts.get(phase, []))
+            ),
             None,
         )
-        return {
-            "index": min(int(event["index"]) for event in reports.values()),
+        row = {
+            "index": min(int(event["index"]) for events in reports.values() for event in events),
             "nodeid": nodeid,
             "classification": classification,
             "failing_phase": failing_phase,
             "phase_outcomes": outcomes,
         }
+        if any(len(values) > 1 for values in attempts.values()):
+            row["phase_attempts"] = attempts
+        return row
 
     def _observations(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         rows: list[dict[str, Any]] = []

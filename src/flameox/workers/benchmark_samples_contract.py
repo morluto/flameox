@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, TypeAdapter
 
@@ -10,7 +10,9 @@ from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
 class BenchmarkSamplesWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
-    max_rows: Annotated[int, Field(gt=0, le=1_001)]
+    max_rows: Annotated[int, Field(gt=0, le=100_000)]
+    projection: Literal["samples", "series"] = "samples"
+    metric: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class BenchmarkSamplesWorkerResult(ContractModel):

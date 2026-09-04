@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from flameox.canonical import canonical_bytes
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
@@ -28,7 +29,7 @@ class _NvbenchBundle:
     rows: list[dict[str, Any]]
     measurement_count: int
     benchmark_names: set[str]
-    series: dict[tuple[str, str], tuple[float, int]]
+    series: dict[bytes, tuple[dict[str, Any], float, int]]
 
 
 class NvbenchProvider:
@@ -51,13 +52,19 @@ class NvbenchProvider:
         if capability_id == "benchmark.compare":
             return self._compare(parsed, arguments, max_rows=max_rows)
         if capability_id == "benchmark.scaling":
-            if any(bundle.measurement_count > len(bundle.rows) for bundle in parsed):
-                raise ProviderFailure(
-                    "LIMIT_EXCEEDED",
-                    "benchmark.scaling requires complete samples; raise the startup row limit",
-                )
             return scaling_projection(
-                [row for bundle in parsed for row in bundle.rows],
+                [
+                    {
+                        **identity,
+                        "is_warmup": False,
+                        "value_int": None,
+                        "value_float": None,
+                        "sample_sum": total,
+                        "sample_count": count,
+                    }
+                    for bundle in parsed
+                    for identity, total, count in bundle.series.values()
+                ],
                 arguments,
                 provider_id="nvbench",
                 provider_version=parsed[0].version,
@@ -111,22 +118,37 @@ class NvbenchProvider:
         for bundle in bundles:
             common.intersection_update(bundle.series)
         if requested_metric is not None:
-            common = {identity for identity in common if identity[0] == requested_metric}
+            common = {
+                key
+                for key in common
+                if bundles[baseline_index].series[key][0]["benchmark"] == requested_metric
+            }
+        all_identities = set().union(*(set(bundle.series) for bundle in bundles))
+        if requested_metric is not None:
+            all_identities = {
+                key
+                for key in all_identities
+                if any(
+                    bundle.series[key][0]["benchmark"] == requested_metric
+                    for bundle in bundles
+                    if key in bundle.series
+                )
+            }
+        unmatched = all_identities.difference(common)
         baseline = bundles[baseline_index].series
         rows: list[dict[str, Any]] = []
-        for identity in sorted(common):
-            baseline_sum, baseline_count = baseline[identity]
+        for key in sorted(common):
+            identity, baseline_sum, baseline_count = baseline[key]
             baseline_mean = baseline_sum / baseline_count
             for input_index, bundle in enumerate(bundles):
                 if input_index == baseline_index:
                     continue
-                candidate_sum, candidate_count = bundle.series[identity]
+                _candidate_identity, candidate_sum, candidate_count = bundle.series[key]
                 candidate_mean = candidate_sum / candidate_count
                 if len(rows) < max_rows:
                     rows.append(
                         {
-                            "benchmark": identity[0],
-                            "unit": identity[1],
+                            **identity,
                             "baseline_index": baseline_index,
                             "candidate_index": input_index,
                             "baseline_mean": baseline_mean,
@@ -144,6 +166,7 @@ class NvbenchProvider:
                     "values": {
                         "input_count": len(bundles),
                         "compatible_metric_count": len(common),
+                        "unmatched_identity_count": len(unmatched),
                     },
                 },
                 {"type": "table", "rows": rows},
@@ -151,7 +174,12 @@ class NvbenchProvider:
             rows_observed=observed,
             complete=observed <= len(rows),
             limitations=[
-                "Ratios summarize observed sample means and do not establish causal improvement."
+                "Ratios summarize observed sample means and do not establish causal improvement.",
+                *(
+                    ["Series absent from one or more inputs were not compared."]
+                    if unmatched
+                    else []
+                ),
             ],
         )
 
@@ -194,7 +222,7 @@ class NvbenchProvider:
         if not isinstance(benchmarks, list) or len(benchmarks) > _MAX_BENCHMARKS:
             raise ProviderFailure("LIMIT_EXCEEDED", "NVBench benchmark count is invalid")
         rows: list[dict[str, Any]] = []
-        series: dict[tuple[str, str], tuple[float, int]] = {}
+        series: dict[bytes, tuple[dict[str, Any], float, int]] = {}
         benchmark_names: set[str] = set()
         measurement_count = 0
         state_count = 0
@@ -229,7 +257,13 @@ class NvbenchProvider:
                     series_name = _HINTS[cast(str, hint)][1]
                     metric_name = f"{benchmark_name}.{series_name}"
                     benchmark_names.add(metric_name)
-                    total, seen = series.get((metric_name, unit), (0.0, 0))
+                    identity = {
+                        "benchmark": metric_name,
+                        "unit": unit,
+                        "dimensions": _state_dimensions(state),
+                    }
+                    key = canonical_bytes(identity)
+                    _previous_identity, total, seen = series.get(key, (identity, 0.0, 0))
                     for row in _sidecar_rows(
                         sidecar,
                         count=count,
@@ -243,7 +277,7 @@ class NvbenchProvider:
                         seen += 1
                         if max_rows is None or len(rows) < max_rows:
                             rows.append(row)
-                    series[(metric_name, unit)] = total, seen
+                    series[key] = identity, total, seen
                     if measurement_count > _MAX_SAMPLES:
                         raise ProviderFailure(
                             "LIMIT_EXCEEDED", "NVBench sample count exceeds the limit"

@@ -145,6 +145,21 @@ def _node_cpu(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvo
     return CaptureInvocation(argv, request.environment, ((output, "cpuprofile", "cpu-profile"),))
 
 
+def _node_heap(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
+    _arguments(request, EmptyArguments)
+    output = request.directory / "profile.heapprofile"
+    argv = (
+        request.target_argv[0],
+        "--heap-prof",
+        f"--heap-prof-dir={request.directory}",
+        f"--heap-prof-name={output.name}",
+        *request.target_argv[1:],
+    )
+    return CaptureInvocation(
+        argv, request.environment, ((output, "heapprofile", "memory-profile"),)
+    )
+
+
 def _benchmark_samples(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
     arguments = cast(
         BenchmarkSamplesCaptureArguments,
@@ -406,6 +421,7 @@ CAPTURE_BUILDERS: dict[str, CaptureBuilder] = {
     "direct": _direct,
     "memray": _memray,
     "node-cpu-profile": _node_cpu,
+    "node-heap-profile": _node_heap,
     "nsight-compute": _nsight_compute,
     "nsight-systems": _nsight_systems,
     "nvbench": _nvbench,
