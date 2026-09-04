@@ -35,9 +35,9 @@ uv run flameox --help
 ```
 
 Install only the optional providers needed for the area you are changing. The
-[testing guide](docs/testing.md#optional-and-performance-evidence) lists the
-available extras and their markers. To install every supported integration,
-run:
+extras are declared in [pyproject.toml](pyproject.toml); the
+[testing guide](docs/testing.md) describes provider evidence and test markers.
+To install every supported integration, run:
 
 ```console
 uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
@@ -67,6 +67,11 @@ Keep the CLI and MCP server as thin transports over the same application
 services. Preserve native artifacts, provenance, failed attempts, and
 experimental structure. Observed, derived, and inferred claims must remain
 distinct, and limitations must be reported rather than hidden behind a fallback.
+
+Review the [agent contract invariants](docs/agent-contract-invariants.md) when a change crosses
+setup, execution, projection, preservation, or retrieval. Select the corresponding
+[cross-boundary regression evidence](docs/testing.md#cross-boundary-regression-evidence), including
+interactions such as failure with truncation and preservation before pagination.
 
 Prefer a maintained public interface or an existing repository helper over a
 custom abstraction. Fix the condition that caused a defect rather than adding a

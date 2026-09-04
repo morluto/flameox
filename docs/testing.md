@@ -42,6 +42,25 @@ whitespace before asserting a multi-token message. Prefer structured JSON assert
 the supported contract. Recovery commands that must remain readable should also be exercised at a
 narrow terminal width matching CI.
 
+## Cross-boundary regression evidence
+
+Test interacting behaviors, not only each component in isolation. The
+[agent contract invariants](agent-contract-invariants.md) define the intended outcomes:
+
+| Combination | Required observable proof |
+| --- | --- |
+| Failed capture and response truncation | Failure classification survives removal or reordering of diagnostic records. |
+| Preservation before pagination | The returned source and continuation still retrieve the next page, or an explicit replacement does. |
+| Resource redaction and artifact selection | An agent can select a particular artifact using only the public response, without private paths. |
+| Missing-provider recovery and an existing provider set | Following the recovery respects the declared selection semantics and identifies any replacement. |
+| Equivalent input formatting and parsing | Valid whitespace variations preserve observations and completeness. |
+| Point estimate and uncertainty | Descriptive labels remain distinct from confidence-qualified conclusions. |
+
+Use public serialized producer outputs as consumer inputs. Include the neighboring supported case
+and the failure-triggering interaction. A passing helper test or source inspection can establish a
+local mechanism, but must not be reported as an end-to-end MCP reproduction. The linked issues
+identify coverage still needed; this table does not claim those tests already exist.
+
 ## Performance evidence
 
 Representative performance cases include 1,000-member identity accumulation,

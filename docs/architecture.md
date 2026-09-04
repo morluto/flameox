@@ -4,6 +4,10 @@ Flameox 0.2 is a process-lifespan capability runtime with an optional immutable
 evidence repository. It is not a workspace application and has no mutable
 control plane.
 
+The [agent contract invariants](agent-contract-invariants.md) explain how execution outcomes,
+dependency ownership, and evidence lifetimes must compose across these boundaries. They distinguish
+design requirements from known implementation gaps.
+
 ## Authority map
 
 | Concern | Authority |

@@ -55,6 +55,12 @@ reported as limitations; fewer than three eligible pairs produce a descriptive
 estimate without a confidence interval. The practical-threshold decision is
 returned as typed comparison evidence, not retained only as request metadata.
 
+Current practical-threshold labels classify the point estimate, not the confidence interval.
+For example, `within_threshold` does not establish statistical equivalence when the interval
+extends outside the practical margin. See the
+[descriptive-versus-inferential distinction](agent-contract-invariants.md#distinguish-descriptions-from-statistical-conclusions)
+and its linked design issue before treating a label as a confidence-qualified conclusion.
+
 Artifact comparison is separate from that experiment result. Capture the representative baseline
 and candidate summaries independently, preserve them if they must survive the session, then submit
 both sources to the matching `analyze_*_compare` tool. There is no `capture_*_compare` shortcut:

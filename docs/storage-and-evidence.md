@@ -3,6 +3,11 @@
 Storage is optional. Analysis and unpreserved capture must not create user data, project files,
 `.diagnostics`, SQLite files, or persistent DuckDB files.
 
+Preservation and retrieval must obey the
+[producer-consumer invariants](agent-contract-invariants.md#make-producer-outputs-usable-by-consumers).
+That section records known gaps involving artifact selectors and capture continuations; the
+existence of a preserved bundle alone does not establish that an earlier continuation still works.
+
 ## Repository layout
 
 The first explicit preservation creates exactly:

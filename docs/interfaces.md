@@ -3,6 +3,10 @@
 CLI and MCP are thin transports over `AnalysisRuntime`. They do not own storage,
 provider behavior, or lifecycle state.
 
+Apply the [agent contract invariants](agent-contract-invariants.md) when changing schemas, recovery
+instructions, result projection, or producer-consumer handoffs. That guide also identifies known
+gaps; a documented intended invariant is not proof that a current result satisfies it.
+
 ## MCP catalog
 
 The catalog exposes task-shaped tools for client-side tool search. Flameox does not add a second
