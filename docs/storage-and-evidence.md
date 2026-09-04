@@ -43,6 +43,11 @@ analysis requests, the evidence-episode timestamp, data-file digests, coverage,
 and limitations. Process-local handles such as `analysis_id` and continuation
 tokens are excluded from preserved data.
 
+Content identity does not establish schema validity. Readers parse the complete manifest shape,
+including nested capture targets, executions, analysis inputs, offsets, and failure records, before
+querying or projecting it. A self-consistent manifest with a correctly recomputed evidence ID but an
+invalid nested request is repository corruption.
+
 The stored envelope adds `format_version` and `evidence_id`. The canonical manifest remains the
 local repository and CLI contract. MCP resources expose a separate redacted projection so durable
 provenance is not confused with agent-visible metadata:
@@ -78,6 +83,10 @@ is provably dead.
 inventory digest before filtering. A continuation is bound to that inventory;
 mutation makes it stale rather than silently changing the page. Filters cover
 evidence kind, capability, provider, input digest, and time bounds.
+
+Cursor offsets are strict non-negative integers and must identify an item inside the bound
+inventory. An offset at or beyond the inventory end is invalid rather than an empty successful
+page; an empty page therefore means that the valid remaining inventory contains no matches.
 
 `flameox://evidence/{evidence_id}` validates the canonical manifest and returns its redacted MCP
 projection. `flameox evidence show` remains the explicit local administrative view of the full

@@ -370,6 +370,10 @@ class AnalysisRuntime:
             )
         if provider_analysis is None:
             rows, observed, complete = self._read_rows(resolved, offset, selected_limits.max_rows)
+            if continuation is not None and offset >= observed:
+                raise RuntimeFailure(
+                    "INVALID_INPUT", "Continuation offset is beyond the available evidence"
+                )
             continuation_available = not complete
             truncation_reason = "row_limit"
             blocks: list[dict[str, Any]] = [
@@ -385,6 +389,10 @@ class AnalysisRuntime:
             provider_rows = provider_analysis.blocks[-1]["rows"]
             if not isinstance(provider_rows, list):
                 raise RuntimeFailure("DECODE_FAILURE", "Provider table block is invalid")
+            if continuation is not None and offset >= len(provider_rows):
+                raise RuntimeFailure(
+                    "INVALID_INPUT", "Continuation offset is beyond the available evidence"
+                )
             rows = provider_rows[offset : offset + selected_limits.max_rows]
             observed = provider_analysis.rows_observed
             next_offset = offset + len(rows)
@@ -821,6 +829,7 @@ class AnalysisRuntime:
             )
         except RuntimeFailure as error:
             if not preserve:
+                shutil.rmtree(request_scratch, ignore_errors=True)
                 raise
             result = self._capture_failure_result(
                 target=target,
@@ -1257,7 +1266,9 @@ class AnalysisRuntime:
                     raise RuntimeFailure(exc.code, exc.message) from exc
                 cached.preserved = None
             except OSError as exc:
-                raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+                raise RuntimeFailure(
+                    "REPOSITORY_IO_FAILURE", "Preserved evidence could not be validated."
+                ) from exc
             else:
                 self.analyses.move_to_end(analysis_id)
                 return dict(cached.preserved)
@@ -1313,7 +1324,9 @@ class AnalysisRuntime:
             except RepositoryError as exc:
                 raise RuntimeFailure(exc.code, exc.message) from exc
             except OSError as exc:
-                raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+                raise RuntimeFailure(
+                    "REPOSITORY_IO_FAILURE", "Evidence could not be preserved."
+                ) from exc
         self.analyses.move_to_end(analysis_id)
         return dict(cached.preserved)
 
@@ -1405,7 +1418,9 @@ class AnalysisRuntime:
         except RepositoryError as exc:
             raise RuntimeFailure(exc.code, exc.message) from exc
         except OSError as exc:
-            raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "The evidence repository could not be queried."
+            ) from exc
 
     def read_evidence(self, evidence_id: str) -> dict[str, Any]:
         try:
@@ -1413,7 +1428,9 @@ class AnalysisRuntime:
         except RepositoryError as exc:
             raise RuntimeFailure(exc.code, exc.message) from exc
         except OSError as exc:
-            raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "The requested evidence could not be read."
+            ) from exc
 
     def read_evidence_agent_projection(self, evidence_id: str) -> dict[str, Any]:
         try:
@@ -1421,7 +1438,9 @@ class AnalysisRuntime:
         except RepositoryError as exc:
             raise RuntimeFailure(exc.code, exc.message) from exc
         except OSError as exc:
-            raise RuntimeFailure("REPOSITORY_IO_FAILURE", str(exc)) from exc
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "The requested evidence projection could not be read."
+            ) from exc
 
     def _resolve_sources(
         self, sources: Sequence[Source], limits: RequestLimits
@@ -1486,6 +1505,7 @@ class AnalysisRuntime:
             ".csv": "csv",
             ".parquet": "parquet",
             ".cpuprofile": "cpuprofile",
+            ".heapprofile": "heapprofile",
             ".pftrace": "perfetto",
             ".perfetto-trace": "perfetto",
             ".trace": "xctrace",
@@ -2130,11 +2150,17 @@ class AnalysisRuntime:
         self, result: dict[str, Any], limit: int, identity: Mapping[str, Any], offset: int
     ) -> None:
         rows = result["blocks"][1]["rows"]
+        had_rows = bool(rows)
         while len(canonical_bytes(result)) > limit and rows:
             rows.pop()
             result["coverage"].update(rows_returned=len(rows), complete=False)
             result["truncation"] = {"reason": "result_bytes", "next_offset": offset + len(rows)}
             result["continuation"] = self._encode_continuation(identity, offset + len(rows))
+        if had_rows and not rows:
+            raise RuntimeFailure(
+                "LIMIT_EXCEEDED",
+                "A result row exceeds max_result_bytes and cannot form an advancing page",
+            )
         if len(canonical_bytes(result)) > limit:
             raise RuntimeFailure("LIMIT_EXCEEDED", "Result metadata exceeds max_result_bytes")
 
@@ -2321,7 +2347,10 @@ class AnalysisRuntime:
                 or payload["request"] != hashlib.sha256(canonical_bytes(identity)).hexdigest()
             ):
                 raise ValueError
-            return int(payload["offset"])
+            offset = payload["offset"]
+            if type(offset) is not int or offset < 0:
+                raise ValueError
+            return offset
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"

@@ -62,6 +62,10 @@ Readers see no bundle or one complete bundle. Corruption is never repaired in
 place or hidden by a catalog rebuild. Abandoned staging is removed only when the
 recorded owner process is provably absent.
 
+Repository validation treats persisted JSON as boundary input even when its digest is correct.
+Nested request and execution structures are parsed before query, materialization, or MCP projection;
+downstream code does not discover malformed state through `KeyError` or `AttributeError`.
+
 ## Privacy
 
 All work stays local. Manifests preserve explicit paths, provider identity,
@@ -71,3 +75,7 @@ artifacts, launch native viewers, or expose payload bytes through MCP resources.
 The ordinary MCP evidence resource is a structurally allowlisted projection: full argv,
 environment values, working directories, source paths, and scratch paths remain available only
 through explicit local canonical-manifest inspection.
+
+The same rule applies to failures. MCP messages use stable, path-free summaries for unexpected I/O
+and dependency errors and do not include raw exception strings. Local exception chaining retains the
+cause for debugging without making it part of the agent-visible contract.

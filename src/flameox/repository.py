@@ -326,6 +326,10 @@ class EvidenceRepository:
             created_before=created_before,
         )
         offset = self._decode_cursor(cursor, inventory_digest, query_digest)
+        if cursor is not None and offset >= len(inventory):
+            raise RepositoryError(
+                "INVALID_INPUT", "Repository query continuation is beyond the inventory."
+            )
         matches: list[dict[str, Any]] = []
         next_offset: int | None = None
         for index, path in enumerate(inventory[offset:], offset):
@@ -671,10 +675,8 @@ class EvidenceRepository:
                 or not item["role"]
             ):
                 raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence input is invalid.")
-        if body["capture_request"] is not None and not isinstance(body["capture_request"], dict):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        if not isinstance(body["analysis_request"], dict):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
+        EvidenceRepository._validate_capture_request(body["capture_request"])
+        EvidenceRepository._validate_analysis_request(body["analysis_request"])
         episode = body["episode"]
         try:
             created_at = datetime.fromisoformat(episode["created_at"])
@@ -719,6 +721,45 @@ class EvidenceRepository:
         artifacts = body["artifacts"]
         if not isinstance(artifacts, list):
             raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid.")
+
+    @staticmethod
+    def _validate_capture_request(value: Any) -> None:
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        target = value.get("target")
+        executions = value.get("executions")
+        if (
+            not isinstance(target, dict)
+            or not isinstance(target.get("provider_id"), str)
+            or not isinstance(target.get("argv"), list)
+            or not isinstance(target.get("environment"), dict)
+            or not isinstance(executions, list)
+            or any(not isinstance(item, dict) for item in executions)
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+
+    @staticmethod
+    def _validate_analysis_request(value: Any) -> None:
+        if not isinstance(value, dict) or not isinstance(value.get("capability_id"), str):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
+        inputs = value.get("inputs", [])
+        if not isinstance(inputs, list) or any(
+            not isinstance(item, dict)
+            or not _is_digest(item.get("sha256"))
+            or not isinstance(item.get("format"), str)
+            for item in inputs
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
+        offset = value.get("offset")
+        if offset is not None and (type(offset) is not int or offset < 0):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
+        failure = value.get("failure")
+        if failure is not None and (
+            not isinstance(failure, dict) or not isinstance(failure.get("code"), str)
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
 
     @staticmethod
     def _matches(
@@ -804,8 +845,8 @@ class EvidenceRepository:
                 raise RepositoryError(
                     "INVALID_INPUT", "Repository query continuation does not match its filters."
                 )
-            offset = int(value["offset"])
-            if offset < 0:
+            offset = value["offset"]
+            if type(offset) is not int or offset < 0:
                 raise ValueError
             return offset
         except RepositoryError:
