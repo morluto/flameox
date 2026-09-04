@@ -215,8 +215,8 @@ Changed clients must restart or reconnect. Non-interactive setup requires explic
 targets or `--all`; `--yes` never converts detection into consent, and `--dry-run` reports the exact
 paths and actions without mutation. Repeated `--provider` options declare the complete Python
 provider set for the exact version-pinned uvx environment used by the saved launcher.
-An existing OpenCode `opencode.jsonc` remains untouched because rewriting it as JSON would discard
-comments; setup reports the file that needs a manual Flameox entry instead.
+OpenCode `opencode.jsonc` files retain their comments and unrelated settings while setup creates or
+updates the `mcp.flameox` entry.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
 download, and compatibility failures retain uvx's complete stderr. System and
 vendor providers receive external installation guidance. Setup does not create a persistent global

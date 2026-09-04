@@ -215,12 +215,7 @@ def _select_setup_clients(detected: list[SetupClient]) -> list[SetupClient]:
     typer.echo("◆ Flameox\n  Runtime evidence for coding agents\n")
     choices = [
         questionary.Choice(
-            title=(
-                f"{item.display_name} — detected · "
-                f"{_display_setup_path(item.config_path(Path.home()))}"
-                if item in detected
-                else f"{item.display_name} · {_display_setup_path(item.config_path(Path.home()))}"
-            ),
+            title=_setup_client_choice_title(item, item in detected),
             value=item.value,
             checked=item in detected,
         )
@@ -229,10 +224,16 @@ def _select_setup_clients(detected: list[SetupClient]) -> list[SetupClient]:
     selected = questionary.checkbox(
         "Which agents should use Flameox?",
         choices=choices,
-        instruction="(space to select, enter to configure)",
+        instruction="(space to select, enter to configure or update)",
         validate=lambda values: bool(values) or "Select at least one agent.",
     ).ask()
     return parse_setup_clients(selected or [])
+
+
+def _setup_client_choice_title(client: SetupClient, detected: bool) -> str:
+    path = _display_setup_path(client.active_config_path(Path.home()))
+    marker = " — detected" if detected else ""
+    return f"{client.display_name}{marker} · {path}"
 
 
 def _display_setup_path(path: Path) -> str:

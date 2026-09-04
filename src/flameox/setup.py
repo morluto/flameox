@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from collections.abc import MutableMapping
@@ -10,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+import json5
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import InlineTable
@@ -81,6 +81,9 @@ class SetupClient(StrEnum):
             SetupClient.GEMINI: self.config_path(home),
         }[self]
         return marker.exists() or self.config_path(home).exists()
+
+    def active_config_path(self, home: Path) -> Path:
+        return _client_config_path(self, home)
 
 
 SETUP_CLIENTS = tuple(SetupClient)
@@ -163,37 +166,191 @@ def detect_setup_clients(home: Path | None = None) -> list[SetupClient]:
     return [client for client in SETUP_CLIENTS if client.is_detected(root)]
 
 
-def _launcher_is_managed(command: object, args: object) -> bool:
-    if (
-        not isinstance(command, str)
-        or Path(command).name != "uvx"
-        or not isinstance(args, list)
-        or not all(isinstance(item, str) for item in args)
-    ):
-        return False
-    try:
-        requirement = args[args.index("--from") + 1]
-    except (ValueError, IndexError):
-        return False
-    try:
-        serve_index = args.index("flameox")
-    except ValueError:
-        return False
-    trailing = args[serve_index + 3 :]
-    legacy_project_root = (
-        len(trailing) == 2 and trailing[0] == "--project-root" and bool(trailing[1])
-    )
-    return bool(
-        re.fullmatch(r"flameox(?:\[[a-z0-9,-]+\])?==[^=]+", requirement)
-        and args[serve_index : serve_index + 3] == ["flameox", "mcp", "serve"]
-        and (not trailing or legacy_project_root)
-    )
-
-
 def _json_entry(client: SetupClient, command: str, args: list[str]) -> dict[str, object]:
     if client is SetupClient.OPENCODE:
         return {"type": "local", "command": [command, *args], "enabled": True}
     return {"command": command, "args": args}
+
+
+@dataclass(frozen=True, slots=True)
+class _JsoncProperty:
+    key: str
+    key_start: int
+    value_start: int
+    value_end: int
+    has_trailing_comma: bool
+
+
+def _jsonc_skip_trivia(source: str, index: int) -> int:
+    while True:
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline == -1 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            comment_end = source.find("*/", index + 2)
+            if comment_end == -1:
+                raise SetupFailure("OpenCode configuration contains an unterminated comment.")
+            index = comment_end + 2
+            continue
+        return index
+
+
+def _jsonc_string_end(source: str, index: int) -> int:
+    quote = source[index]
+    index += 1
+    while index < len(source):
+        character = source[index]
+        if character == "\\":
+            index += 2
+        elif character == quote:
+            return index + 1
+        else:
+            index += 1
+    raise SetupFailure("OpenCode configuration contains an unterminated string.")
+
+
+def _jsonc_value_end(source: str, index: int) -> int:
+    index = _jsonc_skip_trivia(source, index)
+    if index == len(source):
+        raise SetupFailure("OpenCode configuration ends before a value.")
+    if source[index] in "\"'":
+        return _jsonc_string_end(source, index)
+    if source[index] not in "[{":
+        while index < len(source) and source[index] not in ",}]" and not source[index].isspace():
+            index += 1
+        return index
+
+    closing = {"{": "}", "[": "]"}
+    stack = [closing[source[index]]]
+    index += 1
+    while stack:
+        index = _jsonc_skip_trivia(source, index)
+        if index == len(source):
+            raise SetupFailure("OpenCode configuration ends before a value is complete.")
+        character = source[index]
+        if character in "\"'":
+            index = _jsonc_string_end(source, index)
+        elif character in closing:
+            stack.append(closing[character])
+            index += 1
+        elif character == stack[-1]:
+            stack.pop()
+            index += 1
+        else:
+            index += 1
+    return index
+
+
+def _jsonc_object_properties(source: str, object_start: int) -> tuple[list[_JsoncProperty], int]:
+    if object_start == len(source) or source[object_start] != "{":
+        raise SetupFailure("OpenCode configuration must contain a JSON object.")
+    properties: list[_JsoncProperty] = []
+    index = _jsonc_skip_trivia(source, object_start + 1)
+    while index < len(source) and source[index] != "}":
+        key_start = index
+        if source[index] in "\"'":
+            key_end = _jsonc_string_end(source, index)
+            key = json5.loads(source[index:key_end])
+            if not isinstance(key, str):
+                raise SetupFailure("OpenCode configuration contains an invalid property name.")
+        else:
+            key_end = index
+            while key_end < len(source) and (source[key_end].isalnum() or source[key_end] in "_$"):
+                key_end += 1
+            key = source[index:key_end]
+            if not key:
+                raise SetupFailure("OpenCode configuration contains an invalid property name.")
+        index = _jsonc_skip_trivia(source, key_end)
+        if index == len(source) or source[index] != ":":
+            raise SetupFailure("OpenCode configuration is missing a property separator.")
+        value_start = _jsonc_skip_trivia(source, index + 1)
+        value_end = _jsonc_value_end(source, value_start)
+        index = _jsonc_skip_trivia(source, value_end)
+        has_trailing_comma = index < len(source) and source[index] == ","
+        properties.append(
+            _JsoncProperty(key, key_start, value_start, value_end, has_trailing_comma)
+        )
+        if has_trailing_comma:
+            index = _jsonc_skip_trivia(source, index + 1)
+        if index == len(source) or source[index] == "}":
+            break
+    if index == len(source) or source[index] != "}":
+        raise SetupFailure("OpenCode configuration contains an incomplete JSON object.")
+    return properties, index
+
+
+def _jsonc_line_indent(source: str, index: int, fallback: str) -> str:
+    line_start = source.rfind("\n", 0, index) + 1
+    indentation = source[line_start:index]
+    return indentation if indentation.strip() == "" else fallback
+
+
+def _jsonc_property_text(name: str, value: object, indent: str) -> str:
+    rendered_value = json.dumps(value, ensure_ascii=False, indent=2)
+    return f"{indent}{json.dumps(name)}: {rendered_value.replace(chr(10), chr(10) + indent)}"
+
+
+def _jsonc_insert_property(
+    source: str,
+    object_end: int,
+    properties: list[_JsoncProperty],
+    property_text: str,
+    fallback_indent: str,
+) -> str:
+    closing_indent = _jsonc_line_indent(source, object_end, fallback_indent)
+    if properties and not properties[-1].has_trailing_comma:
+        last_value_end = properties[-1].value_end
+        source = f"{source[:last_value_end]},{source[last_value_end:]}"
+        object_end += 1
+    return f"{source[:object_end]}\n{property_text}\n{closing_indent}{source[object_end:]}"
+
+
+def _jsonc_update_mcp_entry(source: str, section_name: str, entry: object) -> str:
+    root_start = _jsonc_skip_trivia(source, 0)
+    root_properties, root_end = _jsonc_object_properties(source, root_start)
+    root_indent = (
+        _jsonc_line_indent(source, root_properties[0].key_start, "  ")
+        if root_properties
+        else "  "
+    )
+    section = next((item for item in root_properties if item.key == section_name), None)
+    if section is None:
+        entry_indent = f"{root_indent}  "
+        section_value = (
+            "{\n"
+            f"{_jsonc_property_text('flameox', entry, entry_indent)}\n"
+            f"{root_indent}}}"
+        )
+        return _jsonc_insert_property(
+            source,
+            root_end,
+            root_properties,
+            f"{root_indent}{json.dumps(section_name)}: {section_value}",
+            "",
+        )
+
+    section_start = _jsonc_skip_trivia(source, section.value_start)
+    section_properties, section_end = _jsonc_object_properties(source, section_start)
+    entry_indent = (
+        _jsonc_line_indent(source, section_properties[0].key_start, f"{root_indent}  ")
+        if section_properties
+        else f"{root_indent}  "
+    )
+    existing = next((item for item in section_properties if item.key == "flameox"), None)
+    if existing is not None:
+        rendered_entry = json.dumps(entry, ensure_ascii=False, indent=2)
+        rendered_entry = rendered_entry.replace(chr(10), chr(10) + entry_indent)
+        return f"{source[:existing.value_start]}{rendered_entry}{source[existing.value_end:]}"
+    return _jsonc_insert_property(
+        source,
+        section_end,
+        section_properties,
+        _jsonc_property_text("flameox", entry, entry_indent),
+        root_indent,
+    )
 
 
 def _json_plan(
@@ -206,8 +363,8 @@ def _json_plan(
     if path.exists():
         try:
             source = path.read_text()
-            document = json.loads(source)
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            document = json5.loads(source) if path.suffix == ".jsonc" else json.loads(source)
+        except (OSError, UnicodeError, ValueError) as error:
             raise SetupFailure(
                 f"Could not read {client.display_name} configuration: {path}"
             ) from error
@@ -233,25 +390,12 @@ def _json_plan(
     ):
         action: Literal["create", "update", "already_current"] = "already_current"
     else:
-        if existing is not None:
-            if client is SetupClient.OPENCODE:
-                managed = isinstance(existing, dict) and _launcher_is_managed(
-                    existing.get("command", [None])[0]
-                    if isinstance(existing.get("command"), list) and existing["command"]
-                    else None,
-                    existing.get("command", [])[1:]
-                    if isinstance(existing.get("command"), list)
-                    else None,
-                )
-            else:
-                managed = isinstance(existing, dict) and _launcher_is_managed(
-                    existing.get("command"), existing.get("args")
-                )
-            if not managed:
-                raise SetupFailure(f"Refusing to replace an unmanaged Flameox entry in {path}.")
         action = "update" if existing is not None else "create"
         section["flameox"] = {**existing, **entry} if isinstance(existing, dict) else entry
-    content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"
+    if path.suffix == ".jsonc" and source is not None and action != "already_current":
+        content = _jsonc_update_mcp_entry(source, section_name, section["flameox"])
+    else:
+        content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"
     return source, content, action
 
 
@@ -278,16 +422,14 @@ def _codex_plan(
     entry = servers.get("flameox")
     expected = {"command": command, "args": args}
     if entry is not None:
-        if not isinstance(entry, MutableMapping) or not _launcher_is_managed(
-            entry.get("command"), entry.get("args")
+        if isinstance(entry, MutableMapping) and all(
+            entry.get(key) == value for key, value in expected.items()
         ):
-            raise SetupFailure(f"Refusing to replace an unmanaged Flameox entry in {path}.")
-        if all(entry.get(key) == value for key, value in expected.items()):
             return source, source or "", "already_current"
         action: Literal["create", "update", "already_current"] = "update"
     else:
         action = "create"
-    if entry is None:
+    if not isinstance(entry, MutableMapping):
         entry = tomlkit.inline_table() if isinstance(servers, InlineTable) else tomlkit.table()
         servers["flameox"] = entry
     entry["command"] = command
@@ -309,11 +451,6 @@ def plan_client_setup(
         path = _client_config_path(client, root)
         if path.is_symlink():
             raise SetupFailure(f"Refusing to replace symbolic-link client configuration: {path}")
-        if client is SetupClient.OPENCODE and path.suffix == ".jsonc" and path.exists():
-            raise SetupFailure(
-                "OpenCode uses a comment-bearing opencode.jsonc configuration. "
-                f"Flameox will not rewrite it; add the Flameox MCP entry to {path} manually."
-            )
         if client is SetupClient.CODEX:
             original, content, action = _codex_plan(path, command, args)
         else:

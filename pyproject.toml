@@ -15,6 +15,7 @@ dependencies = [
     "duckdb>=1.5.4,<1.6",
     "defusedxml>=0.7.1,<0.8",
     "ijson>=3.4,<4",
+    "json5>=0.12,<1",
     "mcp==2.0.0",
     "mcp-types==2.0.0",
     "packaging>=24,<27",

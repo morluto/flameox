@@ -1093,6 +1093,7 @@ dependencies = [
     { name = "defusedxml" },
     { name = "duckdb" },
     { name = "ijson" },
+    { name = "json5" },
     { name = "mcp" },
     { name = "mcp-types" },
     { name = "packaging" },
@@ -1166,6 +1167,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.4,<1.6" },
     { name = "ijson", specifier = ">=3.4,<4" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.2" },
+    { name = "json5", specifier = ">=0.12,<1" },
     { name = "mcp", specifier = "==2.0.0" },
     { name = "mcp-types", specifier = "==2.0.0" },
     { name = "memray", marker = "extra == 'all'", specifier = ">=1.17" },
@@ -1757,6 +1759,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/00/2a/e867e8531cf3e36b41201936b7fa7ba7b5702dbef42922193f05c8976cd6/jmespath-1.0.1.tar.gz", hash = "sha256:90261b206d6defd58fdd5e85f478bf633a2901798906be2ad389150c5c60edbe", size = 25843, upload-time = "2022-06-17T18:00:12.224Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/b4/b9b800c45527aadd64d5b442f9b932b00648617eb5d63d2c7a6587b7cafc/jmespath-1.0.1-py3-none-any.whl", hash = "sha256:02e2e4cc71b5bcab88332eebf907519190dd9e6e82107fa7f83b1003a6252980", size = 20256, upload-time = "2022-06-17T18:00:10.251Z" },
+]
+
+[[package]]
+name = "json5"
+version = "0.15.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/7d/05c46a96a78147ae3bf99c2f4169ce144a70220b8d6fcd56f6ec368b8ce9/json5-0.15.0.tar.gz", hash = "sha256:7424d1f1eb1d56da6e3d70643f53619862b4ce81440bdb8ecfd6f875e5ba4a71", size = 53278, upload-time = "2026-06-19T20:08:27.716Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/be/59527c99478aade6bb33a68d72e6e18dd4e6ff6eacfc7d01bdb15bc76912/json5-0.15.0-py3-none-any.whl", hash = "sha256:56636a30c0e8a4665fe2179c0212f32eae3796dea89ea6f649b9436ecdb39618", size = 36570, upload-time = "2026-06-19T20:08:26.748Z" },
 ]
 
 [[package]]
