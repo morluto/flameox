@@ -22,8 +22,8 @@ def scaling_projection(
 
     input_dimension = str(arguments["input_dimension"])
     requested_metric = arguments.get("metric")
-    series: dict[tuple[str, str, str], dict[float, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
+    series: dict[tuple[str, str, str], dict[float, tuple[float, int]]] = defaultdict(
+        lambda: defaultdict(lambda: (0.0, 0))
     )
     identity_dimensions: dict[tuple[str, str, str], dict[str, Any]] = {}
     omitted_measurements = 0
@@ -48,32 +48,42 @@ def scaling_projection(
         )
         identity = (benchmark, unit, dimension_identity)
         identity_dimensions[identity] = non_axis_dimensions
-        value = row.get("value_int")
+        sample_sum = row.get("sample_sum")
+        sample_count = row.get("sample_count")
+        value = row.get("value_int") if sample_sum is None else sample_sum
         if value is None:
             value = row.get("value_float")
+        count = sample_count if sample_sum is not None else 1
         if (
             not isinstance(raw_input, str | int | float)
             or isinstance(raw_input, bool)
             or not isinstance(value, str | int | float)
             or isinstance(value, bool)
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
         ):
             omitted_measurements += 1
             continue
         try:
             input_value = float(raw_input)
-            measurement = float(value)
+            measurement_total = float(value)
         except ValueError:
             omitted_measurements += 1
             continue
         if (
             not math.isfinite(input_value)
-            or not math.isfinite(measurement)
+            or not math.isfinite(measurement_total)
             or input_value <= 0
-            or measurement <= 0
+            or measurement_total / count <= 0
         ):
             omitted_measurements += 1
             continue
-        series[identity][input_value].append(measurement)
+        prior_total, prior_count = series[identity][input_value]
+        series[identity][input_value] = (
+            prior_total + measurement_total,
+            prior_count + count,
+        )
 
     output: list[dict[str, Any]] = []
     estimated = 0
@@ -81,7 +91,7 @@ def scaling_projection(
         benchmark, unit, _dimension_identity = identity
         dimensions = identity_dimensions[identity]
         points = sorted(
-            (input_value, fmean(values)) for input_value, values in series[identity].items()
+            (input_value, total / count) for input_value, (total, count) in series[identity].items()
         )
         if len(points) < 2:
             output.append(

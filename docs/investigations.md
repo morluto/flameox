@@ -73,6 +73,24 @@ positive input values is explicitly inconclusive rather than falling back to a g
 summary. The fit describes the measured range; it does not establish asymptotic complexity or a
 causal performance change.
 
+Comparison and scaling aggregate native samples into per-series sums and counts inside their
+bounded readers. The sample population may therefore exceed the result-row page size without being
+silently clipped. The independent native sample and semantic-series safety ceilings still apply.
+
+## Comparison compatibility
+
+Benchmark and kernel comparisons join only complete semantic identities. Units, dimensions,
+timing protocols, devices, dtypes, shapes, scopes, phases, and other declared identity axes are not
+pooled merely because a metric name matches. The result reports identities absent from one or more
+inputs rather than manufacturing a ratio across them.
+
+Inference exports expose digest-only workload and system identities when their native format
+provides enough metadata. Known-different identities fail validation by default. A caller may set
+`allow_heterogeneous=true` for an explicitly exploratory ratio; the result labels that comparison
+`heterogeneous` and retains the differing axes. Missing identity axes produce `partial`, not a
+claim of compatibility. Prompts, generations, endpoints, and raw model or dataset names remain
+excluded from normalized evidence.
+
 ## Pytest fixture work
 
 `pytest.fixtures` records fixture setup and finalizer phases without serializing fixture values.
@@ -82,6 +100,10 @@ mistaken for one global invocation. Aggregate work is summed evidence and can ov
 workers; Flameox reports the maximum accumulated worker work separately and does not label either
 quantity as wall-clock critical-path duration. Interrupted runs preserve incomplete invocations
 instead of assigning missing finalizers a zero duration.
+
+Session completion also retains pytest's nonzero `run_finished.exitstatus`. Repeated phase reports
+remain an ordered attempt history; a failed attempt followed by a passing attempt is reported as
+flaky rather than allowing the later report to erase the failure.
 
 The capture plugin is scoped to the owned pytest invocation and propagated through pytest arguments
 to xdist workers; it does not export plugin state that would instrument nested pytest processes.

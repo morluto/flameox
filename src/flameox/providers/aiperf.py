@@ -7,7 +7,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from flameox.canonical import digest_model
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
+from flameox.providers.inference_comparison import assess_comparison
 from flameox.workers.aiperf_contract import (
     AIPERF_WORKER,
     AIPerfProjectionRow,
@@ -51,6 +53,20 @@ class AIPerfProvider:
             int(value) for row in successful if (value := row.get("latency_ns")) is not None
         ]
         ttfts = [int(value) for row in successful if (value := row.get("ttft_ns")) is not None]
+        scheduled = [int(value) for row in rows if (value := row.get("scheduled_ns")) is not None]
+        first_scheduled = min(scheduled) if scheduled else None
+        workload = [
+            {
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "scheduled_offset_ns": (
+                    int(row["scheduled_ns"]) - first_scheduled
+                    if first_scheduled is not None and row.get("scheduled_ns") is not None
+                    else None
+                ),
+            }
+            for row in rows
+        ]
         limitations = [
             "Prompt and response bodies are intentionally excluded from normalized evidence."
         ]
@@ -69,6 +85,12 @@ class AIPerfProvider:
                         "output_tokens": sum(int(row["output_tokens"]) for row in rows),
                         "median_ttft_ns": statistics.median(ttfts) if ttfts else None,
                         "p95_latency_ns": self._percentile(latencies, 0.95),
+                        "comparison_identity": {
+                            "workload": digest_model(
+                                workload, projection="flameox.inference.workload/v1"
+                            )
+                        },
+                        "comparison_identity_unavailable": ["system"],
                     },
                 },
                 {"type": "table", "rows": rows},
@@ -139,6 +161,9 @@ class AIPerfProvider:
                 "INVALID_INPUT", f"Every input must contain successful {metric} observations"
             )
         baseline = statistics.fmean(series[baseline_index])
+        compatibility, identity_differences, identity_unavailable = assess_comparison(
+            analyses, arguments
+        )
         rows: list[dict[str, Any]] = []
         for index, values in enumerate(series):
             if index == baseline_index:
@@ -154,6 +179,9 @@ class AIPerfProvider:
                     "ratio": candidate / baseline if baseline else None,
                     "baseline_samples": len(series[baseline_index]),
                     "candidate_samples": len(values),
+                    "compatibility": compatibility,
+                    "identity_differences": identity_differences,
+                    "identity_unavailable": identity_unavailable,
                 }
             )
         return ProviderAnalysis(
@@ -162,14 +190,29 @@ class AIPerfProvider:
             blocks=[
                 {
                     "type": "metrics",
-                    "values": {"input_count": len(analyses), "metric": metric},
+                    "values": {
+                        "input_count": len(analyses),
+                        "metric": metric,
+                        "compatibility": compatibility,
+                        "identity_differences": identity_differences,
+                        "identity_unavailable": identity_unavailable,
+                    },
                 },
                 {"type": "table", "rows": rows[:max_rows]},
             ],
             rows_observed=len(rows),
             complete=len(rows) <= max_rows,
             limitations=[
-                "Ratios compare arithmetic means of successful prompt-free request projections."
+                "Ratios compare arithmetic means of successful prompt-free request projections.",
+                "The inference system identity is unavailable from AIPerf request records.",
+                *(
+                    [
+                        "Known-different identities were compared only because heterogeneous "
+                        "mode was explicit."
+                    ]
+                    if compatibility == "heterogeneous"
+                    else []
+                ),
             ],
         )
 

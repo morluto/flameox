@@ -182,6 +182,16 @@ class CompareArguments(StrictModel):
     )
 
 
+class InferenceCompareArguments(CompareArguments):
+    allow_heterogeneous: bool = Field(
+        default=False,
+        description=(
+            "Permit a numeric ratio across known-different inference identities and label it "
+            "heterogeneous exploratory evidence."
+        ),
+    )
+
+
 ArgumentModel = type[
     EmptyArguments
     | PreviewArguments
@@ -191,6 +201,7 @@ ArgumentModel = type[
     | StaticArguments
     | WindowArguments
     | CompareArguments
+    | InferenceCompareArguments
 ]
 
 
@@ -580,6 +591,12 @@ CAPTURE_PROVIDER_CONTRACTS = {
             "native V8 CPU profile",
         ),
         _capture_provider(
+            "node-heap-profile",
+            EmptyArguments,
+            (("memory-profile", "heapprofile"),),
+            "native V8 sampling heap profile",
+        ),
+        _capture_provider(
             "memray",
             MemrayCaptureArguments,
             (("memory", "memray"),),
@@ -927,8 +944,8 @@ CAPABILITIES = tuple(
     )
     + _caps(
         ("memory.hotspots",),
-        "Rank bounded allocation hotspots from a Memray capture.",
-        ("memray",),
+        "Rank bounded allocation hotspots from Memray or V8 sampling heap profiles.",
+        ("memray", "heapprofile"),
         EmptyArguments,
     )
     + _caps(
@@ -969,7 +986,7 @@ CAPABILITIES = tuple(
         ("inference.compare",),
         "Compare compatible prompt-free inference measurements.",
         ("aiperf", "vllm-benchmark", "sglang-benchmark", "mooncake-trace"),
-        CompareArguments,
+        InferenceCompareArguments,
         minimum_sources=2,
         maximum_sources=MAX_INPUTS,
     )

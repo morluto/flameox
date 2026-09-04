@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from statistics import fmean
 from typing import Any
 
+from flameox.canonical import canonical_bytes
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.benchmark_samples_contract import (
@@ -13,6 +13,8 @@ from flameox.workers.benchmark_samples_contract import (
 )
 from flameox.workers.harness import IsolatedWorkerHarness
 from flameox.workers.pyperf_contract import PYPERF_WORKER, PyperfWorkerRequest, PyperfWorkerResult
+
+_MAX_AGGREGATE_SERIES = 100_000
 
 
 class BenchmarkProvider:
@@ -52,7 +54,20 @@ class BenchmarkProvider:
         parsed = [
             self.harness.run_typed_sync(
                 PYPERF_WORKER,
-                PyperfWorkerRequest(artifact_path=str(path), max_rows=max_rows),
+                PyperfWorkerRequest(
+                    artifact_path=str(path),
+                    max_rows=(
+                        _MAX_AGGREGATE_SERIES
+                        if capability_id in {"benchmark.compare", "benchmark.scaling"}
+                        else max_rows
+                    ),
+                    projection=(
+                        "series"
+                        if capability_id in {"benchmark.compare", "benchmark.scaling"}
+                        else "samples"
+                    ),
+                    metric=arguments.get("metric"),
+                ),
                 timeout_seconds=timeout_seconds,
                 maximum_rss_bytes=maximum_rss_bytes,
                 maximum_writable_growth_bytes=maximum_output_bytes,
@@ -65,7 +80,7 @@ class BenchmarkProvider:
             if any(result.truncated for result in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.scaling requires complete samples; raise the startup row limit",
+                    "benchmark.scaling exceeds the bounded semantic-series limit",
                 )
             return scaling_projection(
                 [dict(row) for result in parsed for row in result.rows],
@@ -116,10 +131,30 @@ class BenchmarkProvider:
         maximum_rss_bytes: int,
         maximum_output_bytes: int,
     ) -> ProviderAnalysis:
+        projection_arguments = (
+            compare_arguments if compare_arguments is not None else scaling_arguments
+        )
         parsed = [
             self.harness.run_typed_sync(
                 BENCHMARK_SAMPLES_WORKER,
-                BenchmarkSamplesWorkerRequest(artifact_path=str(path), max_rows=max_rows),
+                BenchmarkSamplesWorkerRequest(
+                    artifact_path=str(path),
+                    max_rows=(
+                        _MAX_AGGREGATE_SERIES
+                        if compare_arguments is not None or scaling_arguments is not None
+                        else max_rows
+                    ),
+                    projection=(
+                        "series"
+                        if compare_arguments is not None or scaling_arguments is not None
+                        else "samples"
+                    ),
+                    metric=(
+                        projection_arguments.get("metric")
+                        if projection_arguments is not None
+                        else None
+                    ),
+                ),
                 timeout_seconds=timeout_seconds,
                 maximum_rss_bytes=maximum_rss_bytes,
                 maximum_writable_growth_bytes=maximum_output_bytes,
@@ -130,7 +165,7 @@ class BenchmarkProvider:
             if any(item.truncated for item in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.compare requires complete samples; raise the startup row limit",
+                    "benchmark.compare exceeds the bounded semantic-series limit",
                 )
             return self._compare_row_sets(
                 [item.rows for item in parsed],
@@ -143,7 +178,7 @@ class BenchmarkProvider:
             if any(item.truncated for item in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.scaling requires complete samples; raise the startup row limit",
+                    "benchmark.scaling exceeds the bounded semantic-series limit",
                 )
             return scaling_projection(
                 [dict(row) for result in parsed for row in result.rows],
@@ -202,33 +237,62 @@ class BenchmarkProvider:
         if baseline_index >= len(row_sets):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
         requested_metric = arguments.get("metric")
-        series: list[dict[tuple[str, str], list[float]]] = []
+        series: list[dict[bytes, tuple[float, int]]] = []
+        identities: list[dict[bytes, dict[str, Any]]] = []
         for rows in row_sets:
-            values: dict[tuple[str, str], list[float]] = {}
+            values: dict[bytes, tuple[float, int]] = {}
+            members: dict[bytes, dict[str, Any]] = {}
             for row in rows:
                 if row["is_warmup"]:
                     continue
-                identity = (str(row["benchmark"]), str(row["unit"]))
-                if requested_metric is not None and identity[0] != requested_metric:
+                identity = {
+                    "benchmark": str(row["benchmark"]),
+                    "unit": str(row["unit"]),
+                    "dimensions": dict(row.get("dimensions", {})),
+                    "scope": row.get("scope"),
+                    "phase": row.get("phase"),
+                    "loop_count": row.get("loop_count"),
+                }
+                if requested_metric is not None and identity["benchmark"] != requested_metric:
                     continue
-                value = row["value_int"] if row["value_int"] is not None else row["value_float"]
-                if isinstance(value, int | float) and not isinstance(value, bool):
-                    values.setdefault(identity, []).append(float(value))
+                sample_sum = row.get("sample_sum")
+                sample_count = row.get("sample_count")
+                value = (
+                    (row["value_int"] if row["value_int"] is not None else row["value_float"])
+                    if sample_sum is None
+                    else sample_sum
+                )
+                count = sample_count if sample_sum is not None else 1
+                if (
+                    isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                    and count > 0
+                ):
+                    key = canonical_bytes(identity)
+                    total, prior_count = values.get(key, (0.0, 0))
+                    values[key] = total + float(value), prior_count + count
+                    members[key] = identity
             series.append(values)
+            identities.append(members)
         common = set(series[baseline_index])
         for values in series:
             common.intersection_update(values)
+        all_identities = set().union(*(set(values) for values in series))
+        unmatched = all_identities.difference(common)
         output: list[dict[str, Any]] = []
         baseline = series[baseline_index]
-        for identity in sorted(common):
-            baseline_mean = fmean(baseline[identity])
+        for key in sorted(common):
+            baseline_total, baseline_count = baseline[key]
+            baseline_mean = baseline_total / baseline_count
             for input_index, values in enumerate(series):
                 if input_index != baseline_index:
-                    candidate_mean = fmean(values[identity])
+                    candidate_total, candidate_count = values[key]
+                    candidate_mean = candidate_total / candidate_count
                     output.append(
                         {
-                            "benchmark": identity[0],
-                            "unit": identity[1],
+                            **identities[baseline_index][key],
                             "baseline_index": baseline_index,
                             "candidate_index": input_index,
                             "baseline_mean": baseline_mean,
@@ -245,6 +309,7 @@ class BenchmarkProvider:
                     "values": {
                         "input_count": len(row_sets),
                         "compatible_metric_count": len(common),
+                        "unmatched_identity_count": len(unmatched),
                     },
                 },
                 {"type": "table", "rows": output[:max_rows]},
@@ -252,7 +317,12 @@ class BenchmarkProvider:
             rows_observed=len(output),
             complete=len(output) <= max_rows,
             limitations=[
-                "Ratios summarize observed sample means and do not establish causal improvement."
+                "Ratios summarize observed sample means and do not establish causal improvement.",
+                *(
+                    ["Series absent from one or more inputs were not compared."]
+                    if unmatched
+                    else []
+                ),
             ],
         )
 
@@ -265,7 +335,7 @@ class BenchmarkProvider:
         if any(result.truncated for result in parsed):
             raise ProviderFailure(
                 "LIMIT_EXCEEDED",
-                "benchmark.compare requires complete samples; raise the startup row limit",
+                "benchmark.compare exceeds the bounded semantic-series limit",
             )
         return BenchmarkProvider._compare_row_sets(
             [result.rows for result in parsed],

@@ -98,6 +98,30 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path:
     }
 
 
+def test_nvbench_compare_does_not_pair_different_states(tmp_path: Path) -> None:
+    baseline = _bundle(tmp_path / "baseline", [1.0], elements=16)
+    candidate = _bundle(tmp_path / "candidate", [2.0], elements=1_024)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.compare",
+            [
+                PathSource(path=str(baseline), format="nvbench"),
+                PathSource(path=str(candidate), format="nvbench"),
+            ],
+            {"metric": "cub.scan.sample_times"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][1]["rows"] == []
+    assert result["blocks"][0]["values"] == {
+        "input_count": 2,
+        "compatible_metric_count": 0,
+        "unmatched_identity_count": 2,
+    }
+
+
 def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:
     sources = [
         PathSource(
@@ -119,6 +143,35 @@ def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:
     row = result["blocks"][1]["rows"][0]
     assert row["status"] == "estimated"
     assert row["point_count"] == 3
+    assert row["exponent"] == pytest.approx(2.0)
+
+
+def test_nvbench_scaling_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
+    sources = [
+        PathSource(
+            path=str(
+                _bundle(
+                    tmp_path / f"size-{elements}",
+                    [duration] * 1_002,
+                    elements=elements,
+                )
+            ),
+            format="nvbench",
+        )
+        for elements, duration in ((10, 1.0), (20, 4.0))
+    ]
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "benchmark.scaling",
+            sources,
+            {"input_dimension": "elements", "metric": "cub.scan.sample_times"},
+        )
+    finally:
+        runtime.close()
+
+    row = result["blocks"][1]["rows"][0]
+    assert row["point_count"] == 2
     assert row["exponent"] == pytest.approx(2.0)
 
 
