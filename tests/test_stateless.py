@@ -3072,7 +3072,9 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
 ) -> None:
     preparation_calls: list[list[str]] = []
 
-    def prepare(provider_ids: list[str], timeout_seconds: int) -> ProviderPreparation:
+    async def prepare(
+        self: Any, provider_ids: list[str], timeout_seconds: int
+    ) -> ProviderPreparation:
         assert timeout_seconds == 1_800
         if provider_ids == ["unknown-provider"]:
             raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
@@ -3121,7 +3123,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             ],
         )
 
-    monkeypatch.setattr("flameox.mcp.server.provider_setup.prepare_providers", prepare)
+    monkeypatch.setattr("flameox.providers.preparation.ProviderDependencies.prepare", prepare)
 
     async def exercise() -> None:
         async with Client(
@@ -3157,13 +3159,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
             }
         ]
         assert result.structured_content["preparation"]["status"] == "prepared"
-        assert result.structured_content["next_action"] == {
-            "kind": "reconnect_mcp",
-            "message": (
-                "Reconnect Flameox with the returned launcher before retrying the capture; "
-                "the current server process is unchanged."
-            ),
-        }
+        assert result.structured_content["next_action"]["kind"] == "reconnect_mcp"
+        assert result.structured_content["next_action"]["necessity"] == "conditional"
+        assert "Preserve" in result.structured_content["next_action"]["message"]
+        assert "external requirements" in result.content[0].text
         assert result.structured_content["launcher"]["args"][3] == (
             f"flameox[memory]=={__version__}"
         )
@@ -3621,7 +3620,7 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
             assert comparison["metric"] == "wall_time_ns"
             assert comparison["estimand"] == "median_difference"
             assert comparison["paired_blocks"] == 1
-            assert comparison["decision"] in {
+            assert comparison["point_estimate_classification"] in {
                 "practically_improved",
                 "practically_regressed",
                 "within_threshold",
@@ -3751,7 +3750,7 @@ def test_experiment_zero_effect_is_within_zero_threshold() -> None:
     )
 
     assert blocks[-1]["rows"][0]["estimate"] == 0
-    assert blocks[-1]["rows"][0]["decision"] == "within_threshold"
+    assert blocks[-1]["rows"][0]["point_estimate_classification"] == "within_threshold"
 
 
 @pytest.mark.integration

@@ -102,7 +102,7 @@ def test_preparation_runs_and_returns_the_same_exact_uvx_environment(
     assert prepared.requested_providers == ["memray", "py-spy"]
     assert prepared.prepared_managed_providers == ["memray", "py-spy"]
     assert prepared.preparation_status == "prepared"
-    assert prepared.restart_required is True
+    assert prepared.restart_required is (prepared.activation_status == "restart_required")
     assert calls == [
         [
             "/usr/bin/uvx",
@@ -333,7 +333,7 @@ def test_opencode_jsonc_replaces_its_flameox_entry_in_place(tmp_path: Path) -> N
     jsonc.write_text(
         '{\n  "mcp": {\n    // Flameox notes\n'
         '    "flameox": {"type": "local", "command": ["custom"], "cwd": "/work"},\n'
-        '  },\n}\n'
+        "  },\n}\n"
     )
 
     plan = plan_client_setup([SetupClient.OPENCODE], [], home=tmp_path)[0]

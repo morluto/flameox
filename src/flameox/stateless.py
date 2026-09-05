@@ -63,6 +63,7 @@ from flameox.providers.nsight_systems import NsightSystemsParquetProvider
 from flameox.providers.nvbench import NvbenchProvider
 from flameox.providers.otlp import OtlpProvider
 from flameox.providers.perfetto import PerfettoProvider
+from flameox.providers.preparation import ProviderDependencies
 from flameox.providers.reliability import ReliabilityProvider
 from flameox.providers.source_evidence import SourceEvidenceProvider
 from flameox.providers.structured_workers import StructuredWorkerProviders
@@ -71,6 +72,7 @@ from flameox.repository import (
     EvidenceRepository,
     NativeArtifact,
     RepositoryError,
+    artifact_selector,
     sha256_file,
 )
 from flameox.runtime_contracts import (
@@ -195,8 +197,16 @@ class AnalysisRuntime:
         self.repository = EvidenceRepository(
             evidence_directory or default_data_directory(), self.session_id
         )
+        self._repository_configuration = (
+            "explicit_directory"
+            if evidence_directory is not None
+            else "environment_override"
+            if os.environ.get("FLAMEOX_DATA_DIR")
+            else "platform_default"
+        )
         self.analyses: OrderedDict[str, CachedAnalysis] = OrderedDict()
         self.conversions: OrderedDict[tuple[str, str], Path] = OrderedDict()
+        self.dependencies = ProviderDependencies(self.broker, self.scratch)
 
     def close(self) -> None:
         self._temporary.cleanup()
@@ -369,7 +379,14 @@ class AnalysisRuntime:
                 f"No typed {capability_id} provider accepts the supplied inputs",
             )
         if provider_analysis is None:
-            rows, observed, complete = self._read_rows(resolved, offset, selected_limits.max_rows)
+            try:
+                rows, observed, complete = self._read_rows(
+                    resolved, offset, selected_limits.max_rows
+                )
+            except (ijson.JSONError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise RuntimeFailure(
+                    "DECODE_FAILURE", "Artifact preview could not decode the input."
+                ) from error
             if continuation is not None and offset >= observed:
                 raise RuntimeFailure(
                     "INVALID_INPUT", "Continuation offset is beyond the available evidence"
@@ -599,6 +616,7 @@ class AnalysisRuntime:
                             "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
                         },
                     )
+                self.dependencies.verify_capture_binding(target.provider_id, binding)
                 if experiment is not None and experiment.semantic_oracle is not None:
                     self._require_host_tool(
                         experiment.semantic_oracle[0],
@@ -619,6 +637,11 @@ class AnalysisRuntime:
                 )
                 pending_executions.append(
                     self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
+                    | {
+                        "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                        "returncode_scope": invocation.returncode_scope,
+                        "workload_returncode": None,
+                    }
                 )
             self._check_capture_provenance_capacity(
                 target=target,
@@ -796,6 +819,11 @@ class AnalysisRuntime:
                     "capture_argv": list(invocation.argv),
                     "cwd": str(cwd),
                     "returncode": exit_code,
+                    "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                    "returncode_scope": invocation.returncode_scope,
+                    "workload_returncode": exit_code
+                    if invocation.returncode_scope == "workload"
+                    else None,
                     "status": status,
                     "failure_code": failure_code,
                     "missing_artifact_roles": missing_artifact_roles,
@@ -932,6 +960,7 @@ class AnalysisRuntime:
                 "mode": mode,
                 "requested_capability_id": capability_id,
                 "executions": executions,
+                "outcome": self._capture_outcome(executions),
             },
             "analysis_failure": failure_body,
         }
@@ -975,6 +1004,7 @@ class AnalysisRuntime:
             "mode": mode,
             "requested_capability_id": capability_id,
             "executions": executions,
+            "outcome": self._capture_outcome(executions),
         }
         if experiment is not None:
             experiment_blocks, experiment_limitations = self._experiment_blocks(
@@ -1104,16 +1134,17 @@ class AnalysisRuntime:
             return str(candidate)
         return None
 
-    @staticmethod
-    def _require_managed_executable(provider_id: str, name: str) -> str:
-        executable = AnalysisRuntime._managed_executable(name)
+    def _require_managed_executable(self, provider_id: str, name: str) -> str:
+        executable = (
+            self.dependencies.py_spy_executable() if provider_id == "py-spy" else None
+        ) or self._managed_executable(name)
         if executable is None:
             raise RuntimeFailure(
                 "UNAVAILABLE_CAPABILITY",
                 (
                     f"Managed provider executable is unavailable: {name}. Call "
-                    f"prepare_providers with provider_ids=[{provider_id!r}], reconnect with "
-                    "the returned launcher, then retry."
+                    f"prepare_providers with provider_ids=[{provider_id!r}], then follow its "
+                    "activation guidance and retry."
                 ),
                 details={
                     "provider_id": provider_id,
@@ -1263,7 +1294,7 @@ class AnalysisRuntime:
                 self.repository.read(str(cached.preserved["evidence_id"]))
             except RepositoryError as exc:
                 if exc.code != "MISSING_EVIDENCE":
-                    raise RuntimeFailure(exc.code, exc.message) from exc
+                    raise self._repository_failure(exc) from exc
                 cached.preserved = None
             except OSError as exc:
                 raise RuntimeFailure(
@@ -1274,6 +1305,7 @@ class AnalysisRuntime:
                 return dict(cached.preserved)
         if cached.preserved is None:
             artifacts: list[NativeArtifact] = []
+            source_layout: list[dict[str, Any]] = []
             role_counts: dict[str, int] = {}
             for source in cached.sources:
                 role_counts[source.role] = role_counts.get(source.role, 0) + 1
@@ -1283,7 +1315,18 @@ class AnalysisRuntime:
                     if role_counts[source.role] == 1
                     else f"source-{source_index:04d}/{source.role}"
                 )
+                layout = {
+                    "role": publication_role,
+                    "sha256": source.sha256,
+                    "size_bytes": source.size_bytes,
+                    "format": source.format,
+                    "producer": source.producer,
+                    "is_directory": source.path.is_dir(),
+                    "artifact_indices": [],
+                }
+                source_layout.append(layout)
                 if source.path.is_file():
+                    layout["artifact_indices"] = [len(artifacts)]
                     artifacts.append(
                         NativeArtifact(
                             source.path,
@@ -1301,7 +1344,11 @@ class AnalysisRuntime:
                         "MISSING_OR_CHANGED_INPUT",
                         f"Input changed before preservation: {source.path}",
                     )
-                for path in self._directory_files(source.path):
+                files = self._directory_files(source.path)
+                layout["artifact_indices"] = list(
+                    range(len(artifacts), len(artifacts) + len(files))
+                )
+                for path in files:
                     digest, size = sha256_file(path)
                     relative = path.relative_to(source.path).as_posix()
                     artifacts.append(
@@ -1314,15 +1361,36 @@ class AnalysisRuntime:
                             source.producer,
                         )
                     )
+            analysis_source_indices: list[int] = []
+            for item in cached.manifest_body["analysis_request"].get("inputs", []):
+                index = next(
+                    (
+                        index
+                        for index, source in enumerate(cached.sources)
+                        if (str(source.path), source.sha256, source.format, source.producer)
+                        == (item["path"], item["sha256"], item["format"], item.get("producer"))
+                    ),
+                    None,
+                )
+                if index is None:
+                    analysis_source_indices = []
+                    break
+                analysis_source_indices.append(index)
             try:
                 cached.preserved = self.repository.preserve(
-                    manifest_body=cached.manifest_body,
+                    manifest_body=cached.manifest_body
+                    | {
+                        "source_layout": {
+                            "sources": source_layout,
+                            "analysis_sources": analysis_source_indices,
+                        }
+                    },
                     artifacts=artifacts,
                     analysis=self._durable_analysis(cached.result),
                 )
                 self._release_analysis_scratch(cached)
             except RepositoryError as exc:
-                raise RuntimeFailure(exc.code, exc.message) from exc
+                raise self._repository_failure(exc) from exc
             except OSError as exc:
                 raise RuntimeFailure(
                     "REPOSITORY_IO_FAILURE", "Evidence could not be preserved."
@@ -1416,7 +1484,7 @@ class AnalysisRuntime:
                 cursor=cursor,
             )
         except RepositoryError as exc:
-            raise RuntimeFailure(exc.code, exc.message) from exc
+            raise self._repository_failure(exc) from exc
         except OSError as exc:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "The evidence repository could not be queried."
@@ -1426,7 +1494,7 @@ class AnalysisRuntime:
         try:
             return self.repository.read(evidence_id)
         except RepositoryError as exc:
-            raise RuntimeFailure(exc.code, exc.message) from exc
+            raise self._repository_failure(exc) from exc
         except OSError as exc:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "The requested evidence could not be read."
@@ -1436,11 +1504,29 @@ class AnalysisRuntime:
         try:
             return self.repository.read_agent_projection(evidence_id)
         except RepositoryError as exc:
-            raise RuntimeFailure(exc.code, exc.message) from exc
+            raise self._repository_failure(exc) from exc
         except OSError as exc:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "The requested evidence projection could not be read."
             ) from exc
+
+    def _repository_failure(self, error: RepositoryError) -> RuntimeFailure:
+        details: dict[str, Any] = {}
+        if error.code in {"REPOSITORY_CORRUPTION", "UNSUPPORTED_REPOSITORY_FORMAT"}:
+            details = {
+                "configuration_source": self._repository_configuration,
+                "configuration_variable": "FLAMEOX_DATA_DIR",
+                "store_identifier": hashlib.sha256(str(self.repository.root).encode()).hexdigest(),
+                "recovery": [
+                    "Restore the original repository from a known-good backup; do not delete "
+                    "existing data or synthesize repository.json.",
+                    "Alternatively set FLAMEOX_DATA_DIR to a distinct empty directory and "
+                    "restart or reconnect Flameox. Switching stores does not recover old evidence; "
+                    "preserve any recoverable session evidence before ending the session.",
+                ],
+                "local_diagnostic": "flameox evidence location",
+            }
+        return RuntimeFailure(error.code, error.message, details=details)
 
     def _resolve_sources(
         self, sources: Sequence[Source], limits: RequestLimits
@@ -1538,22 +1624,60 @@ class AnalysisRuntime:
         artifacts = manifest["body"].get("artifacts", [])
         if not isinstance(artifacts, list):
             raise RuntimeFailure("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid")
-        role = source.artifact_role or self._default_evidence_role(artifacts)
-        selected = [
-            item
-            for item in artifacts
-            if isinstance(item, dict)
-            and (item.get("role") == role or str(item.get("role", "")).startswith(role + ":"))
-        ]
-        if not selected:
+        role = source.artifact_role
+        logical = self.repository.logical_artifacts(manifest["body"])
+        selected_source: dict[str, Any] | None = None
+        if source.artifact_selector is not None:
+            selected_source = next(
+                (
+                    item
+                    | {"is_directory": collection == "logical" and item.get("is_directory", False)}
+                    for collection, items in (("artifact", artifacts), ("logical", logical))
+                    for index, item in enumerate(items)
+                    if artifact_selector(source.evidence_id, collection, index)
+                    == source.artifact_selector
+                ),
+                None,
+            )
+            if selected_source is None:
+                raise RuntimeFailure(
+                    "MISSING_EVIDENCE",
+                    "The requested evidence artifact selector is absent",
+                    details={"resource_uri": f"flameox://evidence/{source.evidence_id}"},
+                )
+            role = selected_source["role"]
+        if role is None:
+            try:
+                role = self._default_evidence_role(logical)
+            except RuntimeFailure as error:
+                raise RuntimeFailure(
+                    error.code,
+                    error.message,
+                    details={"resource_uri": f"flameox://evidence/{source.evidence_id}"},
+                ) from error
+        if selected_source is None:
+            # Legacy role selection also prefers an exact file over a bundle prefix.
+            selected_source = next(
+                (
+                    item
+                    for item in [
+                        *(artifact | {"is_directory": False} for artifact in artifacts),
+                        *logical,
+                    ]
+                    if item["role"] == role
+                ),
+                None,
+            )
+        if selected_source is None:
             raise RuntimeFailure(
                 "MISSING_EVIDENCE", "The requested evidence artifact role is absent"
             )
-        if len(selected) > 1 or any(
-            str(item.get("role", "")).startswith(role + ":") for item in selected
-        ):
-            return self._materialize_evidence_bundle(source.evidence_id, role, selected)
-        artifact = selected[0]
+        if selected_source.get("is_directory", False):
+            selected = [artifacts[index] for index in selected_source["artifact_indices"]]
+            return self._materialize_evidence_bundle(
+                source.evidence_id, role, selected, selected_source
+            )
+        artifact = selected_source
         digest = str(artifact["sha256"])
         path = self.repository.root / "artifacts" / "sha256" / digest[:2] / digest / "payload"
         return ResolvedSource(
@@ -1568,7 +1692,7 @@ class AnalysisRuntime:
     @staticmethod
     def _default_evidence_role(artifacts: list[Any]) -> str:
         roots = {
-            str(item["role"]).split(":", 1)[0]
+            str(item["role"])
             for item in artifacts
             if isinstance(item, dict)
             and isinstance(item.get("role"), str)
@@ -1584,7 +1708,11 @@ class AnalysisRuntime:
         return roots.pop()
 
     def _materialize_evidence_bundle(
-        self, evidence_id: str, role: str, artifacts: list[dict[str, Any]]
+        self,
+        evidence_id: str,
+        role: str,
+        artifacts: list[dict[str, Any]],
+        metadata: dict[str, Any],
     ) -> ResolvedSource:
         bundle_key = hashlib.sha256(f"{evidence_id}:{role}".encode()).hexdigest()
         destination = self.scratch / "evidence-sources" / bundle_key
@@ -1626,12 +1754,16 @@ class AnalysisRuntime:
                 if stage.exists():
                     shutil.rmtree(stage)
         digest, size, _file_count = self._hash_path(destination)
-        formats = {str(item["format"]) for item in artifacts}
+        formats = {str(item["format"]) for item in [*artifacts, metadata]}
         producers = {
             str(item["producer"]) if item.get("producer") is not None else None
-            for item in artifacts
+            for item in [*artifacts, metadata]
         }
-        if len(formats) != 1 or len(producers) != 1:
+        if (
+            len(formats) != 1
+            or len(producers) != 1
+            or (digest, size) != (metadata["sha256"], metadata["size_bytes"])
+        ):
             raise RuntimeFailure(
                 "REPOSITORY_CORRUPTION", "Evidence bundle metadata is inconsistent"
             )
@@ -2099,7 +2231,12 @@ class AnalysisRuntime:
             "coverage",
         }:
             with path.open("rb") as stream:
-                prefix = stream.read(1)
+                prefix = b""
+                while chunk := stream.read(4096):
+                    significant = chunk.lstrip(b" \t\r\n")
+                    if significant:
+                        prefix = significant[:1]
+                        break
                 stream.seek(0)
                 if prefix == b"[":
                     for value in ijson.items(stream, "item", use_float=True):
@@ -2167,15 +2304,18 @@ class AnalysisRuntime:
     def _bound_capture_result(
         self, result: dict[str, Any], limit: int, identity: Mapping[str, Any], offset: int
     ) -> None:
-        if len(canonical_bytes(result)) <= limit:
-            return
         capture = cast(dict[str, Any], result["capture"])
         executions = cast(list[dict[str, Any]], capture["executions"])
+        if len(canonical_bytes(result)) <= limit:
+            return
         compact = [
             {
                 "case": item["case"],
                 "block": item["block"],
                 "returncode": item["returncode"],
+                "executable_sha256": item.get("executable_sha256"),
+                "returncode_scope": item.get("returncode_scope", "unknown"),
+                "workload_returncode": item.get("workload_returncode"),
                 "status": item["status"],
                 "failure_code": item["failure_code"],
                 "wall_time_ns": item["wall_time_ns"],
@@ -2206,6 +2346,17 @@ class AnalysisRuntime:
             capture["executions_truncated"] += 1
         if len(canonical_bytes(result)) > limit:
             self._shrink_result(result, limit, identity, offset)
+
+    @staticmethod
+    def _capture_outcome(executions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        succeeded = sum(item["status"] == "succeeded" for item in executions)
+        failed = len(executions) - succeeded
+        return {
+            "status": "failed" if failed else "succeeded",
+            "execution_count": len(executions),
+            "succeeded_count": succeeded,
+            "failed_count": failed,
+        }
 
     @staticmethod
     def _experiment_blocks(
@@ -2268,7 +2419,7 @@ class AnalysisRuntime:
                     "confidence_level": 0.95 if confidence_low is not None else None,
                     "method": method,
                     "practical_threshold": experiment.practical_threshold,
-                    "decision": decision,
+                    "point_estimate_classification": decision,
                     "paired_blocks": len(differences),
                     "declared_blocks": experiment.blocks,
                 }
@@ -2280,6 +2431,7 @@ class AnalysisRuntime:
                     "values": {
                         "experiment_metric": experiment.metric,
                         "experiment_estimand": experiment.estimand,
+                        "decision_basis": "descriptive_point_estimate",
                         "baseline_case": baseline,
                         "comparison_count": len(rows),
                     },
@@ -2323,7 +2475,7 @@ class AnalysisRuntime:
 
     def _encode_continuation(self, identity: Mapping[str, Any], offset: int) -> str:
         payload = {
-            "request": hashlib.sha256(canonical_bytes(identity)).hexdigest(),
+            "request": self._continuation_digest(identity),
             "offset": offset,
         }
         checksum = hashlib.sha256(canonical_bytes(payload)).hexdigest()
@@ -2342,10 +2494,9 @@ class AnalysisRuntime:
             value = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
             payload = value["payload"]
             expected = hashlib.sha256(canonical_bytes(payload)).hexdigest()
-            if (
-                not secrets.compare_digest(value["checksum"], expected)
-                or payload["request"] != hashlib.sha256(canonical_bytes(identity)).hexdigest()
-            ):
+            if not secrets.compare_digest(value["checksum"], expected) or payload[
+                "request"
+            ] != self._continuation_digest(identity):
                 raise ValueError
             offset = payload["offset"]
             if type(offset) is not int or offset < 0:
@@ -2355,6 +2506,16 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"
             ) from exc
+
+    @staticmethod
+    def _continuation_digest(identity: Mapping[str, Any]) -> str:
+        semantic = dict(identity)
+        if "inputs" in semantic:
+            semantic["inputs"] = [
+                {key: value for key, value in item.items() if key not in {"path", "role"}}
+                for item in semantic["inputs"]
+            ]
+        return hashlib.sha256(canonical_bytes(semantic)).hexdigest()
 
     @staticmethod
     def _resolve_capture_cwd(value: str) -> Path:

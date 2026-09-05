@@ -20,18 +20,38 @@ from flameox.providers.availability import (
     MANAGED_PROVIDER_EXTRAS,
     SYSTEM_PROVIDER_GUIDANCE,
 )
+from flameox.providers.environment import (
+    DEFAULT_PREPARATION_TIMEOUT_SECONDS as DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+)
+from flameox.providers.environment import (
+    MAX_PREPARATION_TIMEOUT_SECONDS as MAX_PREPARATION_TIMEOUT_SECONDS,
+)
+from flameox.providers.environment import (
+    ExternalRequirement as ExternalRequirement,
+)
+from flameox.providers.environment import (
+    ProviderPreparation as ProviderPreparation,
+)
+from flameox.providers.environment import (
+    ProviderSelectionFailure as ProviderSelectionFailure,
+)
+from flameox.providers.environment import (
+    SetupFailure as SetupFailure,
+)
+from flameox.providers.environment import (
+    _validate_providers,
+)
+from flameox.providers.environment import (
+    active_provider_status as active_provider_status,
+)
+from flameox.providers.environment import (
+    external_provider_requirements as external_provider_requirements,
+)
+from flameox.providers.environment import (
+    mcp_launcher as mcp_launcher,
+)
 
-DEFAULT_PREPARATION_TIMEOUT_SECONDS = 1_800
-MAX_PREPARATION_TIMEOUT_SECONDS = 3_600
 PATH_CLI_PROBE_TIMEOUT_SECONDS = 5
-
-
-class SetupFailure(RuntimeError):
-    pass
-
-
-class ProviderSelectionFailure(SetupFailure):
-    pass
 
 
 class SetupClient(StrEnum):
@@ -312,17 +332,13 @@ def _jsonc_update_mcp_entry(source: str, section_name: str, entry: object) -> st
     root_start = _jsonc_skip_trivia(source, 0)
     root_properties, root_end = _jsonc_object_properties(source, root_start)
     root_indent = (
-        _jsonc_line_indent(source, root_properties[0].key_start, "  ")
-        if root_properties
-        else "  "
+        _jsonc_line_indent(source, root_properties[0].key_start, "  ") if root_properties else "  "
     )
     section = next((item for item in root_properties if item.key == section_name), None)
     if section is None:
         entry_indent = f"{root_indent}  "
         section_value = (
-            "{\n"
-            f"{_jsonc_property_text('flameox', entry, entry_indent)}\n"
-            f"{root_indent}}}"
+            f"{{\n{_jsonc_property_text('flameox', entry, entry_indent)}\n{root_indent}}}"
         )
         return _jsonc_insert_property(
             source,
@@ -343,7 +359,7 @@ def _jsonc_update_mcp_entry(source: str, section_name: str, entry: object) -> st
     if existing is not None:
         rendered_entry = json.dumps(entry, ensure_ascii=False, indent=2)
         rendered_entry = rendered_entry.replace(chr(10), chr(10) + entry_indent)
-        return f"{source[:existing.value_start]}{rendered_entry}{source[existing.value_end:]}"
+        return f"{source[: existing.value_start]}{rendered_entry}{source[existing.value_end :]}"
     return _jsonc_insert_property(
         source,
         section_end,
@@ -499,69 +515,6 @@ def apply_client_setup(plans: list[ClientSetupPlan]) -> list[ClientSetupResult]:
     return results
 
 
-@dataclass(frozen=True, slots=True)
-class ExternalRequirement:
-    provider_id: str
-    guidance: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderPreparation:
-    requested_providers: list[str]
-    prepared_managed_providers: list[str]
-    external_requirements: list[ExternalRequirement]
-    preparation_command: list[str]
-    launcher_command: str
-    launcher_args: list[str]
-
-    @property
-    def preparation_status(self) -> Literal["prepared", "not_applicable"]:
-        return "prepared" if self.prepared_managed_providers else "not_applicable"
-
-    @property
-    def restart_required(self) -> bool:
-        return bool(self.prepared_managed_providers)
-
-
-def _validate_providers(providers: list[str]) -> None:
-    unknown = sorted(
-        set(providers).difference(MANAGED_PROVIDER_EXTRAS).difference(SYSTEM_PROVIDER_GUIDANCE)
-    )
-    if unknown:
-        supported = ", ".join(sorted(MANAGED_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
-        raise ProviderSelectionFailure(
-            f"Unknown provider {unknown[0]!r}; choose one of: {supported}"
-        )
-
-
-def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
-    """Return a version-bound MCP launcher for client configuration."""
-
-    _validate_providers(providers)
-    extras = sorted(
-        {
-            MANAGED_PROVIDER_EXTRAS[provider]
-            for provider in providers
-            if provider in MANAGED_PROVIDER_EXTRAS
-        }
-    )
-    extras_suffix = f"[{','.join(extras)}]" if extras else ""
-    requirement = f"flameox{extras_suffix}=={__version__}"
-    return (
-        "uvx",
-        ["--python", "3.12", "--from", requirement, "flameox"],
-    )
-
-
-def external_provider_requirements(providers: list[str]) -> list[ExternalRequirement]:
-    _validate_providers(providers)
-    return [
-        ExternalRequirement(provider, SYSTEM_PROVIDER_GUIDANCE[provider])
-        for provider in dict.fromkeys(providers)
-        if provider in SYSTEM_PROVIDER_GUIDANCE
-    ]
-
-
 def _decode_stderr(stderr: bytes | str | None) -> str:
     if not stderr:
         return ""
@@ -629,4 +582,5 @@ def prepare_providers(
         preparation_command,
         launcher_command,
         server_args,
+        active_provider_status(managed) if managed else "not_applicable",
     )

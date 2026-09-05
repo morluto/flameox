@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent, ToolAnnotations
@@ -25,7 +24,7 @@ from pydantic import (
 )
 from pydantic.json_schema import JsonSchemaValue
 
-import flameox.setup as provider_setup
+import flameox.providers.environment as provider_setup
 from flameox import __version__
 from flameox.mcp.capability_tools import (
     Execution,
@@ -119,7 +118,10 @@ class LauncherEnvelope(BaseModel):
 
 class ReconnectActionEnvelope(BaseModel):
     kind: Literal["reconnect_mcp"] = Field(description="Reconnect the MCP server process.")
-    message: str = Field(description="Required handoff before retrying with the prepared provider.")
+    message: str = Field(
+        description="Handoff conditions and session-evidence preservation guidance."
+    )
+    necessity: Literal["required", "conditional"]
 
 
 class PreparationEnvelope(_Envelope):
@@ -139,7 +141,13 @@ class PreparationEnvelope(_Envelope):
         description="Version-pinned launcher for the requested provider set."
     )
     next_action: ReconnectActionEnvelope | None = Field(
-        description="Required reconnection action, or null when the current server can continue."
+        description=(
+            "Reconnection handoff with explicit necessity; null for ready or host-only preparation."
+        )
+    )
+    activation_status: Literal["ready", "restart_required", "unknown", "not_applicable"]
+    workload_requirements: list[ExternalRequirementEnvelope] = Field(
+        description="Requirements to verify in the exact workload environment before capture."
     )
 
 
@@ -223,6 +231,21 @@ def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) ->
         action = (
             "reconnect using the returned launcher" if preparation_action else "continue capture"
         )
+        if (
+            isinstance(preparation_action, dict)
+            and preparation_action.get("necessity") == "conditional"
+        ):
+            action = (
+                "verify the active environment; reconnect only if the requested support is absent"
+            )
+        if value.get("external_requirements"):
+            action = (
+                (action + "; " if preparation_action else "")
+                + "verify or satisfy the listed external requirements before capture; "
+                "host readiness has not been verified"
+            )
+        if value.get("workload_requirements"):
+            action += "; verify the listed requirements in the exact workload interpreter"
         return (
             f"Provider preparation completed; next: {action}. "
             "Full details are in structuredContent."
@@ -297,6 +320,7 @@ def create_server(
 
     @server.tool(annotations=PREPARE, structured_output=True)
     async def prepare_providers(
+        ctx: Context[AnalysisRuntime],
         provider_ids: Annotated[
             list[str],
             Field(
@@ -317,21 +341,25 @@ def create_server(
         """Prepare managed providers and return any required MCP reconnection action."""
 
         try:
-            preparation = await anyio.to_thread.run_sync(
-                provider_setup.prepare_providers, provider_ids, timeout_seconds
-            )
+            preparation = await runtime(ctx).dependencies.prepare(provider_ids, timeout_seconds)
         except provider_setup.ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
         except provider_setup.SetupFailure as error:
             return _failure(RuntimeFailure("SETUP_FAILURE", str(error)))
 
         next_action = None
-        if preparation.restart_required:
+        if preparation.restart_required is not False:
             next_action = {
                 "kind": "reconnect_mcp",
+                "necessity": "required" if preparation.restart_required else "conditional",
                 "message": (
-                    "Reconnect Flameox with the returned launcher before retrying the capture; "
-                    "the current server process is unchanged."
+                    "The active server does not satisfy the requested dependency contract. "
+                    if preparation.restart_required
+                    else "The active server dependency identity could not be verified. "
+                )
+                + (
+                    "Preserve needed session analyses before reconnecting with the complete "
+                    "returned launcher. Reconnection ends session-local evidence access."
                 ),
             }
         return _success(
@@ -351,6 +379,11 @@ def create_server(
                     "args": preparation.launcher_args,
                 },
                 "next_action": next_action,
+                "activation_status": preparation.activation_status,
+                "workload_requirements": [
+                    {"provider_id": item.provider_id, "guidance": item.guidance}
+                    for item in preparation.workload_requirements
+                ],
             }
         )
 
@@ -485,11 +518,12 @@ def create_server(
                 failed = [
                     item for item in value["capture"]["executions"] if item["status"] != "succeeded"
                 ]
-                if failed:
+                if value["capture"]["outcome"]["status"] != "succeeded":
                     return _failure(
                         RuntimeFailure(
                             "EXECUTION_FAILURE",
-                            "One or more captured targets exited unsuccessfully.",
+                            "One or more capture executions failed; consult exit attribution "
+                            "and preserved diagnostics before inferring workload failure.",
                             details={"partial_evidence": value, "failed_executions": failed},
                         )
                     )

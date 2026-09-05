@@ -93,23 +93,29 @@ but never serialize arbitrary exception text: filesystem exceptions may contain 
 dependency exceptions may contain argv or environment-derived values. Unexpected failures use a
 stable operation-specific summary; cancellation remains a control path and is re-raised.
 
-`prepare_providers` and the capture tools are open-world. Preparation resolves the exact package
-requirement through `uvx`, verifies that environment by running Flameox's version command, and
-returns the same requirement in a global, version-pinned MCP launcher. Capture tools execute an
-explicit caller-supplied target that may itself access external services. The request names the
-complete managed
-provider set; Flameox keeps no installed-provider inventory or setup receipt. System profilers,
-drivers, device access, and OS permissions remain external requirements. Flameox returns guidance
-for them but does not invoke a system package manager or elevate privileges. Preparation creates no
-project state,
-durable job, or plan, and it cannot add packages to the currently running server. A result with
-a non-null `next_action` identifies the typed `reconnect_mcp` handoff, explains that the current
-server is unchanged, and directs the agent to reconnect with the returned launcher before retrying
-the capture. Host-only preparation returns `next_action: null`. Managed provider IDs are `aiperf`,
-`memray`, `otlp`, `perfetto`, `py-spy`, and `torch`; every call declares the complete desired set. A
-provider such as Perfetto may be both prepared Python support and an external host Trace Processor
-requirement. Preparation waits up to 1,800 seconds by default; callers may set `timeout_seconds`
-from 1 through 3,600. A uvx failure returns its complete stderr in `SETUP_FAILURE`.
+`prepare_providers` and capture tools are open-world. Preparation uses request-owned bounded
+subprocesses and an overall deadline; cancellation settles the installer and its descendants.
+py-spy is prepared as a pinned standalone collector and becomes available in the same live session.
+Bindings are activated only after the complete request succeeds, including any server preparation;
+failure, timeout, or cancellation leaves prior session bindings unchanged. Preparation forwards
+the safe uv controls `UV_OFFLINE`, `UV_CACHE_DIR`, `UV_PYTHON_DOWNLOADS`, and `UV_NO_CONFIG`.
+Repeating preparation reuses its verified binding without installation. The returned launcher still
+names the complete requested server provider set; preparing another provider does not remove
+existing session bindings. No durable provider inventory, project state, or job is created.
+
+Server-import requirements are compared with the active release and installed dependency versions.
+`activation_status` is `ready`, `restart_required`, `unknown`, or `not_applicable`. `next_action` is
+null for ready or host-only requests. Otherwise `reconnect_mcp` explicitly says whether reconnection
+is required or conditional and tells the caller to preserve needed session analyses first. An
+unknown identity does not establish a required restart. A prepared server environment is verified
+with its version command; preparation does not replace active imports.
+
+Managed IDs remain `aiperf`, `memray`, `otlp`, `perfetto`, `py-spy`, and `torch`. External host tools,
+drivers, permissions, and workload-interpreter requirements are reported separately and remain
+unverified by preparation. Both structured results and text summaries carry those handoffs. No
+system package manager or privilege elevation is invoked. Perfetto still requires an externally
+installed Trace Processor. The deadline defaults to 1,800 seconds and accepts 1 through 3,600;
+MCP preparation failures use bounded path-free diagnostics, while CLI setup retains local stderr.
 
 ## Sources and limits
 
@@ -117,15 +123,20 @@ The strict source union is:
 
 ```text
 PathSource     {kind: "path", path, format?, producer?, expected_sha256?}
-EvidenceSource {kind: "evidence", evidence_id, artifact_role?}
+EvidenceSource {kind: "evidence", evidence_id, artifact_role? OR artifact_selector?}
 ```
 
 Continuations are opaque integrity cursors bound to the request and exact input
 digests. They contain no authority, credentials, or artifact data and are not
 an authentication boundary: a caller already authorized to submit the analysis
 can choose which of its rows to request. They can cross process boundaries, so
-a CLI invocation can resume a previous page. A changed input cannot reuse a
-continuation.
+a CLI invocation can resume a previous page. Tokens bind ordered content digests, formats,
+producer identities, arguments, and limits, independently of storage paths and publication roles.
+After preserving a capture, repeat the original options and limits with the evidence resource's
+ordered `analysis_sources` and the returned continuation. Scratch can be released immediately.
+A changed input cannot reuse a continuation. Tokens issued by older path-bound implementations
+must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
+records, CSV data records, Parquet records, and projected JSON entries.
 
 Decoded offsets must be integers within the available bounded population. Negative offsets and
 offsets at or beyond the end fail with `INVALID_INPUT`; they never use Python slicing semantics or
@@ -174,6 +185,17 @@ eligible blocks and a deterministic percentile interval when at least three
 blocks survive capture/oracle validation, and classifies the effect against the
 declared threshold. Work is not detached; the request receives progress and owns
 cancellation.
+The experiment's `point_estimate_classification` is descriptive; its `decision_basis` is explicit
+on the metrics block. It does not claim confidence-qualified improvement or equivalence.
+
+Capture `outcome` is computed from every execution before diagnostic compaction and retains exact
+success/failure counts. MCP error classification consumes that outcome even when no execution
+diagnostics fit inline. Each execution identifies whether `returncode` belongs to the workload or
+collector, retains the invoked executable SHA-256, and leaves `workload_returncode` null for wrapped
+captures. Exit ownership is declared by each invocation builder: self-reporting workloads retain
+their observed exit even when they use a provider other than `direct`. A usable profile does not
+prove workload success. Preserved stdout, stderr, and profiles
+are individually selectable from the evidence resource.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
 its environment overrides the target environment. Each block randomizes case order from the
 declared seed. The semantic oracle runs after every successful capture in that case environment;
@@ -205,7 +227,7 @@ flameox setup
 flameox mcp serve|inspect
 flameox analyze [--continuation TOKEN] [--preserve]
 flameox capture [--experiment JSON] [--preserve] -- <argv...>
-flameox evidence query|show
+flameox evidence query|show|location
 ```
 
 `setup` detects supported coding agents and uses one multi-select prompt to choose which global MCP

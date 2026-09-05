@@ -146,9 +146,12 @@ Nsight Compute capture requires both the `ncu` executable and NVIDIA's vendor-sh
 `extras/python/ncu_report.py` reader. Flameox resolves both before workload execution and returns
 external setup guidance if the installation is incomplete.
 
-Provider ownership is explicit during capture. External collectors installed
-with Flameox, such as py-spy, execute from the launched uvx environment rather
-than ambient request `PATH`. In-process collectors, including coverage.py and
+Provider ownership is explicit during capture. py-spy executes from a verified session binding
+prepared independently with `uvx --from py-spy==0.4.2`, or from beside the server interpreter.
+Preparation checks the collector version and binds its executable identity; later capture rechecks
+that identity. A removed or changed uv cache entry requires preparation again. Capture never
+silently installs dependencies or resolves managed collectors from request `PATH`.
+In-process collectors, including coverage.py, PyTorch, and
 Memray, must be installed in the declared workload interpreter; capture probes
 that interpreter before execution and never substitutes Flameox's interpreter.
 

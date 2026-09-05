@@ -25,4 +25,12 @@ SYSTEM_PROVIDER_GUIDANCE = {
 WORKLOAD_PYTHON_REQUIREMENTS = {
     "coverage": ("coverage", "coverage", ">=7.14,<8"),
     "memray": ("memray", "memray", ">=1.17"),
+    "torch-profiler": ("torch", "torch", ">=2.7"),
+}
+
+WORKLOAD_PROVIDER_GUIDANCE = {
+    "memray": "Install compatible Memray in the exact workload Python interpreter; "
+    "server preparation only supplies the analysis reader.",
+    "torch": "Install compatible PyTorch in the exact workload Python interpreter and "
+    "verify the requested CPU or accelerator activity is supported.",
 }
