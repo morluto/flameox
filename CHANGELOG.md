@@ -2,6 +2,12 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.6] - 2026-09-05
+
+### Bug Fixes
+
+- **runtime:** Make capture evidence and provider handoffs composable (#468) ([#468](https://github.com/morluto/flameox/pull/468))
+- **setup:** Refresh selected MCP registrations
 ## [0.2.5] - 2026-09-04
 
 ### Bug Fixes
