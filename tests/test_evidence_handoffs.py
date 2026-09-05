@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -24,6 +25,188 @@ from flameox.runtime_contracts import (
     RuntimeFailure,
 )
 from flameox.stateless import AnalysisRuntime
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("members", [[], ["foo", "foo:bar"], ["credentials.json"]])
+def test_directory_handoff_preserves_empty_bundles_and_exact_members(
+    tmp_path: Path, members: list[str]
+) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name in members:
+        (bundle / name).write_text(name + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        ref = runtime.preserve_evidence(result["analysis_id"])
+        runtime.close()
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        projection = runtime.read_evidence_agent_projection(ref["evidence_id"])
+        assert len(projection["analysis_sources"]) == 1
+        sources = [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]]
+        restored = runtime.analyze("artifact.preview", sources, {})
+        assert restored["inputs"][0]["sha256"] == result["inputs"][0]["sha256"]
+        for artifact in projection["body"]["artifacts"]:
+            selected = runtime.analyze(
+                "artifact.preview", [EvidenceSource.model_validate(artifact["source"])], {}
+            )
+            assert selected["inputs"][0]["sha256"] == artifact["sha256"]
+            selected_ref = runtime.preserve_evidence(selected["analysis_id"])
+            selected_projection = runtime.read_evidence_agent_projection(
+                selected_ref["evidence_id"]
+            )
+            assert len(selected_projection["analysis_sources"]) == 1
+            again = runtime.analyze(
+                "artifact.preview",
+                [EvidenceSource.model_validate(selected_projection["analysis_sources"][0])],
+                {},
+            )
+            assert again["inputs"][0]["sha256"] == artifact["sha256"]
+            assert artifact["source"]["artifact_selector"] not in {
+                hashlib.sha256(f"input:{name}".encode()).hexdigest() for name in members
+            }
+        if members:
+            legacy = runtime.analyze(
+                "artifact.preview",
+                [
+                    EvidenceSource(
+                        kind="evidence",
+                        evidence_id=ref["evidence_id"],
+                        artifact_role=f"input:{members[0]}",
+                    )
+                ],
+                {},
+            )
+            assert legacy["blocks"][1]["rows"][0]["text"] == members[0]
+        else:
+            assert projection["body"]["artifacts"] == []
+            default = runtime.analyze(
+                "artifact.preview",
+                [EvidenceSource(kind="evidence", evidence_id=ref["evidence_id"])],
+                {},
+            )
+            assert default["inputs"][0]["sha256"] == result["inputs"][0]["sha256"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("provider", ["benchmark-samples", "observations", "torch-profiler"])
+def test_self_reporting_capture_retains_workload_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    def workload_available(
+        self: AnalysisRuntime,
+        provider_id: str,
+        target_argv: list[str],
+        environment: dict[str, str],
+        *,
+        cwd: Path,
+    ) -> None:
+        pass  # The fixture exits without importing optional workload SDKs.
+
+    monkeypatch.setattr(AnalysisRuntime, "_require_workload_python_provider", workload_available)
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", "raise SystemExit(7)"],
+                    cwd=str(tmp_path),
+                    provider_id=provider,
+                ),
+                {
+                    "benchmark-samples": "benchmark.summary",
+                    "observations": "failures.summary",
+                    "torch-profiler": "trace.summary",
+                }[provider],
+                preserve=True,
+            )
+            execution = result["capture"]["executions"][0]
+            assert execution["returncode_scope"] == "workload"
+            assert execution["workload_returncode"] == 7
+            manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
+            assert manifest["body"]["capture_request"]["executions"][0]["workload_returncode"] == 7
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "corruption", ["role_type", "index_type", "duplicate", "digest", "kind", "analysis_index"]
+)
+def test_source_layout_corruption_is_a_typed_repository_failure(
+    tmp_path: Path, corruption: str
+) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "member").write_text("contents")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        ref = runtime.preserve_evidence(result["analysis_id"])
+        evidence_id = ref["evidence_id"]
+        path = tmp_path / "store" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
+        manifest = json.loads((path / "manifest.json").read_text())
+        layout = manifest["body"]["source_layout"]
+        match corruption:
+            case "role_type":
+                manifest["body"]["artifacts"][0]["role"] = 1
+            case "index_type":
+                layout["sources"][0]["artifact_indices"] = [True]
+            case "duplicate":
+                layout["sources"][0]["artifact_indices"] = [0, 0]
+            case "digest":
+                layout["sources"][0]["sha256"] = "0" * 64
+            case "kind":
+                layout["sources"][0]["is_directory"] = False
+            case "analysis_index":
+                layout["analysis_sources"] = [1]
+        malformed_id = hashlib.sha256(canonical_bytes(manifest["body"])).hexdigest()
+        manifest["evidence_id"] = malformed_id
+        destination = path.parent.parent / malformed_id[:2] / malformed_id
+        destination.parent.mkdir(exist_ok=True)
+        path.rename(destination)
+        (destination / "manifest.json").write_bytes(canonical_bytes(manifest))
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.read_evidence_agent_projection(malformed_id)
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+        assert "recovery" in failure.value.details
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+def test_artifact_extra_fields_cannot_override_file_identity(tmp_path: Path) -> None:
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("contents")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        ref = runtime.preserve_evidence(result["analysis_id"])
+        evidence_id = ref["evidence_id"]
+        path = tmp_path / "store" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
+        manifest = json.loads((path / "manifest.json").read_text())
+        manifest["body"]["artifacts"][0]["is_directory"] = True
+        updated_id = hashlib.sha256(canonical_bytes(manifest["body"])).hexdigest()
+        manifest["evidence_id"] = updated_id
+        destination = path.parent.parent / updated_id[:2] / updated_id
+        destination.parent.mkdir(exist_ok=True)
+        path.rename(destination)
+        (destination / "manifest.json").write_bytes(canonical_bytes(manifest))
+        projection = runtime.read_evidence_agent_projection(updated_id)
+        for source in (
+            EvidenceSource.model_validate(projection["body"]["artifacts"][0]["source"]),
+            EvidenceSource(kind="evidence", evidence_id=updated_id, artifact_role="input"),
+        ):
+            restored = runtime.analyze("artifact.preview", [source], {})
+            assert restored["inputs"][0]["sha256"] == result["inputs"][0]["sha256"]
+    finally:
+        runtime.close()
 
 
 @pytest.mark.integration

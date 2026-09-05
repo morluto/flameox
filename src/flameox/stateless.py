@@ -639,9 +639,7 @@ class AnalysisRuntime:
                     self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
                     | {
                         "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
-                        "returncode_scope": "workload"
-                        if target.provider_id == "direct"
-                        else "collector",
+                        "returncode_scope": invocation.returncode_scope,
                         "workload_returncode": None,
                     }
                 )
@@ -822,10 +820,10 @@ class AnalysisRuntime:
                     "cwd": str(cwd),
                     "returncode": exit_code,
                     "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
-                    "returncode_scope": "workload"
-                    if target.provider_id == "direct"
-                    else "collector",
-                    "workload_returncode": exit_code if target.provider_id == "direct" else None,
+                    "returncode_scope": invocation.returncode_scope,
+                    "workload_returncode": exit_code
+                    if invocation.returncode_scope == "workload"
+                    else None,
                     "status": status,
                     "failure_code": failure_code,
                     "missing_artifact_roles": missing_artifact_roles,
@@ -1307,6 +1305,7 @@ class AnalysisRuntime:
                 return dict(cached.preserved)
         if cached.preserved is None:
             artifacts: list[NativeArtifact] = []
+            source_layout: list[dict[str, Any]] = []
             role_counts: dict[str, int] = {}
             for source in cached.sources:
                 role_counts[source.role] = role_counts.get(source.role, 0) + 1
@@ -1316,7 +1315,18 @@ class AnalysisRuntime:
                     if role_counts[source.role] == 1
                     else f"source-{source_index:04d}/{source.role}"
                 )
+                layout = {
+                    "role": publication_role,
+                    "sha256": source.sha256,
+                    "size_bytes": source.size_bytes,
+                    "format": source.format,
+                    "producer": source.producer,
+                    "is_directory": source.path.is_dir(),
+                    "artifact_indices": [],
+                }
+                source_layout.append(layout)
                 if source.path.is_file():
+                    layout["artifact_indices"] = [len(artifacts)]
                     artifacts.append(
                         NativeArtifact(
                             source.path,
@@ -1334,7 +1344,11 @@ class AnalysisRuntime:
                         "MISSING_OR_CHANGED_INPUT",
                         f"Input changed before preservation: {source.path}",
                     )
-                for path in self._directory_files(source.path):
+                files = self._directory_files(source.path)
+                layout["artifact_indices"] = list(
+                    range(len(artifacts), len(artifacts) + len(files))
+                )
+                for path in files:
                     digest, size = sha256_file(path)
                     relative = path.relative_to(source.path).as_posix()
                     artifacts.append(
@@ -1347,9 +1361,30 @@ class AnalysisRuntime:
                             source.producer,
                         )
                     )
+            analysis_source_indices: list[int] = []
+            for item in cached.manifest_body["analysis_request"].get("inputs", []):
+                index = next(
+                    (
+                        index
+                        for index, source in enumerate(cached.sources)
+                        if (str(source.path), source.sha256, source.format, source.producer)
+                        == (item["path"], item["sha256"], item["format"], item.get("producer"))
+                    ),
+                    None,
+                )
+                if index is None:
+                    analysis_source_indices = []
+                    break
+                analysis_source_indices.append(index)
             try:
                 cached.preserved = self.repository.preserve(
-                    manifest_body=cached.manifest_body,
+                    manifest_body=cached.manifest_body
+                    | {
+                        "source_layout": {
+                            "sources": source_layout,
+                            "analysis_sources": analysis_source_indices,
+                        }
+                    },
                     artifacts=artifacts,
                     analysis=self._durable_analysis(cached.result),
                 )
@@ -1590,43 +1625,59 @@ class AnalysisRuntime:
         if not isinstance(artifacts, list):
             raise RuntimeFailure("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid")
         role = source.artifact_role
+        logical = self.repository.logical_artifacts(manifest["body"])
+        selected_source: dict[str, Any] | None = None
         if source.artifact_selector is not None:
-            roles = {item["role"] for item in artifacts}
-            roles.update(item["role"].split(":", 1)[0] for item in artifacts)
-            role = next(
-                (item for item in roles if artifact_selector(item) == source.artifact_selector),
+            selected_source = next(
+                (
+                    item
+                    | {"is_directory": collection == "logical" and item.get("is_directory", False)}
+                    for collection, items in (("artifact", artifacts), ("logical", logical))
+                    for index, item in enumerate(items)
+                    if artifact_selector(source.evidence_id, collection, index)
+                    == source.artifact_selector
+                ),
                 None,
             )
-            if role is None:
+            if selected_source is None:
                 raise RuntimeFailure(
                     "MISSING_EVIDENCE",
                     "The requested evidence artifact selector is absent",
                     details={"resource_uri": f"flameox://evidence/{source.evidence_id}"},
                 )
+            role = selected_source["role"]
         if role is None:
             try:
-                role = self._default_evidence_role(artifacts)
+                role = self._default_evidence_role(logical)
             except RuntimeFailure as error:
                 raise RuntimeFailure(
                     error.code,
                     error.message,
                     details={"resource_uri": f"flameox://evidence/{source.evidence_id}"},
                 ) from error
-        selected = [
-            item
-            for item in artifacts
-            if isinstance(item, dict)
-            and (item.get("role") == role or str(item.get("role", "")).startswith(role + ":"))
-        ]
-        if not selected:
+        if selected_source is None:
+            # Legacy role selection also prefers an exact file over a bundle prefix.
+            selected_source = next(
+                (
+                    item
+                    for item in [
+                        *(artifact | {"is_directory": False} for artifact in artifacts),
+                        *logical,
+                    ]
+                    if item["role"] == role
+                ),
+                None,
+            )
+        if selected_source is None:
             raise RuntimeFailure(
                 "MISSING_EVIDENCE", "The requested evidence artifact role is absent"
             )
-        if len(selected) > 1 or any(
-            str(item.get("role", "")).startswith(role + ":") for item in selected
-        ):
-            return self._materialize_evidence_bundle(source.evidence_id, role, selected)
-        artifact = selected[0]
+        if selected_source.get("is_directory", False):
+            selected = [artifacts[index] for index in selected_source["artifact_indices"]]
+            return self._materialize_evidence_bundle(
+                source.evidence_id, role, selected, selected_source
+            )
+        artifact = selected_source
         digest = str(artifact["sha256"])
         path = self.repository.root / "artifacts" / "sha256" / digest[:2] / digest / "payload"
         return ResolvedSource(
@@ -1641,7 +1692,7 @@ class AnalysisRuntime:
     @staticmethod
     def _default_evidence_role(artifacts: list[Any]) -> str:
         roots = {
-            str(item["role"]).split(":", 1)[0]
+            str(item["role"])
             for item in artifacts
             if isinstance(item, dict)
             and isinstance(item.get("role"), str)
@@ -1657,7 +1708,11 @@ class AnalysisRuntime:
         return roots.pop()
 
     def _materialize_evidence_bundle(
-        self, evidence_id: str, role: str, artifacts: list[dict[str, Any]]
+        self,
+        evidence_id: str,
+        role: str,
+        artifacts: list[dict[str, Any]],
+        metadata: dict[str, Any],
     ) -> ResolvedSource:
         bundle_key = hashlib.sha256(f"{evidence_id}:{role}".encode()).hexdigest()
         destination = self.scratch / "evidence-sources" / bundle_key
@@ -1699,12 +1754,16 @@ class AnalysisRuntime:
                 if stage.exists():
                     shutil.rmtree(stage)
         digest, size, _file_count = self._hash_path(destination)
-        formats = {str(item["format"]) for item in artifacts}
+        formats = {str(item["format"]) for item in [*artifacts, metadata]}
         producers = {
             str(item["producer"]) if item.get("producer") is not None else None
-            for item in artifacts
+            for item in [*artifacts, metadata]
         }
-        if len(formats) != 1 or len(producers) != 1:
+        if (
+            len(formats) != 1
+            or len(producers) != 1
+            or (digest, size) != (metadata["sha256"], metadata["size_bytes"])
+        ):
             raise RuntimeFailure(
                 "REPOSITORY_CORRUPTION", "Evidence bundle metadata is inconsistent"
             )

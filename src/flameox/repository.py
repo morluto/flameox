@@ -34,16 +34,16 @@ class RepositoryError(RuntimeError):
         self.message = message
 
 
-def artifact_selector(role: str) -> str:
-    """A selector reveals no native filename and remains scoped to its evidence manifest."""
-    return hashlib.sha256(role.encode()).hexdigest()
+def artifact_selector(evidence_id: str, collection: str, index: int) -> str:
+    """Address an immutable public position, never a guessable private filename."""
+    return hashlib.sha256(canonical_bytes([evidence_id, collection, index])).hexdigest()
 
 
-def evidence_source(evidence_id: str, role: str) -> dict[str, str]:
+def evidence_source(evidence_id: str, collection: str, index: int) -> dict[str, str]:
     return {
         "kind": "evidence",
         "evidence_id": evidence_id,
-        "artifact_selector": artifact_selector(role),
+        "artifact_selector": artifact_selector(evidence_id, collection, index),
     }
 
 
@@ -210,7 +210,7 @@ class EvidenceRepository:
 
         manifest = self.read(evidence_id)
         body = manifest["body"]
-        logical_artifacts = self._logical_artifacts(body["artifacts"])
+        logical_artifacts = self.logical_artifacts(body)
         capture_request = body["capture_request"]
         safe_capture: dict[str, Any] | None = None
         if capture_request is not None:
@@ -249,8 +249,8 @@ class EvidenceRepository:
             "analysis_sources": self._analysis_sources(manifest, logical_artifacts),
             "logical_sources": [
                 {key: item[key] for key in ("sha256", "size_bytes", "format")}
-                | {"source": evidence_source(evidence_id, item["role"])}
-                for item in logical_artifacts
+                | {"source": evidence_source(evidence_id, "logical", index)}
+                for index, item in enumerate(logical_artifacts)
             ],
             "body": {
                 "evidence_kind": body["evidence_kind"],
@@ -270,8 +270,8 @@ class EvidenceRepository:
                 },
                 "artifacts": [
                     {key: item[key] for key in ("sha256", "size_bytes", "format")}
-                    | {"source": evidence_source(evidence_id, item["role"])}
-                    for item in body["artifacts"]
+                    | {"source": evidence_source(evidence_id, "artifact", index)}
+                    for index, item in enumerate(body["artifacts"])
                 ],
                 "data_files": [
                     {key: item[key] for key in ("sha256", "size_bytes", "media_type")}
@@ -281,8 +281,11 @@ class EvidenceRepository:
         }
 
     @staticmethod
-    def _logical_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        logical = [item for item in artifacts if ":" not in item["role"]]
+    def logical_artifacts(body: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if "source_layout" in body:
+            return cast(list[dict[str, Any]], body["source_layout"]["sources"])
+        artifacts = body["artifacts"]
+        logical = [item | {"is_directory": False} for item in artifacts if ":" not in item["role"]]
         bundles: dict[str, list[dict[str, Any]]] = {}
         for artifact in artifacts:
             if ":" in artifact["role"]:
@@ -299,6 +302,10 @@ class EvidenceRepository:
                     "size_bytes": sum(item["size_bytes"] for item in members),
                     "format": members[0]["format"],
                     "producer": members[0].get("producer"),
+                    "is_directory": True,
+                    "artifact_indices": [
+                        index for index, item in enumerate(artifacts) if item in members
+                    ],
                 }
             )
         return logical
@@ -309,19 +316,28 @@ class EvidenceRepository:
         logical_artifacts: list[dict[str, Any]],
     ) -> list[dict[str, str]]:
         body = manifest["body"]
+        if "source_layout" in body:
+            return [
+                evidence_source(manifest["evidence_id"], "logical", index)
+                for index in body["source_layout"]["analysis_sources"]
+            ]
         sources = []
         for item in body["analysis_request"].get("inputs", []):
             matching = [
-                artifact
-                for artifact in logical_artifacts
+                (index, artifact)
+                for index, artifact in enumerate(logical_artifacts)
                 if artifact["sha256"] == item["sha256"]
                 and artifact["format"] == item["format"]
                 and artifact.get("producer") == item.get("producer")
             ]
             if not matching:
                 return []
-            role = matching[0]["role"]
-            sources.append(evidence_source(manifest["evidence_id"], role))
+            # Preserve identity when distinct sources happen to have identical bytes.
+            index, _ = next(
+                (match for match in matching if match[1]["role"] == item.get("role")),
+                matching[0],
+            )
+            sources.append(evidence_source(manifest["evidence_id"], "logical", index))
         return sources
 
     @staticmethod
@@ -709,7 +725,7 @@ class EvidenceRepository:
             "artifacts",
             "data_files",
         }
-        if set(body) != expected_keys:
+        if set(body) not in (expected_keys, expected_keys | {"source_layout"}):
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Evidence manifest body has an invalid shape."
             )
@@ -789,6 +805,121 @@ class EvidenceRepository:
         artifacts = body["artifacts"]
         if not isinstance(artifacts, list):
             raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid.")
+        if "source_layout" in body:
+            EvidenceRepository._validate_source_layout(body)
+
+    @staticmethod
+    def _validate_source_layout(body: Mapping[str, Any]) -> None:
+        layout = body["source_layout"]
+        if (
+            not isinstance(layout, dict)
+            or set(layout) != {"sources", "analysis_sources"}
+            or not isinstance(layout["sources"], list)
+            or not isinstance(layout["analysis_sources"], list)
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence source layout is invalid.")
+        artifacts = body["artifacts"]
+        used: set[int] = set()
+        roles: set[str] = set()
+        for item in layout["sources"]:
+            if (
+                not isinstance(item, dict)
+                or set(item)
+                != {
+                    "role",
+                    "sha256",
+                    "size_bytes",
+                    "format",
+                    "producer",
+                    "is_directory",
+                    "artifact_indices",
+                }
+                or not isinstance(item["role"], str)
+                or not item["role"]
+                or item["role"] in roles
+                or not _is_digest(item["sha256"])
+                or type(item["size_bytes"]) is not int
+                or item["size_bytes"] < 0
+                or not isinstance(item["format"], str)
+                or not item["format"]
+                or (item["producer"] is not None and not isinstance(item["producer"], str))
+                or type(item["is_directory"]) is not bool
+                or not isinstance(item["artifact_indices"], list)
+            ):
+                raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence source layout is invalid.")
+            roles.add(item["role"])
+            members = []
+            for index in item["artifact_indices"]:
+                if type(index) is not int or not 0 <= index < len(artifacts) or index in used:
+                    raise RepositoryError(
+                        "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
+                    )
+                used.add(index)
+                member = artifacts[index]
+                if (
+                    not isinstance(member, dict)
+                    or not isinstance(member.get("role"), str)
+                    or not _is_digest(member.get("sha256"))
+                    or type(member.get("size_bytes")) is not int
+                    or member["size_bytes"] < 0
+                    or member.get("format") != item["format"]
+                    or member.get("producer") != item["producer"]
+                ):
+                    raise RepositoryError(
+                        "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
+                    )
+                members.append(member)
+            if item["is_directory"]:
+                prefix = item["role"] + ":"
+                digest = hashlib.sha256()
+                for member in sorted(
+                    members, key=lambda member: Path(member["role"][len(prefix) :])
+                ):
+                    relative = member["role"][len(prefix) :]
+                    path = Path(relative)
+                    if (
+                        not member["role"].startswith(prefix)
+                        or path.is_absolute()
+                        or ".." in path.parts
+                        or not path.parts
+                    ):
+                        raise RepositoryError(
+                            "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
+                        )
+                    digest.update(relative.encode() + bytes.fromhex(member["sha256"]))
+                expected_digest = digest.hexdigest()
+            else:
+                if len(members) != 1 or members[0]["role"] != item["role"]:
+                    raise RepositoryError(
+                        "REPOSITORY_CORRUPTION", "Evidence file membership is invalid."
+                    )
+                expected_digest = members[0]["sha256"]
+            if item["sha256"] != expected_digest or item["size_bytes"] != sum(
+                member["size_bytes"] for member in members
+            ):
+                raise RepositoryError(
+                    "REPOSITORY_CORRUPTION", "Evidence source identity is invalid."
+                )
+        if used != set(range(len(artifacts))):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence membership is incomplete.")
+        inputs = body["analysis_request"].get("inputs", [])
+        indices = layout["analysis_sources"]
+        if indices and len(indices) != len(inputs):
+            raise RepositoryError(
+                "REPOSITORY_CORRUPTION", "Evidence analysis source layout is invalid."
+            )
+        for index, input_item in zip(indices, inputs, strict=False):
+            if type(index) is not int or not 0 <= index < len(layout["sources"]):
+                raise RepositoryError(
+                    "REPOSITORY_CORRUPTION", "Evidence analysis source layout is invalid."
+                )
+            source = layout["sources"][index]
+            if any(
+                source.get(key) != input_item.get(key) for key in ("sha256", "format", "producer")
+            ):
+                raise RepositoryError(
+                    "REPOSITORY_CORRUPTION", "Evidence analysis source identity is invalid."
+                )
 
     @staticmethod
     def _validate_capture_request(value: Any) -> None:

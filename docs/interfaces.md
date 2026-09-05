@@ -96,6 +96,9 @@ stable operation-specific summary; cancellation remains a control path and is re
 `prepare_providers` and capture tools are open-world. Preparation uses request-owned bounded
 subprocesses and an overall deadline; cancellation settles the installer and its descendants.
 py-spy is prepared as a pinned standalone collector and becomes available in the same live session.
+Bindings are activated only after the complete request succeeds, including any server preparation;
+failure, timeout, or cancellation leaves prior session bindings unchanged. Preparation forwards
+the safe uv controls `UV_OFFLINE`, `UV_CACHE_DIR`, `UV_PYTHON_DOWNLOADS`, and `UV_NO_CONFIG`.
 Repeating preparation reuses its verified binding without installation. The returned launcher still
 names the complete requested server provider set; preparing another provider does not remove
 existing session bindings. No durable provider inventory, project state, or job is created.
@@ -189,7 +192,9 @@ Capture `outcome` is computed from every execution before diagnostic compaction 
 success/failure counts. MCP error classification consumes that outcome even when no execution
 diagnostics fit inline. Each execution identifies whether `returncode` belongs to the workload or
 collector, retains the invoked executable SHA-256, and leaves `workload_returncode` null for wrapped
-captures. A usable profile does not prove workload success. Preserved stdout, stderr, and profiles
+captures. Exit ownership is declared by each invocation builder: self-reporting workloads retain
+their observed exit even when they use a provider other than `direct`. A usable profile does not
+prove workload success. Preserved stdout, stderr, and profiles
 are individually selectable from the evidence resource.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
 its environment overrides the target environment. Each block randomizes case order from the

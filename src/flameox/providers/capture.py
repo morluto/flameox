@@ -8,7 +8,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from flameox.runtime_contracts import (
     BenchmarkSamplesCaptureArguments,
@@ -34,6 +34,8 @@ class CaptureInvocation:
     argv: tuple[str, ...]
     environment: dict[str, str]
     artifacts: tuple[tuple[Path, str, str], ...]
+    # Wrapper processes cannot prove the workload's exit without a separate receipt.
+    returncode_scope: Literal["workload", "collector"] = "collector"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +58,7 @@ def _arguments(request: CaptureBuildRequest, expected: type[CaptureArguments]) -
 
 def _direct(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
     _arguments(request, EmptyArguments)
-    return CaptureInvocation(tuple(request.target_argv), request.environment, ())
+    return CaptureInvocation(tuple(request.target_argv), request.environment, (), "workload")
 
 
 def _pyperf(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
@@ -142,7 +144,9 @@ def _node_cpu(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvo
         f"--cpu-prof-name={output.name}",
         *request.target_argv[1:],
     )
-    return CaptureInvocation(argv, request.environment, ((output, "cpuprofile", "cpu-profile"),))
+    return CaptureInvocation(
+        argv, request.environment, ((output, "cpuprofile", "cpu-profile"),), "workload"
+    )
 
 
 def _node_heap(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
@@ -156,7 +160,7 @@ def _node_heap(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInv
         *request.target_argv[1:],
     )
     return CaptureInvocation(
-        argv, request.environment, ((output, "heapprofile", "memory-profile"),)
+        argv, request.environment, ((output, "heapprofile", "memory-profile"),), "workload"
     )
 
 
@@ -174,7 +178,7 @@ def _benchmark_samples(request: CaptureBuildRequest, _: ManagedExecutable) -> Ca
             sort_keys=True,
         )
     return CaptureInvocation(
-        tuple(request.target_argv), environment, ((output, "samples", "benchmark"),)
+        tuple(request.target_argv), environment, ((output, "samples", "benchmark"),), "workload"
     )
 
 
@@ -186,6 +190,7 @@ def _nvbench(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvoc
         (*request.target_argv, "--jsonbin", str(output)),
         request.environment,
         ((output_root, "nvbench", "benchmark"),),
+        "workload",
     )
 
 
@@ -217,7 +222,7 @@ def _torch_profiler(request: CaptureBuildRequest, _: ManagedExecutable) -> Captu
         "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT": str(output_root),
     }
     return CaptureInvocation(
-        tuple(request.target_argv), environment, ((output, "pytorch", "trace"),)
+        tuple(request.target_argv), environment, ((output, "pytorch", "trace"),), "workload"
     )
 
 
@@ -390,7 +395,10 @@ def _observations(request: CaptureBuildRequest, _: ManagedExecutable) -> Capture
     output = request.directory / "observations.jsonl"
     environment = {**request.environment, "FLAMEOX_OBSERVATIONS_PATH": str(output)}
     return CaptureInvocation(
-        tuple(request.target_argv), environment, ((output, "observations", "observations"),)
+        tuple(request.target_argv),
+        environment,
+        ((output, "observations", "observations"),),
+        "workload",
     )
 
 

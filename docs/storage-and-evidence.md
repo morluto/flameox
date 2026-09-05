@@ -97,7 +97,14 @@ manifest.
 
 Agent projections expose an opaque `source` accepted unchanged by analysis tools for each artifact,
 plus `logical_sources` for directory bundles and ordered `analysis_sources` for the original
-analysis. These selectors hash logical roles so native filenames remain private. Missing or
+analysis. Selectors address immutable manifest positions, not hashes of private roles that could
+be checked against guessed filenames. File selectors always select exact members, even when a
+filename contains the directory-role delimiter. New manifests include `source_layout`: each source
+declares its file/directory kind, exact artifact indices, and identity, with an ordered mapping for
+the original analysis inputs. Empty directories retain their metadata without inventing a native
+payload, and re-preserving a selected member retains its file identity. Readers validate membership,
+digests, sizes, and analysis mappings. Existing manifests without this optional field remain
+readable using their original role-based bundle convention. Missing or
 ambiguous selectors point back to the evidence resource for enumeration.
 
 Corruption remains fail-closed. Runtime errors include the selected configuration source, a

@@ -112,18 +112,18 @@ class ProviderDependencies:
             )
         return result.stdout
 
-    async def _prepare_py_spy(self, timeout: int) -> list[str]:
+    async def _prepare_py_spy(self, timeout: int) -> tuple[ResolvedExecutable, list[str]]:
         try:
             if self.py_spy_executable() is not None:
-                return []
+                assert self._py_spy is not None
+                return self._py_spy, []
         except RuntimeFailure:
             pass  # This explicit preparation request authorizes resolving a new binding.
         adjacent = Path(sys.executable).with_name("py-spy.exe" if os.name == "nt" else "py-spy")
         if adjacent.is_file():
             output = await self._run([str(adjacent), "--version"], min(timeout, 10))
             if output.decode().strip() == f"py-spy {PY_SPY_VERSION}":
-                self._py_spy = self._bind(str(adjacent))
-                return []
+                return self._bind(str(adjacent)), []
         probe = (
             "import importlib.metadata,json,os,sysconfig; "
             "from pathlib import Path; "
@@ -156,8 +156,7 @@ class ProviderDependencies:
                 raise ValueError("collector version mismatch")
         except (KeyError, TypeError, ValueError, DomainError, OSError) as error:
             raise SetupFailure("Prepared collector identity could not be verified.") from error
-        self._py_spy = binding
-        return command
+        return binding, command
 
     async def prepare(
         self,
@@ -177,8 +176,9 @@ class ProviderDependencies:
         launcher_command, launcher_args = mcp_launcher(requested)
         managed = [item for item in requested if item in MANAGED_PROVIDER_EXTRAS]
         command: list[str] = []
+        collector: ResolvedExecutable | None = None
         if "py-spy" in managed:
-            command = await self._prepare_py_spy(timeout_seconds)
+            collector, command = await self._prepare_py_spy(timeout_seconds)
         server_providers = [item for item in managed if item != "py-spy"]
         activation = active_provider_status(server_providers) if server_providers else "ready"
         if server_providers and activation != "ready":
@@ -188,7 +188,7 @@ class ProviderDependencies:
             output = await self._run(command, timeout_seconds)
             if output.decode().strip() != __version__:
                 raise SetupFailure("Prepared Flameox release does not match the running release.")
-        return ProviderPreparation(
+        preparation = ProviderPreparation(
             requested,
             managed,
             external_provider_requirements(requested),
@@ -197,3 +197,9 @@ class ProviderDependencies:
             [*launcher_args, "mcp", "serve"],
             activation if managed else "not_applicable",
         )
+        # Publish session state only after every requested preparation succeeds.
+        # No await follows this commit, and failed requests never roll back another
+        # concurrent request's successful binding.
+        if collector is not None:
+            self._py_spy = collector
+        return preparation

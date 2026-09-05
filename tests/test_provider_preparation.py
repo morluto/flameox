@@ -99,6 +99,74 @@ def fake_collector_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.process
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
+def test_preparation_preserves_safe_uv_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = {
+        "UV_OFFLINE": "1",
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_NO_CONFIG": "1",
+    }
+    for key, value in controls.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PYTHONPATH", "/untrusted-import-path")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-forward")
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            output = await runtime.dependencies._run(
+                [sys.executable, "-c", "import os,json; print(json.dumps(dict(os.environ)))"], 10
+            )
+            environment = json.loads(output)
+            assert {key: environment.get(key) for key in controls} == controls
+            assert "PYTHONPATH" not in environment
+            assert "UNRELATED_SECRET" not in environment
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
+@pytest.mark.parametrize("failure", ["exit", "timeout", "cancel"])
+def test_mixed_preparation_commits_no_collector_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    fake_collector_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr("flameox.providers.preparation.active_provider_status", lambda _: "unknown")
+    original = ProviderDependencies._run
+
+    async def run(self: ProviderDependencies, argv: list[str], timeout: int) -> bytes:
+        if argv[-1] == "--version" and argv[0] == "uvx":
+            if failure == "exit":
+                raise SetupFailure("server preparation failed")
+            await anyio.sleep(60)
+        return await original(self, argv, timeout)
+
+    monkeypatch.setattr(ProviderDependencies, "_run", run)
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            if failure == "cancel":
+                with anyio.move_on_after(0.5) as scope:
+                    await runtime.dependencies.prepare(["py-spy", "memray"])
+                assert scope.cancel_called
+            else:
+                with pytest.raises(SetupFailure):
+                    await runtime.dependencies.prepare(["py-spy", "memray"], timeout_seconds=1)
+            assert runtime.dependencies.py_spy_executable() is None
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
 def test_prepare_collector_keeps_session_and_reuses_verified_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -125,6 +193,56 @@ def test_prepare_collector_keeps_session_and_reuses_verified_binding(
             collector.write_text(collector.read_text() + "# changed\n")
             with pytest.raises(RuntimeFailure, match="missing or changed"):
                 runtime.dependencies.py_spy_executable()
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
+@pytest.mark.parametrize("server_succeeds", [False, True])
+def test_mixed_preparation_does_not_rollback_concurrent_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_succeeds: bool
+) -> None:
+    collector = fake_collector_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr("flameox.providers.preparation.active_provider_status", lambda _: "unknown")
+    original = ProviderDependencies._run
+
+    async def exercise() -> None:
+        reached_server = anyio.Event()
+        release_server = anyio.Event()
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+
+        async def run(self: ProviderDependencies, argv: list[str], timeout: int) -> bytes:
+            if argv[-1] == "--version" and argv[0] == "uvx":
+                reached_server.set()
+                await release_server.wait()
+                if not server_succeeds:
+                    raise SetupFailure("server preparation failed")
+                return __version__.encode()
+            return await original(self, argv, timeout)
+
+        monkeypatch.setattr(ProviderDependencies, "_run", run)
+
+        async def mixed_request() -> None:
+            if server_succeeds:
+                result = await runtime.dependencies.prepare(["py-spy", "memray"])
+                assert result.prepared_managed_providers == ["py-spy", "memray"]
+            else:
+                with pytest.raises(SetupFailure):
+                    await runtime.dependencies.prepare(["py-spy", "memray"])
+
+        try:
+            with anyio.fail_after(10):
+                async with anyio.create_task_group() as group:
+                    group.start_soon(mixed_request)
+                    await reached_server.wait()
+                    assert runtime.dependencies.py_spy_executable() is None
+                    await runtime.dependencies.prepare(["py-spy"])
+                    assert runtime.dependencies.py_spy_executable() == str(collector)
+                    release_server.set()
+            assert runtime.dependencies.py_spy_executable() == str(collector)
         finally:
             runtime.close()
 
