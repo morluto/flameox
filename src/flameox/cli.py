@@ -426,6 +426,18 @@ def evidence_query(
         runtime.close()
 
 
+@evidence_app.command("location")
+def evidence_location() -> None:
+    """Show the selected local evidence directory without opening or modifying it."""
+    runtime = _runtime()
+    try:
+        _write(
+            {"directory": str(runtime.repository.root), "environment_variable": "FLAMEOX_DATA_DIR"}
+        )
+    finally:
+        runtime.close()
+
+
 @evidence_app.command("show")
 def evidence_show(
     evidence_id: Annotated[str, typer.Argument()],

@@ -34,6 +34,19 @@ class RepositoryError(RuntimeError):
         self.message = message
 
 
+def artifact_selector(role: str) -> str:
+    """A selector reveals no native filename and remains scoped to its evidence manifest."""
+    return hashlib.sha256(role.encode()).hexdigest()
+
+
+def evidence_source(evidence_id: str, role: str) -> dict[str, str]:
+    return {
+        "kind": "evidence",
+        "evidence_id": evidence_id,
+        "artifact_selector": artifact_selector(role),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class NativeArtifact:
     path: Path
@@ -197,6 +210,7 @@ class EvidenceRepository:
 
         manifest = self.read(evidence_id)
         body = manifest["body"]
+        logical_artifacts = self._logical_artifacts(body["artifacts"])
         capture_request = body["capture_request"]
         safe_capture: dict[str, Any] | None = None
         if capture_request is not None:
@@ -232,6 +246,12 @@ class EvidenceRepository:
         return {
             "format_version": manifest["format_version"],
             "evidence_id": manifest["evidence_id"],
+            "analysis_sources": self._analysis_sources(manifest, logical_artifacts),
+            "logical_sources": [
+                {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                | {"source": evidence_source(evidence_id, item["role"])}
+                for item in logical_artifacts
+            ],
             "body": {
                 "evidence_kind": body["evidence_kind"],
                 "capability_id": body["capability_id"],
@@ -250,6 +270,7 @@ class EvidenceRepository:
                 },
                 "artifacts": [
                     {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                    | {"source": evidence_source(evidence_id, item["role"])}
                     for item in body["artifacts"]
                 ],
                 "data_files": [
@@ -258,6 +279,50 @@ class EvidenceRepository:
                 ],
             },
         }
+
+    @staticmethod
+    def _logical_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        logical = [item for item in artifacts if ":" not in item["role"]]
+        bundles: dict[str, list[dict[str, Any]]] = {}
+        for artifact in artifacts:
+            if ":" in artifact["role"]:
+                bundles.setdefault(artifact["role"].split(":", 1)[0], []).append(artifact)
+        for role, members in bundles.items():
+            digest = hashlib.sha256()
+            for member in sorted(members, key=lambda item: Path(item["role"].split(":", 1)[1])):
+                relative = member["role"].split(":", 1)[1]
+                digest.update(relative.encode() + bytes.fromhex(member["sha256"]))
+            logical.append(
+                {
+                    "role": role,
+                    "sha256": digest.hexdigest(),
+                    "size_bytes": sum(item["size_bytes"] for item in members),
+                    "format": members[0]["format"],
+                    "producer": members[0].get("producer"),
+                }
+            )
+        return logical
+
+    @staticmethod
+    def _analysis_sources(
+        manifest: Mapping[str, Any],
+        logical_artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        body = manifest["body"]
+        sources = []
+        for item in body["analysis_request"].get("inputs", []):
+            matching = [
+                artifact
+                for artifact in logical_artifacts
+                if artifact["sha256"] == item["sha256"]
+                and artifact["format"] == item["format"]
+                and artifact.get("producer") == item.get("producer")
+            ]
+            if not matching:
+                return []
+            role = matching[0]["role"]
+            sources.append(evidence_source(manifest["evidence_id"], role))
+        return sources
 
     @staticmethod
     def _safe_execution_projection(execution: Mapping[str, Any]) -> dict[str, Any]:
@@ -270,6 +335,9 @@ class EvidenceRepository:
             for key in (
                 "block",
                 "returncode",
+                "returncode_scope",
+                "executable_sha256",
+                "workload_returncode",
                 "status",
                 "failure_code",
                 "missing_artifact_roles",
@@ -763,8 +831,27 @@ class EvidenceRepository:
             "containment",
             "limit",
         }
-        if not isinstance(value, dict) or set(value) != fields:
+        attribution_fields = {"returncode_scope", "workload_returncode", "executable_sha256"}
+        if not isinstance(value, dict) or set(value) not in (fields, fields | attribution_fields):
             raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
+        if attribution_fields <= set(value) and (
+            value["returncode_scope"] not in {"workload", "collector"}
+            or not isinstance(value["executable_sha256"], str)
+            or re.fullmatch(LOWERCASE_SHA256_PATTERN, value["executable_sha256"]) is None
+            or (
+                value["workload_returncode"] is not None
+                and type(value["workload_returncode"]) is not int
+            )
+            or (
+                value["returncode_scope"] == "collector"
+                and value["workload_returncode"] is not None
+            )
+            or (
+                value["returncode_scope"] == "workload"
+                and value["workload_returncode"] != value["returncode"]
+            )
+        ):
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Capture exit attribution is invalid.")
         argv_fields = (value.get("argv"), value.get("capture_argv"))
         missing_roles = value.get("missing_artifact_roles")
         scalar_valid = (

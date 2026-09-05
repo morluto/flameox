@@ -76,6 +76,17 @@ class EvidenceSource(StrictModel):
         min_length=1,
         max_length=80,
     )
+    artifact_selector: str | None = Field(
+        default=None,
+        description="Opaque artifact selector returned by the evidence resource; pass unchanged.",
+        pattern=LOWERCASE_SHA256_PATTERN,
+    )
+
+    @model_validator(mode="after")
+    def one_selector(self) -> EvidenceSource:
+        if self.artifact_role is not None and self.artifact_selector is not None:
+            raise ValueError("Use artifact_role or artifact_selector, not both")
+        return self
 
 
 Source = Annotated[PathSource | EvidenceSource, Field(discriminator="kind")]
@@ -87,7 +98,12 @@ class EmptyArguments(StrictModel):
 
 class PreviewArguments(StrictModel):
     offset: int = Field(
-        default=0, description="Zero-based byte offset at which to begin the preview.", ge=0
+        default=0,
+        description=(
+            "Zero-based logical row offset: text lines, JSONL records, CSV data records, "
+            "Parquet records, or projected JSON entries. Continuations advance in the same unit."
+        ),
+        ge=0,
     )
 
 
@@ -722,7 +738,8 @@ class ExperimentDesign(StrictModel):
     )
     practical_threshold: float = Field(
         description=(
-            "Absolute difference considered practically equivalent, in metric units (nanoseconds)."
+            "Absolute margin for describing the observed point estimate, in nanoseconds. "
+            "Being within this margin does not establish statistical or semantic equivalence."
         ),
         ge=0,
     )

@@ -52,8 +52,12 @@ The 0.2 runtime accepts `wall_time_ns` and paired `median_difference` or
 `mean_difference`. Each non-baseline case is compared with the first declared
 case within the same blocks. Failed or oracle-invalid pairs are excluded and
 reported as limitations; fewer than three eligible pairs produce a descriptive
-estimate without a confidence interval. The practical-threshold decision is
-returned as typed comparison evidence, not retained only as request metadata.
+estimate without a confidence interval. `point_estimate_classification` describes only the
+observed estimate against the practical margin, with `decision_basis=descriptive_point_estimate`
+on the experiment metrics block. It replaces the ambiguous `decision` field. `within_threshold`
+does not establish equivalence; a wide interval may still span material improvement and regression.
+The deterministic percentile interval is reported separately and is not a calibrated equivalence
+test. Semantic correctness still requires the declared oracle.
 
 Artifact comparison is separate from that experiment result. Capture the representative baseline
 and candidate summaries independently, preserve them if they must survive the session, then submit

@@ -95,6 +95,18 @@ Missing or corrupt resources are MCP resource errors. Native payload bytes are
 not exposed through resources; their digest and role remain visible in the
 manifest.
 
+Agent projections expose an opaque `source` accepted unchanged by analysis tools for each artifact,
+plus `logical_sources` for directory bundles and ordered `analysis_sources` for the original
+analysis. These selectors hash logical roles so native filenames remain private. Missing or
+ambiguous selectors point back to the evidence resource for enumeration.
+
+Corruption remains fail-closed. Runtime errors include the selected configuration source, a
+path-free store identifier, and recovery instructions. `flameox evidence location` prints the
+resolved directory locally without reading or initializing the repository. Restore the original
+store from a known-good backup, or select a distinct empty store with `FLAMEOX_DATA_DIR` and
+restart/reconnect. Switching stores does not recover old evidence. Do not delete existing data or
+synthesize replacement metadata.
+
 ## Format evolution
 
 This is repository format `1`. Unsupported repository or manifest versions

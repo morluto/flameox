@@ -64,9 +64,13 @@ capability selector or a free-form analysis argument object.
 Capture-provider contracts supply the discriminated provider variants for each compatible capture
 tool. Missing packages, executables, permissions, versions, or platforms do not change the catalog;
 the attempted tool returns typed remediation. The separately invoked CLI setup command or MCP
-`prepare_providers` tool may prepare the exact version-pinned uvx environment named by an explicit
-Python provider set; neither creates project state nor owns a durable operation or provider
-inventory. Host profilers, drivers, and permissions remain external and receive guidance only.
+`prepare_providers` tool resolves dependencies according to where they execute. CLI setup prepares
+the complete version-pinned server environment. MCP preparation can activate a pinned standalone
+py-spy collector in the existing session; server-import dependencies are checked against the active
+release's complete requested dependency contract. Neither creates project state nor owns a durable
+operation or provider inventory. Host profilers, drivers, and permissions remain external.
+`providers/preparation.py` owns bounded preparation and verified session executable bindings;
+transports do not infer readiness from installation receipts.
 
 Request validation is also a normalization boundary. Runtime admission constructs the typed
 capability and provider models once; execution, provenance, limitations, and result descriptions
