@@ -18,6 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import IO, Annotated, Any, Literal, cast
 
+import anyio
 import psutil
 from pydantic import Field, field_validator, model_validator
 
@@ -478,7 +479,8 @@ class SubprocessBroker:
         except TimeoutError as exc:
             cleanup_complete = True
             if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(cleanup_complete))
+                with anyio.CancelScope(shield=True):
+                    await on_cleanup(cleanup_complete)
             timeout_process = ProcessResult(
                 wall_time_ns=time.monotonic_ns() - started,
                 cancellation_cause=ProcessCancellationCause.TIMEOUT,
@@ -493,7 +495,8 @@ class SubprocessBroker:
             ) from exc
         except asyncio.CancelledError:
             if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(True))
+                with anyio.CancelScope(shield=True):
+                    await on_cleanup(True)
             raise
         assert process.stdout is not None
         assert process.stderr is not None
@@ -508,8 +511,11 @@ class SubprocessBroker:
         stderr_task = asyncio.create_task(
             self._read_bounded(process.stderr, output_budget, output=stderr_buffer)
         )
+        stop_observation = asyncio.Event()
         resource_task = asyncio.create_task(
-            self._observe_resources(process, request.resource_policy, tracked_descendants)
+            self._observe_resources(
+                process, request.resource_policy, tracked_descendants, stop_observation
+            )
         )
         stdin_task: asyncio.Task[None] | None = None
         if request.stdin_bytes is not None:
@@ -545,145 +551,73 @@ class SubprocessBroker:
                 stdout = cast(bytes, results[0])
                 stderr = cast(bytes, results[1])
                 resources = cast(RuntimeResourceSummary | None, results[3])
-        except TimeoutError as exc:
-            cleanup_complete = await self._terminate_with_observation(
-                process,
-                request,
-                process_observations,
-                on_cleanup,
-                tracked_descendants,
-            )
-            await self._settle_readers(stdout_task, stderr_task)
+        except BaseException as exc:
+            # Cleanup belongs to the broker, including under AnyIO's repeated
+            # cancellation. Callers must not need their own task/shield wrappers.
+            with anyio.CancelScope(shield=True):
+                try:
+                    cleanup_complete = await self._terminate_with_observation(
+                        process, request, process_observations, on_cleanup, tracked_descendants
+                    )
+                finally:
+                    stop_observation.set()
+                    await self._settle_readers(stdout_task, stderr_task)
+                    resources = await self._collect_resource(resource_task)
+                    await self._settle_task(stdin_task)
             partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
-            if request.resource_policy is None:
-                await self._settle_resource(resource_task)
-                resources = None
+            retryable = False
+            if isinstance(exc, TimeoutError):
+                cause = ProcessCancellationCause.TIMEOUT
+                code = ErrorCode.EXECUTION_TIMEOUT
+                message = f"Process exceeded {request.timeout_seconds} seconds."
+                retryable = True
+            elif isinstance(exc, _OutputLimitExceeded):
+                cause = ProcessCancellationCause.OUTPUT_LIMIT
+                code = ErrorCode.LIMIT_EXCEEDED
+                message = f"Process output exceeded {request.max_output_bytes} bytes."
+            elif isinstance(exc, _ResourcePolicyExceeded):
+                cause = exc.cause
+                resources = exc.summary
+                code = ErrorCode.LIMIT_EXCEEDED
+                message = (
+                    "Runtime writable-byte policy was exceeded."
+                    if cause
+                    in {
+                        ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
+                        ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
+                    }
+                    else "Process tree exceeded the configured memory budget."
+                )
+            elif isinstance(exc, asyncio.CancelledError):
+                cause = ProcessCancellationCause.CALLER_CANCELLED
             else:
-                resources = await self._collect_resource(resource_task)
-            await self._settle_task(stdin_task)
-            timeout_process = ProcessResult(
+                raise
+            failure_process = ProcessResult(
                 termination=process_termination_from_returncode(process.returncode),
                 wall_time_ns=time.monotonic_ns() - started,
-                cancellation_cause=ProcessCancellationCause.TIMEOUT,
+                cancellation_cause=cause,
                 cleanup_complete=cleanup_complete,
                 peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
                 resources=resources,
                 stdout=partial_stdout.decode(errors="replace"),
                 stderr=partial_stderr.decode(errors="replace"),
             )
-            raise ProcessExecutionError(
-                ErrorCode.EXECUTION_TIMEOUT,
-                f"Process exceeded {request.timeout_seconds} seconds.",
-                process=timeout_process,
-                process_observations=tuple(process_observations),
-                stdout=partial_stdout,
-                stderr=partial_stderr,
-                retryable=True,
-            ) from exc
-        except _OutputLimitExceeded as exc:
-            cleanup_complete = await self._terminate_with_observation(
-                process,
-                request,
-                process_observations,
-                on_cleanup,
-                tracked_descendants,
-            )
-            await self._settle_readers(stdout_task, stderr_task)
-            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
-            await self._settle_resource(resource_task)
-            await self._settle_task(stdin_task)
-            output_process = ProcessResult(
-                termination=process_termination_from_returncode(process.returncode),
-                wall_time_ns=time.monotonic_ns() - started,
-                cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
-                cleanup_complete=cleanup_complete,
-                stdout=partial_stdout.decode(errors="replace"),
-                stderr=partial_stderr.decode(errors="replace"),
-            )
-            raise ProcessExecutionError(
-                ErrorCode.LIMIT_EXCEEDED,
-                f"Process output exceeded {request.max_output_bytes} bytes.",
-                process=output_process,
-                process_observations=tuple(process_observations),
-                stdout=partial_stdout,
-                stderr=partial_stderr,
-            ) from exc
-        except _ResourcePolicyExceeded as exc:
-            cleanup_complete = await self._terminate_with_observation(
-                process,
-                request,
-                process_observations,
-                on_cleanup,
-                tracked_descendants,
-            )
-            await self._settle_readers(stdout_task, stderr_task)
-            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
-            await self._settle_task(stdin_task)
-            storage_cause = exc.cause in {
-                ProcessCancellationCause.STORAGE_RESERVE_EXCEEDED,
-                ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
-            }
-            code = ErrorCode.LIMIT_EXCEEDED
-            message = (
-                "Runtime writable-byte policy was exceeded."
-                if storage_cause
-                else "Process tree exceeded the configured memory budget."
-            )
-            policy_process = ProcessResult(
-                cancellation_cause=exc.cause,
-                cleanup_complete=cleanup_complete,
-                peak_rss_bytes=exc.summary.peak_rss_bytes,
-                resources=exc.summary,
-                stdout=partial_stdout.decode(errors="replace"),
-                stderr=partial_stderr.decode(errors="replace"),
-            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise ProcessCancelledError(
+                    process=failure_process,
+                    process_observations=tuple(process_observations),
+                    stdout=partial_stdout,
+                    stderr=partial_stderr,
+                ) from None
             raise ProcessExecutionError(
                 code,
                 message,
-                process=policy_process,
+                process=failure_process,
                 process_observations=tuple(process_observations),
                 stdout=partial_stdout,
                 stderr=partial_stderr,
+                retryable=retryable,
             ) from exc
-        except asyncio.CancelledError:
-            cleanup_complete = await self._terminate_with_observation(
-                process,
-                request,
-                process_observations,
-                on_cleanup,
-                tracked_descendants,
-            )
-            await self._settle_readers(stdout_task, stderr_task)
-            partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
-            resources = await self._collect_resource(resource_task)
-            await self._settle_task(stdin_task)
-            raise ProcessCancelledError(
-                process=ProcessResult(
-                    termination=process_termination_from_returncode(process.returncode),
-                    wall_time_ns=time.monotonic_ns() - started,
-                    cancellation_cause=ProcessCancellationCause.CALLER_CANCELLED,
-                    cleanup_complete=cleanup_complete,
-                    peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
-                    resources=resources,
-                    stdout=partial_stdout.decode(errors="replace"),
-                    stderr=partial_stderr.decode(errors="replace"),
-                ),
-                process_observations=tuple(process_observations),
-                stdout=partial_stdout,
-                stderr=partial_stderr,
-            ) from None
-        except BaseException:
-            await self._terminate_with_observation(
-                process,
-                request,
-                process_observations,
-                on_cleanup,
-                tracked_descendants,
-            )
-            await self._settle_readers(stdout_task, stderr_task)
-            await self._settle_resource(resource_task)
-            await self._settle_task(stdin_task)
-            raise
 
         finished = time.monotonic_ns()
         process_observations.extend(
@@ -773,9 +707,10 @@ class SubprocessBroker:
             return await asyncio.shield(observation)
         except asyncio.CancelledError:
             cancellation.set()
-            outcome = await asyncio.shield(observation)
-            if on_cleanup is not None:
-                await asyncio.shield(on_cleanup(outcome.process.cleanup_complete is True))
+            with anyio.CancelScope(shield=True):
+                outcome = await observation
+                if on_cleanup is not None:
+                    await on_cleanup(outcome.process.cleanup_complete is True)
             raise
 
     def _snapshot_processes(
@@ -1339,12 +1274,14 @@ class SubprocessBroker:
         process: asyncio.subprocess.Process,
         policy: ResourcePolicy | None,
         tracked_descendants: dict[int, float | None],
+        stop: asyncio.Event,
     ) -> RuntimeResourceSummary | None:
         interval = 0.1 if policy is None else policy.sampling_interval_ms / 1_000
         if policy is None:
-            while process.returncode is None:
+            while process.returncode is None and not stop.is_set():
                 self._track_current_descendants(process.pid, tracked_descendants)
-                await asyncio.sleep(interval)
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
             return None
         minimum_free: int | None = None
         peak_rss = 0
@@ -1363,7 +1300,7 @@ class SubprocessBroker:
             if policy.staging_root is not None
             else None
         )
-        while process.returncode is None:
+        while process.returncode is None and not stop.is_set():
             self._track_current_descendants(process.pid, tracked_descendants)
             try:
                 free = shutil.disk_usage(policy.filesystem_path).free
@@ -1449,7 +1386,8 @@ class SubprocessBroker:
                         summary,
                         ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
                     )
-            await asyncio.sleep(interval)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=interval)
         if not free_sampled:
             unavailable.add("minimum_free_bytes")
         if not rss_sampled or peak_rss == 0:
@@ -1730,14 +1668,6 @@ class SubprocessBroker:
         values = await asyncio.gather(task, return_exceptions=True)
         value = values[0]
         return value if isinstance(value, RuntimeResourceSummary) else None
-
-    async def _settle_resource(
-        self,
-        task: asyncio.Task[RuntimeResourceSummary | None],
-    ) -> None:
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
 
     async def _settle_task(self, task: asyncio.Task[Any] | None) -> None:
         if task is None:

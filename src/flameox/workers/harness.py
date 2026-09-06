@@ -7,11 +7,12 @@ import secrets
 import shutil
 import sys
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar, cast
 
+import anyio
 from pydantic import JsonValue, ValidationError
 
 from flameox.atomic import atomic_write_json
@@ -88,10 +89,10 @@ class IsolatedWorkerHarness:
         """Run one closed typed protocol and retain staged outputs during consumption."""
         job_root = self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path, response_path, request_id = self._prepare_request(
-            definition, request, job_root
-        )
         try:
+            request_path, response_path, request_id = self._prepare_request(
+                definition, request, job_root
+            )
             outcome = self.broker.run_sync(
                 self._execution_request(
                     definition.module,
@@ -142,10 +143,10 @@ class IsolatedWorkerHarness:
         """Run a typed worker asynchronously when no staged output outlives the call."""
         job_root = self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path, response_path, request_id = self._prepare_request(
-            definition, request, job_root
-        )
         try:
+            request_path, response_path, request_id = self._prepare_request(
+                definition, request, job_root
+            )
             outcome = await self.broker.run(
                 self._execution_request(
                     definition.module,
@@ -180,10 +181,10 @@ class IsolatedWorkerHarness:
         """Keep typed worker outputs alive while one host-side consumer validates them."""
         job_root = job_root or self._job_root(definition.name)
         job_root.mkdir(parents=True, exist_ok=False)
-        request_path, response_path, request_id = self._prepare_request(
-            definition, request, job_root
-        )
         try:
+            request_path, response_path, request_id = self._prepare_request(
+                definition, request, job_root
+            )
             task = asyncio.create_task(
                 self.broker.run(
                     self._execution_request(
@@ -209,11 +210,11 @@ class IsolatedWorkerHarness:
                     if heartbeat is not None:
                         await heartbeat(job_root)
                 outcome = await task
-            except asyncio.CancelledError:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-                raise
+            finally:
+                if not task.done():
+                    task.cancel()
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(task, return_exceptions=True)
             if heartbeat is not None:
                 await heartbeat(job_root)
             response = self._load_typed_response(

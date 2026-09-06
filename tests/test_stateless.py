@@ -3726,7 +3726,10 @@ def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: 
             runtime.read_evidence(preserved["evidence_id"])
         assert read_failure.value.code == "REPOSITORY_CORRUPTION"
         second = runtime.analyze(
-            "artifact.preview", [PathSource(path=str(artifact))], {"offset": 1}
+            "artifact.preview",
+            [PathSource(path=str(artifact))],
+            {},
+            limits=RequestLimits(max_rows=2),
         )
         with pytest.raises(RuntimeFailure) as preserve_failure:
             runtime.preserve_evidence(second["analysis_id"])

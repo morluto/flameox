@@ -111,6 +111,10 @@ digests, sizes, and analysis mappings. Layouts and relative paths are required; 
 membership from role strings. Missing or ambiguous selectors point back to the evidence resource
 for enumeration.
 
+Member paths are normalized relative POSIX paths, with no drive, root, backslash, or parent
+traversal. Members must be distinct and prefix-free: a bundle cannot contain both a file `a` and
+another file `a/b`. Readers reject impossible layouts as repository corruption before materialization.
+
 Analysis first selects manifest metadata and admits the aggregate input and scratch budgets.
 Only then does it verify the selected payloads and materialize directory members. Unselected
 payloads and derived analysis data are not read by source selection; full evidence/resource reads

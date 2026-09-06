@@ -15,6 +15,7 @@ import sys
 import tempfile
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -192,6 +193,7 @@ class AnalysisRuntime:
         self.analyses: OrderedDict[str, CachedAnalysis] = OrderedDict()
         self.scratch_artifacts: OrderedDict[tuple[str, str], Path] = OrderedDict()
         self._protected_sources: set[Path] = set()
+        self._capture_reservations: dict[Path, tuple[int, int]] = {}
         self.dependencies = ProviderDependencies(self.broker, self.scratch)
 
     def close(self) -> None:
@@ -235,13 +237,14 @@ class AnalysisRuntime:
                 capture_roots.add(self.scratch / relative.parts[0] / relative.parts[1])
         for root in capture_roots:
             retained = any(
-                source.path.is_relative_to(root)
+                source.path.is_relative_to(root) or root.is_relative_to(source.path)
                 for analysis in self.analyses.values()
                 if analysis is not cached
                 for source in analysis.sources
             )
             if not retained and not any(
-                path.is_relative_to(root) for path in self._protected_sources
+                path.is_relative_to(root) or root.is_relative_to(path)
+                for path in self._protected_sources | self._capture_reservations.keys()
             ):
                 shutil.rmtree(root, ignore_errors=True)
                 for key, path in list(self.scratch_artifacts.items()):
@@ -272,16 +275,18 @@ class AnalysisRuntime:
         reserved_bytes: int = 0,
         reserved_files: int = 0,
     ) -> None:
-        used_bytes, used_files = self._scratch_usage()
-        protected = self._protected_sources | (
-            {protected_root} if protected_root is not None else set()
+        used_bytes, used_files = self._scratch_commitment()
+        protected = (
+            self._protected_sources
+            | self._capture_reservations.keys()
+            | ({protected_root} if protected_root is not None else set())
         )
         while (
             used_bytes + reserved_bytes > MAX_SESSION_SCRATCH_BYTES
             or used_files + reserved_files > MAX_SESSION_SCRATCH_FILES
         ):
             if self._evict_oldest_analysis(protected_roots=tuple(protected)):
-                used_bytes, used_files = self._scratch_usage()
+                used_bytes, used_files = self._scratch_commitment()
                 continue
             removable = next(
                 (
@@ -296,7 +301,7 @@ class AnalysisRuntime:
             if removable is None:
                 break
             self._remove_scratch_artifact(self.scratch_artifacts.pop(removable))
-            used_bytes, used_files = self._scratch_usage()
+            used_bytes, used_files = self._scratch_commitment()
         if (
             used_bytes + reserved_bytes > MAX_SESSION_SCRATCH_BYTES
             or used_files + reserved_files > MAX_SESSION_SCRATCH_FILES
@@ -416,10 +421,8 @@ class AnalysisRuntime:
                 raise RuntimeFailure(
                     "DECODE_FAILURE", "Artifact preview could not decode the input."
                 ) from error
-            if continuation is not None and offset >= observed:
-                raise RuntimeFailure(
-                    "INVALID_INPUT", "Continuation offset is beyond the available evidence"
-                )
+            if (continuation is not None or offset > 0) and offset >= observed:
+                raise RuntimeFailure("INVALID_INPUT", "Offset is beyond the available evidence")
             continuation_available = not complete
             truncation_reason = "row_limit"
             blocks: list[dict[str, Any]] = [
@@ -599,11 +602,10 @@ class AnalysisRuntime:
         sequence = self._capture_sequence(cases, blocks, experiment)
         total = len(sequence)
         cwd = self._resolve_capture_cwd(target.cwd)
-        request_scratch = self.scratch / f"capture-{secrets.token_hex(12)}"
-        pending_executions: list[dict[str, Any]] = []
-        bound_captures: list[BoundCapture] = []
-        probed_workloads: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-        try:
+        with self._capture_scope() as request_scratch:
+            pending_executions: list[dict[str, Any]] = []
+            bound_captures: list[BoundCapture] = []
+            probed_workloads: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
             for sequence_number, block, case in sequence:
                 argv = case.argv or target.argv
                 environment = {**target.environment, **case.environment}
@@ -681,257 +683,251 @@ class AnalysisRuntime:
             )
             self._reserve_capture_capacity(
                 total,
+                request_scratch=request_scratch,
                 provider_id=target.provider_id,
                 has_oracle=experiment is not None and experiment.semantic_oracle is not None,
                 limits=selected_limits,
             )
-        except BaseException:
-            shutil.rmtree(request_scratch, ignore_errors=True)
-            raise
-        try:
             request_scratch.mkdir()
             for item in bound_captures:
                 item.directory.mkdir()
                 materialize_capture_support(target.provider_id, item.directory)
-        except BaseException:
-            shutil.rmtree(request_scratch, ignore_errors=True)
-            raise
-        captured: list[NativeSource] = []
-        analysis_sources: list[NativeSource] = []
-        executions: list[dict[str, Any]] = []
-        for item in bound_captures:
-            sequence_number, block, case = item.sequence_number, item.block, item.case
-            if progress:
-                await progress(sequence_number - 1, total, f"capture {case.name} block {block}")
-            argv, environment, directory = item.argv, item.environment, item.directory
-            invocation, binding = item.invocation, item.binding
-            request = ExecutionRequest(
-                argv=invocation.argv,
-                executable_binding=binding,
-                cwd=cwd,
-                environment_allowlist=("PATH",),
-                environment_overrides=invocation.environment,
-                allowed_working_roots=(cwd,),
-                timeout_seconds=selected_limits.timeout_seconds,
-                max_output_bytes=selected_limits.max_output_bytes,
-                resource_policy=self._resource_policy(selected_limits, writable_root=directory),
-            )
-            failure_code: str | None = None
-            try:
-                outcome = await self.broker.run(request)
-                stdout = outcome.stdout
-                stderr = outcome.stderr
-                process = outcome.process
-                containment = outcome.containment.value
-            except ProcessExecutionError as error:
-                stdout = error.stdout or b""
-                stderr = error.stderr or b""
-                process = error.process
-                containment = "broker"
-                failure_code = error.code.value
-            for role, content in (("stdout", stdout), ("stderr", stderr)):
-                path = directory / f"{role}.txt"
-                path.write_bytes(content)
-                digest, size = sha256_file(path)
-                resolved_output = NativeSource(
-                    path,
-                    digest,
-                    size,
-                    "text",
-                    target.provider_id,
-                    f"capture-{sequence_number:04d}/{role}",
-                )
-                captured.append(resolved_output)
-                if target.provider_id == "direct":
-                    analysis_sources.append(resolved_output)
-            missing_artifact_roles: list[str] = []
-            for path, format_name, role in invocation.artifacts:
-                native = self._resolve_capture_artifact(
-                    path,
-                    format_name=format_name,
-                    role=role,
-                    provider_id=target.provider_id,
-                    limits=selected_limits,
-                )
-                if native is None:
-                    missing_artifact_roles.append(role)
-                    continue
-                captured_native = NativeSource(
-                    native.path,
-                    native.sha256,
-                    native.size_bytes,
-                    native.format,
-                    native.producer,
-                    f"capture-{sequence_number:04d}/{native.role}",
-                )
-                captured.append(captured_native)
-                analysis_sources.append(captured_native)
-            termination = process.termination
-            exit_code = getattr(termination, "exit_code", None)
-            status = "succeeded" if exit_code == 0 else "failed"
-            if status == "succeeded" and missing_artifact_roles:
-                status = "failed"
-                failure_code = "CAPTURE_ARTIFACT_MISSING"
-            oracle: dict[str, Any] | None = None
-            if (
-                status == "succeeded"
-                and experiment is not None
-                and experiment.semantic_oracle is not None
-            ):
-                oracle_argv = experiment.semantic_oracle
-                oracle_environment = {
-                    **environment,
-                    SEMANTIC_ORACLE_STDOUT_ENV: str(directory / "stdout.txt"),
-                    SEMANTIC_ORACLE_STDERR_ENV: str(directory / "stderr.txt"),
-                }
-                oracle_binding = self._require_capture_tool(
-                    oracle_argv[0],
-                    cwd=cwd,
-                    environment={**os.environ, **oracle_environment},
-                    request_scratch=request_scratch,
-                )
-                oracle_request = ExecutionRequest(
-                    argv=tuple(oracle_argv),
-                    executable_binding=oracle_binding,
+            captured: list[NativeSource] = []
+            analysis_sources: list[NativeSource] = []
+            executions: list[dict[str, Any]] = []
+            for item in bound_captures:
+                sequence_number, block, case = item.sequence_number, item.block, item.case
+                if progress:
+                    await progress(sequence_number - 1, total, f"capture {case.name} block {block}")
+                argv, environment, directory = item.argv, item.environment, item.directory
+                invocation, binding = item.invocation, item.binding
+                request = ExecutionRequest(
+                    argv=invocation.argv,
+                    executable_binding=binding,
                     cwd=cwd,
                     environment_allowlist=("PATH",),
-                    environment_overrides=oracle_environment,
+                    environment_overrides=invocation.environment,
                     allowed_working_roots=(cwd,),
                     timeout_seconds=selected_limits.timeout_seconds,
                     max_output_bytes=selected_limits.max_output_bytes,
                     resource_policy=self._resource_policy(selected_limits, writable_root=directory),
                 )
+                failure_code: str | None = None
                 try:
-                    oracle_outcome = await self.broker.run(oracle_request)
-                    oracle_stdout = oracle_outcome.stdout
-                    oracle_stderr = oracle_outcome.stderr
-                    oracle_process = oracle_outcome.process
-                    oracle_failure_code: str | None = None
+                    outcome = await self.broker.run(request)
+                    stdout = outcome.stdout
+                    stderr = outcome.stderr
+                    process = outcome.process
+                    containment = outcome.containment.value
                 except ProcessExecutionError as error:
-                    oracle_stdout = error.stdout or b""
-                    oracle_stderr = error.stderr or b""
-                    oracle_process = error.process
-                    oracle_failure_code = error.code.value
-                oracle_exit_code = getattr(oracle_process.termination, "exit_code", None)
-                for role, content in (
-                    ("oracle_stdout", oracle_stdout),
-                    ("oracle_stderr", oracle_stderr),
-                ):
+                    stdout = error.stdout or b""
+                    stderr = error.stderr or b""
+                    process = error.process
+                    containment = "broker"
+                    failure_code = error.code.value
+                for role, content in (("stdout", stdout), ("stderr", stderr)):
                     path = directory / f"{role}.txt"
                     path.write_bytes(content)
                     digest, size = sha256_file(path)
-                    captured.append(
-                        NativeSource(
-                            path,
-                            digest,
-                            size,
-                            "text",
-                            target.provider_id,
-                            f"capture-{sequence_number:04d}/{role}",
-                        )
+                    resolved_output = NativeSource(
+                        path,
+                        digest,
+                        size,
+                        "text",
+                        target.provider_id,
+                        f"capture-{sequence_number:04d}/{role}",
                     )
-                oracle = {
-                    "argv": oracle_argv,
-                    "returncode": oracle_exit_code,
-                    "status": "passed" if oracle_exit_code == 0 else "failed",
-                    "failure_code": oracle_failure_code,
-                }
-            self._prune_scratch(protected_root=request_scratch)
-            if oracle is not None and oracle["status"] == "failed":
-                status = "failed"
-                failure_code = "SEMANTIC_ORACLE_FAILED"
-            executions.append(
-                {
-                    "case": case.name,
-                    "block": block,
-                    "argv": argv,
-                    "capture_argv": list(invocation.argv),
-                    "cwd": str(cwd),
-                    "returncode": exit_code,
-                    "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
-                    "returncode_scope": invocation.returncode_scope,
-                    "workload_returncode": exit_code
-                    if invocation.returncode_scope == "workload"
-                    else None,
-                    "status": status,
-                    "failure_code": failure_code,
-                    "missing_artifact_roles": missing_artifact_roles,
-                    "semantic_oracle": oracle,
-                    "wall_time_ns": process.wall_time_ns,
-                    "containment": containment,
-                    "limit": self._terminated_limit(process, selected_limits),
-                }
+                    captured.append(resolved_output)
+                    if target.provider_id == "direct":
+                        analysis_sources.append(resolved_output)
+                missing_artifact_roles: list[str] = []
+                for path, format_name, role in invocation.artifacts:
+                    native = self._resolve_capture_artifact(
+                        path,
+                        format_name=format_name,
+                        role=role,
+                        provider_id=target.provider_id,
+                        limits=selected_limits,
+                    )
+                    if native is None:
+                        missing_artifact_roles.append(role)
+                        continue
+                    captured_native = NativeSource(
+                        native.path,
+                        native.sha256,
+                        native.size_bytes,
+                        native.format,
+                        native.producer,
+                        f"capture-{sequence_number:04d}/{native.role}",
+                    )
+                    captured.append(captured_native)
+                    analysis_sources.append(captured_native)
+                termination = process.termination
+                exit_code = getattr(termination, "exit_code", None)
+                status = "succeeded" if exit_code == 0 else "failed"
+                if status == "succeeded" and missing_artifact_roles:
+                    status = "failed"
+                    failure_code = "CAPTURE_ARTIFACT_MISSING"
+                oracle: dict[str, Any] | None = None
+                if (
+                    status == "succeeded"
+                    and experiment is not None
+                    and experiment.semantic_oracle is not None
+                ):
+                    oracle_argv = experiment.semantic_oracle
+                    oracle_environment = {
+                        **environment,
+                        SEMANTIC_ORACLE_STDOUT_ENV: str(directory / "stdout.txt"),
+                        SEMANTIC_ORACLE_STDERR_ENV: str(directory / "stderr.txt"),
+                    }
+                    oracle_binding = self._require_host_tool(
+                        oracle_argv[0],
+                        cwd=cwd,
+                        environment={**os.environ, **oracle_environment},
+                    )
+                    oracle_request = ExecutionRequest(
+                        argv=tuple(oracle_argv),
+                        executable_binding=oracle_binding,
+                        cwd=cwd,
+                        environment_allowlist=("PATH",),
+                        environment_overrides=oracle_environment,
+                        allowed_working_roots=(cwd,),
+                        timeout_seconds=selected_limits.timeout_seconds,
+                        max_output_bytes=selected_limits.max_output_bytes,
+                        resource_policy=self._resource_policy(
+                            selected_limits, writable_root=directory
+                        ),
+                    )
+                    try:
+                        oracle_outcome = await self.broker.run(oracle_request)
+                        oracle_stdout = oracle_outcome.stdout
+                        oracle_stderr = oracle_outcome.stderr
+                        oracle_process = oracle_outcome.process
+                        oracle_failure_code: str | None = None
+                    except ProcessExecutionError as error:
+                        oracle_stdout = error.stdout or b""
+                        oracle_stderr = error.stderr or b""
+                        oracle_process = error.process
+                        oracle_failure_code = error.code.value
+                    oracle_exit_code = getattr(oracle_process.termination, "exit_code", None)
+                    for role, content in (
+                        ("oracle_stdout", oracle_stdout),
+                        ("oracle_stderr", oracle_stderr),
+                    ):
+                        path = directory / f"{role}.txt"
+                        path.write_bytes(content)
+                        digest, size = sha256_file(path)
+                        captured.append(
+                            NativeSource(
+                                path,
+                                digest,
+                                size,
+                                "text",
+                                target.provider_id,
+                                f"capture-{sequence_number:04d}/{role}",
+                            )
+                        )
+                    oracle = {
+                        "argv": oracle_argv,
+                        "returncode": oracle_exit_code,
+                        "status": "passed" if oracle_exit_code == 0 else "failed",
+                        "failure_code": oracle_failure_code,
+                    }
+                self._prune_scratch(protected_root=request_scratch)
+                if oracle is not None and oracle["status"] == "failed":
+                    status = "failed"
+                    failure_code = "SEMANTIC_ORACLE_FAILED"
+                executions.append(
+                    {
+                        "case": case.name,
+                        "block": block,
+                        "argv": argv,
+                        "capture_argv": list(invocation.argv),
+                        "cwd": str(cwd),
+                        "returncode": exit_code,
+                        "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                        "returncode_scope": invocation.returncode_scope,
+                        "workload_returncode": exit_code
+                        if invocation.returncode_scope == "workload"
+                        else None,
+                        "status": status,
+                        "failure_code": failure_code,
+                        "missing_artifact_roles": missing_artifact_roles,
+                        "semantic_oracle": oracle,
+                        "wall_time_ns": process.wall_time_ns,
+                        "containment": containment,
+                        "limit": self._terminated_limit(process, selected_limits),
+                    }
+                )
+                self._check_capture_provenance_capacity(
+                    target=target,
+                    mode=mode,
+                    experiment=experiment,
+                    executions=executions,
+                    limit=selected_limits.max_provenance_bytes,
+                )
+                if progress:
+                    await progress(sequence_number, total, f"captured {case.name} block {block}")
+            effective_capability_id, analysis_sources = self._capture_analysis_sources(
+                capability_id, analysis_sources, captured
             )
-            self._check_capture_provenance_capacity(
-                target=target,
-                mode=mode,
-                experiment=experiment,
-                executions=executions,
-                limit=selected_limits.max_provenance_bytes,
-            )
-            if progress:
-                await progress(sequence_number, total, f"captured {case.name} block {block}")
-        effective_capability_id, analysis_sources = self._capture_analysis_sources(
-            capability_id, analysis_sources, captured
-        )
-        try:
-            result = self.analyze(
-                effective_capability_id,
-                [
-                    PathSource(path=str(item.path), format=item.format, producer=item.producer)
-                    for item in analysis_sources
-                ],
-                target.analysis_arguments,
-                limits=selected_limits,
-            )
-        except RuntimeFailure as error:
-            if not preserve:
-                shutil.rmtree(request_scratch, ignore_errors=True)
-                raise
-            result = self._capture_failure_result(
-                target=target,
+            try:
+                result = self.analyze(
+                    effective_capability_id,
+                    [
+                        PathSource(path=str(item.path), format=item.format, producer=item.producer)
+                        for item in analysis_sources
+                    ],
+                    target.analysis_arguments,
+                    limits=selected_limits,
+                )
+            except RuntimeFailure as error:
+                if not preserve:
+                    raise
+                result = self._capture_failure_result(
+                    target=target,
+                    capability_id=capability_id,
+                    mode=mode,
+                    experiment=experiment,
+                    executions=executions,
+                    captured=captured,
+                    limits=selected_limits,
+                    failure=error,
+                )
+                result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                return result
+            cached = self.analyses[str(result["analysis_id"])]
+            if target.provider_id == "py-spy":
+                py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
+                process_scope = (
+                    "the target and newly created Python subprocesses"
+                    if py_spy_arguments.subprocesses
+                    else "the target process only"
+                )
+                result["limitations"].append(
+                    f"py-spy sampled {process_scope}; sampled stacks are not complete process-tree "
+                    "execution evidence."
+                )
+            cached.sources = captured
+            cached.manifest_body["capture_request"] = {
+                "target": target.model_dump(mode="json"),
+                "mode": mode,
+                "experiment": experiment.model_dump(mode="json") if experiment else None,
+                "executions": executions,
+            }
+            result = self._finalize_capture_result(
+                result,
+                cached,
                 capability_id=capability_id,
                 mode=mode,
                 experiment=experiment,
                 executions=executions,
-                captured=captured,
-                limits=selected_limits,
-                failure=error,
+                max_result_bytes=selected_limits.max_result_bytes,
             )
-            result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+            if preserve:
+                result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+            self._prune_scratch(protected_root=request_scratch)
             return result
-        cached = self.analyses[str(result["analysis_id"])]
-        if target.provider_id == "py-spy":
-            py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
-            process_scope = (
-                "the target and newly created Python subprocesses"
-                if py_spy_arguments.subprocesses
-                else "the target process only"
-            )
-            result["limitations"].append(
-                f"py-spy sampled {process_scope}; sampled stacks are not complete process-tree "
-                "execution evidence."
-            )
-        cached.sources = captured
-        cached.manifest_body["capture_request"] = {
-            "target": target.model_dump(mode="json"),
-            "mode": mode,
-            "experiment": experiment.model_dump(mode="json") if experiment else None,
-            "executions": executions,
-        }
-        result = self._finalize_capture_result(
-            result,
-            cached,
-            capability_id=capability_id,
-            mode=mode,
-            experiment=experiment,
-            executions=executions,
-            max_result_bytes=selected_limits.max_result_bytes,
-        )
-        if preserve:
-            result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
-        self._prune_scratch(protected_root=request_scratch)
-        return result
 
     def _capture_failure_result(
         self,
@@ -1183,20 +1179,6 @@ class AnalysisRuntime:
             )
         return executable
 
-    def _require_capture_tool(
-        self,
-        executable: str,
-        *,
-        cwd: Path,
-        environment: Mapping[str, str],
-        request_scratch: Path,
-    ) -> ResolvedExecutable:
-        try:
-            return self._require_host_tool(executable, cwd=cwd, environment=environment)
-        except RuntimeFailure:
-            shutil.rmtree(request_scratch, ignore_errors=True)
-            raise
-
     def _require_workload_python_provider(
         self,
         provider_id: str,
@@ -1300,6 +1282,7 @@ class AnalysisRuntime:
         self,
         total: int,
         *,
+        request_scratch: Path,
         provider_id: str,
         has_oracle: bool,
         limits: RequestLimits,
@@ -1307,10 +1290,10 @@ class AnalysisRuntime:
         provider_files = 2 if provider_id == "coverage" else int(provider_id != "direct")
         files_per_capture = 2 + provider_files + (2 if has_oracle else 0)
         bounded_outputs = 1 + int(provider_id != "direct") + int(has_oracle)
-        self._prune_scratch(
-            reserved_bytes=total * bounded_outputs * limits.max_output_bytes,
-            reserved_files=total * files_per_capture,
-        )
+        reserved_bytes = total * bounded_outputs * limits.max_output_bytes
+        reserved_files = total * files_per_capture
+        self._prune_scratch(reserved_bytes=reserved_bytes, reserved_files=reserved_files)
+        self._capture_reservations[request_scratch] = (reserved_bytes, reserved_files)
 
     def preserve_evidence(self, analysis_id: str) -> dict[str, Any]:
         cached = self.analyses.get(analysis_id)
@@ -2080,7 +2063,7 @@ class AnalysisRuntime:
         return output, provider_version
 
     def _resource_policy(self, limits: RequestLimits, *, writable_root: Path) -> ResourcePolicy:
-        _used_bytes, used_files = self._scratch_usage()
+        _used_bytes, used_files = self._scratch_commitment(consuming_root=writable_root)
         remaining_files = MAX_SESSION_SCRATCH_FILES - used_files - 4
         if remaining_files < 1:
             raise RuntimeFailure(
@@ -2373,6 +2356,37 @@ class AnalysisRuntime:
             raise RuntimeFailure("INVALID_INPUT", "cwd must be a directory")
         return resolved
 
-    def _scratch_usage(self) -> tuple[int, int]:
+    def _scratch_commitment(self, *, consuming_root: Path | None = None) -> tuple[int, int]:
         files = [item for item in self.scratch.rglob("*") if item.is_file()]
-        return sum(item.stat().st_size for item in files), len(files)
+        sizes = {item: item.stat().st_size for item in files}
+        used_bytes, used_files = sum(sizes.values()), len(sizes)
+        for root, (reserved_bytes, reserved_files) in self._capture_reservations.items():
+            if consuming_root is not None and consuming_root.is_relative_to(root):
+                continue
+            allocated = [size for path, size in sizes.items() if path.is_relative_to(root)]
+            used_bytes += max(0, reserved_bytes - sum(allocated))
+            used_files += max(0, reserved_files - len(allocated))
+        return used_bytes, used_files
+
+    @contextmanager
+    def _capture_scope(self) -> Iterator[Path]:
+        root = self.scratch / f"capture-{secrets.token_hex(12)}"
+        try:
+            yield root
+        except BaseException:
+            for analysis_id, cached in list(self.analyses.items()):
+                if any(
+                    source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                    for source in cached.sources
+                ):
+                    del self.analyses[analysis_id]
+            raise
+        finally:
+            self._capture_reservations.pop(root, None)
+            if not any(
+                source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                for cached in self.analyses.values()
+                if cached.preserved is None
+                for source in cached.sources
+            ):
+                shutil.rmtree(root, ignore_errors=True)

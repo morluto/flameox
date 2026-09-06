@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
@@ -81,9 +81,16 @@ class DataReference(EvidenceModel):
     @field_validator("path")
     @classmethod
     def relative_path(cls, value: str) -> str:
-        path = Path(value)
-        if path.is_absolute() or ".." in path.parts or not path.parts:
-            raise ValueError("Evidence paths must be relative")
+        path = PurePosixPath(value)
+        if (
+            PureWindowsPath(value).anchor
+            or "\\" in value
+            or "\x00" in value
+            or ".." in path.parts
+            or not path.parts
+            or path.as_posix() != value
+        ):
+            raise ValueError("Evidence paths must be normalized relative POSIX paths")
         return value
 
 
@@ -180,6 +187,11 @@ class LogicalSource(InputIdentity):
                 raise ValueError("Invalid bundle member paths")
             for relative in paths:
                 DataReference.relative_path(relative)
+            members_by_path = {Path(relative) for relative in paths}
+            if any(
+                parent in members_by_path for path in members_by_path for parent in path.parents
+            ):
+                raise ValueError("Bundle members cannot contain another member")
             expected_digest = bundle_digest(
                 (relative, member.sha256) for relative, member in zip(paths, members, strict=True)
             )

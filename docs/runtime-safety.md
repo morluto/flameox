@@ -24,11 +24,21 @@ context. Cancellation propagates to the broker, which terminates the process
 group and settles bounded output readers before unwinding. No operation can be
 polled, resumed, or recovered after restart.
 
+The broker shields asynchronous finalization from AnyIO cancellation scopes; callers do not
+detach or shield broker work themselves. Worker sessions retain their job directory until their
+child has settled, including when request encoding, a heartbeat, or the consuming callback fails.
+
 Session scratch has byte and file ceilings. A capture is rejected before its
 declared output budget could exhaust remaining capacity. Least-recently-used session analyses and
 conversion outputs and materialized evidence are evicted to make room; their `analysis_id` handles
 then report `EXPIRED_SESSION_ANALYSIS`. Successful preservation releases capture scratch after the immutable
 bundle is published. All remaining scratch disappears at shutdown.
+
+Capture admission reserves bytes and files until the request unwinds. Other captures and evidence
+materializations count that reservation even before its output exists; written bytes consume the
+reservation rather than being counted twice. Active capture roots cannot be evicted. One capture
+scope releases the reservation and removes unretained scratch on every exit, including cancellation
+and progress-callback failure.
 
 Evidence requests admit all selected source sizes and file counts before materializing any bundle.
 Active analysis inputs stay pinned during subsequent input acquisition and conversion. Evicting a

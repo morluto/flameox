@@ -17,6 +17,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
+from flameox.source_files import bundle_digest
 from flameox.stateless import AnalysisRuntime
 
 
@@ -125,12 +126,88 @@ def test_cache_handle_eviction_keeps_shared_active_evidence_files(
     source = EvidenceSource.model_validate(projection["analysis_sources"][0])
     try:
         first = runtime.analyze("artifact.preview", [source], {})
-        second = runtime.analyze("artifact.preview", [source], {"offset": 1})
+        second = runtime.analyze("artifact.preview", [source], {}, limits=RequestLimits(max_rows=2))
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(first["analysis_id"])
         assert failure.value.code == "EXPIRED_SESSION_ANALYSIS"
         ref = runtime.preserve_evidence(second["analysis_id"])
         assert runtime.read_evidence_agent_projection(ref["evidence_id"])["analysis_sources"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+def test_preserving_child_bundle_keeps_cached_ancestor_input(tmp_path: Path) -> None:
+    projection = preserve_bundle(tmp_path)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        child = runtime.analyze(
+            "artifact.preview",
+            [EvidenceSource.model_validate(projection["analysis_sources"][0])],
+            {},
+        )
+        root = Path(child["inputs"][0]["path"])
+        ancestor = runtime.analyze("artifact.preview", [PathSource(path=str(root.parent))], {})
+        runtime.preserve_evidence(child["analysis_id"])
+        assert (root / "foo").read_text() == "x" * 2048
+        assert runtime.preserve_evidence(ancestor["analysis_id"])["evidence_id"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "paths,valid",
+    [
+        (["a", "b"], True),
+        (["a", "a/b"], False),
+        (["a/b", "a"], False),
+        ([r"\foo", "b"], False),
+        (["C:foo", "b"], False),
+        ([r"a\..\outside", "b"], False),
+    ],
+)
+def test_manifest_layout_is_contained_and_materializable(
+    tmp_path: Path, paths: list[str], valid: bool
+) -> None:
+    projection = preserve_bundle(tmp_path)
+    evidence_id = projection["evidence_id"]
+    store = tmp_path / "store"
+    bundle = store / "evidence" / "sha256" / evidence_id[:2] / evidence_id
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    body = manifest["body"]
+    body["artifacts"].append({**body["artifacts"][0], "role": "second"})
+    source = body["source_layout"]["sources"][0]
+    source["relative_paths"] = paths
+    source["artifact_indices"] = [0, 1]
+    source["sha256"] = bundle_digest(
+        (relative, member["sha256"])
+        for relative, member in zip(paths, body["artifacts"], strict=True)
+    )
+    source["size_bytes"] *= 2
+    body["analysis_request"]["inputs"][0]["sha256"] = source["sha256"]
+    body["inputs"][0].update(sha256=source["sha256"], size_bytes=source["size_bytes"])
+    changed_id = hashlib.sha256(canonical_bytes(body)).hexdigest()
+    manifest["evidence_id"] = changed_id
+    destination = bundle.parent.parent / changed_id[:2] / changed_id
+    destination.parent.mkdir(exist_ok=True)
+    bundle.rename(destination)
+    (destination / "manifest.json").write_bytes(canonical_bytes(manifest))
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        if valid:
+            selected = runtime.read_evidence_agent_projection(changed_id)
+            result = runtime.analyze(
+                "artifact.preview",
+                [EvidenceSource.model_validate(selected["analysis_sources"][0])],
+                {},
+            )
+            root = Path(result["inputs"][0]["path"])
+            assert sorted(path.name for path in root.iterdir()) == paths
+        else:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.read_evidence_agent_projection(changed_id)
+            assert failure.value.code == "REPOSITORY_CORRUPTION"
     finally:
         runtime.close()
 

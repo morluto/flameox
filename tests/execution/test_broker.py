@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import anyio
 import psutil
 import pytest
 
@@ -52,6 +53,79 @@ def _process_is_alive(pid: int) -> bool:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("inherited_pipes", [False, True])
+async def test_output_limit_wakes_resource_observer_before_its_next_sample(
+    tmp_path: Path, inherited_pipes: bool
+) -> None:
+    child_pid_path = tmp_path / "writer.pid"
+    writer = "import time; time.sleep(0.3); print('x' * 2000, flush=True); time.sleep(30)"
+    code = writer
+    if inherited_pipes:
+        code = (
+            "import pathlib, subprocess, sys, time; time.sleep(0.1); "
+            f"child = subprocess.Popen([sys.executable, '-c', {writer!r}], "
+            "start_new_session=True); "
+            "pathlib.Path('writer.pid').write_text(str(child.pid))"
+        )
+    started = time.monotonic()
+    try:
+        with pytest.raises(ProcessExecutionError) as failure:
+            await SubprocessBroker().run(
+                request(
+                    tmp_path,
+                    "-c",
+                    code,
+                    resource_policy=ResourcePolicy(
+                        filesystem_path=tmp_path,
+                        sampling_interval_ms=3000,
+                        minimum_free_bytes=0,
+                    ),
+                )
+            )
+        assert failure.value.code is ErrorCode.LIMIT_EXCEEDED
+        assert failure.value.process.resources is not None
+        assert time.monotonic() - started < 2
+    finally:
+        if child_pid_path.exists():
+            child_pid = int(child_pid_path.read_text())
+            if _process_is_alive(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
+            await asyncio.sleep(0.1)
+
+
+@pytest.mark.anyio
+async def test_observed_level_cancellation_settles_thread_and_cleanup(tmp_path: Path) -> None:
+    pid_path = tmp_path / "observed.pid"
+    cleanup: list[bool] = []
+
+    async def on_cleanup(complete: bool) -> None:
+        await anyio.sleep(0)
+        cleanup.append(complete)
+
+    with anyio.fail_after(5), anyio.CancelScope() as scope:
+
+        async def cancel_started_child() -> None:
+            while not pid_path.exists():
+                await anyio.sleep(0.01)
+            scope.cancel()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(cancel_started_child)
+            await SubprocessBroker().run(
+                request(
+                    tmp_path,
+                    "-c",
+                    "import os, pathlib, time; "
+                    "pathlib.Path('observed.pid').write_text(str(os.getpid())); time.sleep(30)",
+                    observation="child_peak_rss",
+                ),
+                on_cleanup=on_cleanup,
+            )
+    assert cleanup == [True]
+    assert not _process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio
@@ -642,6 +716,36 @@ async def test_cancellation_performs_cleanup_before_propagating(
     assert cleanup == [True]
     assert len(process_ids) == 1
     assert not _process_is_alive(process_ids[0])
+
+
+@pytest.mark.anyio
+async def test_level_cancellation_waits_for_broker_cleanup(tmp_path: Path) -> None:
+    process_ids: list[int] = []
+    cleanup: list[bool] = []
+    scope = anyio.CancelScope()
+
+    async def started(pid: int) -> None:
+        process_ids.append(pid)
+        scope.cancel()
+
+    async def cleaned(complete: bool) -> None:
+        await anyio.sleep(0)
+        cleanup.append(complete)
+
+    try:
+        with scope:
+            await SubprocessBroker().run(
+                request(tmp_path, "-c", "import time; time.sleep(10)"),
+                on_started=started,
+                on_cleanup=cleaned,
+            )
+        assert cleanup == [True]
+        assert not _process_is_alive(process_ids[0])
+    finally:
+        for pid in process_ids:
+            if _process_is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        await asyncio.sleep(0.1)
 
 
 @pytest.mark.anyio

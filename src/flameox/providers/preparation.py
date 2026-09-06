@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
-from contextlib import suppress
 from pathlib import Path
 
 import anyio
@@ -91,16 +89,7 @@ class ProviderDependencies:
                 timeout_seconds=timeout,
                 max_output_bytes=256 * 1024,
             )
-            task = asyncio.create_task(self.broker.run(request))
-            try:
-                result = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                task.cancel()
-                # AnyIO cancellation is level-triggered. Let the broker settle its
-                # readers and descendants under one cancellation before unwinding.
-                with anyio.CancelScope(shield=True), suppress(asyncio.CancelledError):
-                    await task
-                raise
+            result = await self.broker.run(request)
         except (DomainError, ProcessExecutionError, OSError) as error:
             raise SetupFailure(
                 "Provider preparation could not complete; verify uvx availability, package "
