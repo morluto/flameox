@@ -25,9 +25,10 @@ Neither is interpreted relative to server startup.
 
 ## Process model
 
-`AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch,
-conversion cache, and least-recently-used session analysis cache. The MCP lifespan creates one
-runtime, exposes it through the SDK request context, and destroys its scratch on shutdown. Evicting
+`AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch artifacts
+(conversions and materialized evidence), and least-recently-used session analysis cache.
+The MCP lifespan creates one runtime, exposes it through the SDK request context, and destroys its
+scratch on shutdown. Evicting
 a capture analysis removes its native session artifacts; a later preservation attempt reports that
 the session handle expired. Long work stays inside the request that started it. Progress is reported
 through the SDK context and cancellation unwinds the broker, including descendant cleanup.
@@ -43,7 +44,10 @@ durable SHA-256 identity derived from the canonical manifest body.
 - `providers/capture.py` owns provider-specific command construction and expected native outputs;
   `providers/availability.py` owns installation and workload requirements.
 - `repository.py` owns lazy repository creation, validation, publication,
-  inventory queries, and immutable resource reads.
+  source selection and layout, inventory queries, and immutable resource reads.
+- `evidence_models.py` owns typed persisted document shapes and membership invariants;
+  `source_files.py` owns shared native-source identities, hashing, and bounded copying.
+- `adapters/json_preview.py` owns the streaming JSON preview projection.
 - `execution.py` and `command_binding.py` own executable binding, subprocess
   limits, cancellation, output bounds, and descendant cleanup.
 - `mcp/server.py` and `cli.py` are thin projections over the same runtime.

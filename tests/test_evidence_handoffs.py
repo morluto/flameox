@@ -198,13 +198,9 @@ def test_artifact_extra_fields_cannot_override_file_identity(tmp_path: Path) -> 
         destination.parent.mkdir(exist_ok=True)
         path.rename(destination)
         (destination / "manifest.json").write_bytes(canonical_bytes(manifest))
-        projection = runtime.read_evidence_agent_projection(updated_id)
-        for source in (
-            EvidenceSource.model_validate(projection["body"]["artifacts"][0]["source"]),
-            EvidenceSource(kind="evidence", evidence_id=updated_id, artifact_role="input"),
-        ):
-            restored = runtime.analyze("artifact.preview", [source], {})
-            assert restored["inputs"][0]["sha256"] == result["inputs"][0]["sha256"]
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.read_evidence_agent_projection(updated_id)
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
     finally:
         runtime.close()
 

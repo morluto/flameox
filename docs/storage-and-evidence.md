@@ -28,14 +28,15 @@ location; `FLAMEOX_DATA_DIR` overrides it. Flameox never creates or edits projec
 Artifact identity is the lowercase SHA-256 of native bytes. An artifact bundle
 contains the exact payload and metadata needed to validate its digest and size.
 Multi-file native inputs remain separate content-addressed artifacts whose
-manifest roles bind their relative paths. An `EvidenceSource` rebuilds such a
+manifest layout binds their relative paths. An `EvidenceSource` rebuilds such a
 bundle only in session scratch, so NVBench and similar directory formats remain
 reanalyzable without introducing a mutable repository checkout.
 
 When an analysis composes independently preserved bundles, their source-local artifact roles may
-legitimately collide. Publication assigns deterministic `source-NNNN/` role namespaces only to
-colliding artifacts; the analysis inputs retain each original bundle role and evidence identity as
-provenance.
+legitimately collide, including a bundle composed with one of its own members. Publication checks
+both logical and expanded artifact roles. If either collides, it assigns deterministic
+`source-NNNN/` namespaces to the source groups together. Relative paths are explicit layout fields,
+not parsed from newly published roles. Analysis inputs retain their original roles and identities.
 
 Evidence identity is SHA-256 of the RFC 8785 canonical manifest body. The body
 contains capability/provider identity, input digests, effective capture and
@@ -66,6 +67,8 @@ Artifact and evidence directories are assembled beneath the same-filesystem
 `.staging` tree. Files are flushed and fsynced, the complete staged bundle is
 validated, then its directory is renamed into its content-addressed destination.
 The manifest therefore becomes visible only with complete data.
+Renaming our validated stage does not require hashing it again. If a concurrent publisher wins
+instead, its destination is independently validated before reuse.
 
 Concurrent identical publications converge on one destination and validate it.
 An existing payload or manifest that differs from its content identity is
@@ -100,12 +103,19 @@ plus `logical_sources` for directory bundles and ordered `analysis_sources` for 
 analysis. Selectors address immutable manifest positions, not hashes of private roles that could
 be checked against guessed filenames. File selectors always select exact members, even when a
 filename contains the directory-role delimiter. New manifests include `source_layout`: each source
-declares its file/directory kind, exact artifact indices, and identity, with an ordered mapping for
+declares its file/directory kind, exact artifact indices, relative member paths, and identity,
+with an ordered mapping for
 the original analysis inputs. Empty directories retain their metadata without inventing a native
 payload, and re-preserving a selected member retains its file identity. Readers validate membership,
-digests, sizes, and analysis mappings. Existing manifests without this optional field remain
-readable using their original role-based bundle convention. Missing or
-ambiguous selectors point back to the evidence resource for enumeration.
+digests, sizes, and analysis mappings. Layouts and relative paths are required; readers never infer
+membership from role strings. Missing or ambiguous selectors point back to the evidence resource
+for enumeration.
+
+Analysis first selects manifest metadata and admits the aggregate input and scratch budgets.
+Only then does it verify the selected payloads and materialize directory members. Unselected
+payloads and derived analysis data are not read by source selection; full evidence/resource reads
+still verify the complete bundle. Materialization uses bounded copies into session-owned staging
+and never writes more native bytes than admitted.
 
 Corruption remains fail-closed. Runtime errors include the selected configuration source, a
 path-free store identifier, and recovery instructions. `flameox evidence location` prints the
@@ -116,5 +126,8 @@ synthesize replacement metadata.
 
 ## Format evolution
 
-This is repository format `1`. Unsupported repository or manifest versions
-fail explicitly before their contents are trusted.
+This is repository format `2`. Unsupported repository, artifact, or manifest versions fail
+explicitly before their contents are trusted. Format `1` layout inference and optional execution
+attribution are not supported. Existing stores are never rewritten automatically: inspect or export
+them with a compatible older release, and select a separate empty directory for a format-2 store.
+Changing the version field does not migrate evidence and would invalidate its contract.

@@ -4,7 +4,6 @@ import os
 import sys
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from types import MethodType
 from typing import Any
@@ -13,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from flameox.evidence_models import EvidenceManifest
 from flameox.providers.benchmarks import BenchmarkProvider
 from flameox.repository import EvidenceRepository
 from flameox.runtime_contracts import PathSource, RequestLimits
@@ -52,30 +52,23 @@ def test_comparison_accumulates_one_thousand_members_linearly() -> None:
 def test_query_pins_ten_thousand_manifest_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repository = EvidenceRepository(tmp_path, "performance-session")
-    repository.initialize()
+    artifact = tmp_path / "sample.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+        manifest = EvidenceManifest.model_validate(runtime.read_evidence(preserved["evidence_id"]))
+        repository = runtime.repository
+    finally:
+        runtime.close()
     evidence_root = tmp_path / ".flameox" / "evidence" / "sha256"
-    created_at = datetime.now(UTC).isoformat()
-    bodies = [
-        {
-            "evidence_kind": "analysis",
-            "capability_id": "artifact.preview",
-            "provider": {"id": "fixture", "version": "1"},
-            "inputs": [],
-            "episode": {"created_at": created_at},
-            "coverage": {"rows_returned": 0, "rows_observed": 0, "complete": True},
-            "limitations": [],
-            "data_files": [],
-            "artifacts": [],
-            "sequence": index,
-        }
-        for index in range(10_000)
-    ]
     inventory = [
         evidence_root / f"{index:064x}"[:2] / f"{index:064x}" / "manifest.json"
         for index in range(10_000)
     ]
     original_glob = Path.glob
+    visited = 0
 
     def pinned_glob(path: Path, pattern: str) -> Iterator[Path]:
         if path == evidence_root and pattern == "*/*/manifest.json":
@@ -86,10 +79,12 @@ def test_query_pins_ten_thousand_manifest_inventory(
         _repository: EvidenceRepository,
         path: Path,
         expected: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> EvidenceManifest:
+        nonlocal visited
         del expected
-        index = int(path.parent.name, 16)
-        return {"format_version": "1", "evidence_id": path.parent.name, "body": bodies[index]}
+        visited += 1
+        # Isolate inventory/query scaling from filesystem hashing and schema parsing.
+        return manifest.model_copy(update={"evidence_id": path.parent.name})
 
     monkeypatch.setattr(Path, "glob", pinned_glob)
     monkeypatch.setattr(repository, "_validate_evidence", MethodType(read_manifest, repository))
@@ -98,6 +93,7 @@ def test_query_pins_ten_thousand_manifest_inventory(
     result = repository.query(capability_id="missing", limit=50)
 
     assert result["evidence"] == []
+    assert visited == 10_000
     assert len(result["inventory_digest"]) == 64
     assert time.monotonic() - started < 5
 

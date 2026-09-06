@@ -138,6 +138,12 @@ A changed input cannot reuse a continuation. Tokens issued by older path-bound i
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
+JSON preview traverses the document once in document order. A root array yields its elements;
+a root scalar yields one value row. At the root object, arrays yield section rows, scalar fields
+yield key/value rows, and nested objects yield key/type summaries. Object keys are literal strings,
+so a key containing a dot is not confused with a nested path. Pagination can stop before the end
+of the document; only a complete preview has validated JSON through end-of-file.
+
 Decoded offsets must be integers within the available bounded population. Negative offsets and
 offsets at or beyond the end fail with `INVALID_INPUT`; they never use Python slicing semantics or
 produce empty complete evidence. Continuation tests cover wrong-request, changed-input, negative,

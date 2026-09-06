@@ -10,18 +10,39 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
-from flameox.canonical import canonical_bytes
-from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN, CaptureTarget, ExperimentDesign
+from pydantic import BaseModel
 
-REPOSITORY_FORMAT = "1"
-EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=1"
+from flameox.canonical import canonical_bytes
+from flameox.evidence_models import (
+    AnalysisRequest,
+    ArtifactMetadata,
+    CaptureExecution,
+    EvidenceManifest,
+    LogicalSource,
+    ManifestBody,
+    RepositoryMetadata,
+    SourceLayout,
+    VersionHeader,
+)
+from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN, RuntimeFailure
+from flameox.source_files import (
+    NativeSource,
+    bundle_digest,
+    copy_verified_file,
+    directory_files,
+    sha256_file,
+)
+
+REPOSITORY_FORMAT = "2"
+EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=2"
 AGENT_EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence-projection+json;version=1"
 
 
@@ -48,23 +69,10 @@ def evidence_source(evidence_id: str, collection: str, index: int) -> dict[str, 
 
 
 @dataclass(frozen=True, slots=True)
-class NativeArtifact:
-    path: Path
-    role: str
-    sha256: str
-    size_bytes: int
-    format: str
-    producer: str | None = None
-
-
-def sha256_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
+class EvidenceSelection:
+    evidence_id: str
+    source: LogicalSource
+    members: tuple[tuple[str | None, NativeSource], ...]
 
 
 def _fsync_directory(path: Path) -> None:
@@ -150,15 +158,17 @@ class EvidenceRepository:
         self,
         *,
         manifest_body: Mapping[str, Any],
-        artifacts: Iterable[NativeArtifact],
+        sources: Sequence[NativeSource],
         analysis: Mapping[str, Any],
     ) -> dict[str, Any]:
+        artifacts, layout = self._publication_layout(sources, manifest_body)
         self.initialize()
         artifact_refs = [self._publish_artifact(item) for item in artifacts]
         analysis_bytes = canonical_bytes(analysis)
         analysis_digest = hashlib.sha256(analysis_bytes).hexdigest()
         body = dict(manifest_body)
         body["artifacts"] = artifact_refs
+        body["source_layout"] = layout.model_dump(mode="json")
         body["data_files"] = [
             {
                 "path": "data/analysis.json",
@@ -185,7 +195,8 @@ class EvidenceRepository:
                 self._write_file(stage / "manifest.json", canonical_bytes(manifest))
                 self._validate_evidence(stage, expected=manifest)
                 self._publish_directory(stage, destination)
-                self._validate_evidence(destination, expected=manifest)
+                if stage.exists():
+                    self._validate_evidence(destination, expected=manifest)
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)
@@ -195,7 +206,96 @@ class EvidenceRepository:
             "artifact_count": len(artifact_refs),
         }
 
+    @staticmethod
+    def _publication_layout(
+        sources: Sequence[NativeSource], body: Mapping[str, Any]
+    ) -> tuple[list[NativeSource], SourceLayout]:
+        groups: list[list[tuple[str | None, NativeSource]]] = []
+        for source in sources:
+            is_directory = source.path.is_dir()
+            files = directory_files(source.path) if is_directory else [source.path]
+            members = []
+            remaining = source.size_bytes
+            for path in files:
+                try:
+                    digest, size = sha256_file(path, max_bytes=remaining)
+                except RuntimeFailure as error:
+                    raise RepositoryError(
+                        "MISSING_OR_CHANGED_INPUT", "Input changed before preservation."
+                    ) from error
+                remaining -= size
+                relative = path.relative_to(source.path).as_posix() if is_directory else None
+                role = source.role if relative is None else f"{source.role}:{relative}"
+                members.append(
+                    (
+                        relative,
+                        NativeSource(path, digest, size, source.format, source.producer, role),
+                    )
+                )
+            digest = (
+                bundle_digest(
+                    (relative, member.sha256)
+                    for relative, member in members
+                    if relative is not None
+                )
+                if is_directory
+                else members[0][1].sha256
+            )
+            if (digest, sum(member.size_bytes for _, member in members)) != (
+                source.sha256,
+                source.size_bytes,
+            ):
+                raise RepositoryError(
+                    "MISSING_OR_CHANGED_INPUT", "Input changed before preservation."
+                )
+            groups.append(members)
+        expanded_roles = Counter(member.role for members in groups for _, member in members)
+        namespace = len({source.role for source in sources}) != len(sources) or any(
+            count > 1 for count in expanded_roles.values()
+        )
+        artifacts: list[NativeSource] = []
+        logical: list[LogicalSource] = []
+        for index, (source, members) in enumerate(zip(sources, groups, strict=True)):
+            role = f"source-{index + 1:04d}/{source.role}" if namespace else source.role
+            indices = list(range(len(artifacts), len(artifacts) + len(members)))
+            for relative, member in members:
+                member.role = role if relative is None else f"{role}:{relative}"
+                artifacts.append(member)
+            logical.append(
+                LogicalSource(
+                    role=role,
+                    sha256=source.sha256,
+                    size_bytes=source.size_bytes,
+                    format=source.format,
+                    producer=source.producer,
+                    is_directory=source.path.is_dir(),
+                    artifact_indices=indices,
+                    relative_paths=[relative for relative, _ in members if relative is not None],
+                )
+            )
+        request = AnalysisRequest.model_validate(body["analysis_request"])
+        indices = []
+        for item in request.inputs:
+            matched_index = next(
+                (
+                    index
+                    for index, source in enumerate(sources)
+                    if (str(source.path), source.sha256, source.format, source.producer)
+                    == (item.path, item.sha256, item.format, item.producer)
+                ),
+                None,
+            )
+            if matched_index is None:
+                raise RepositoryError(
+                    "MISSING_OR_CHANGED_INPUT", "Analysis input is absent from preserved sources."
+                )
+            indices.append(matched_index)
+        return artifacts, SourceLayout(sources=logical, analysis_sources=indices)
+
     def read(self, evidence_id: str) -> dict[str, Any]:
+        return self._read_manifest(evidence_id).model_dump(mode="json", exclude_unset=True)
+
+    def _require_evidence_path(self, evidence_id: str) -> Path:
         self._validate_id(evidence_id)
         if not self._require_metadata_or_absent():
             raise RepositoryError("MISSING_EVIDENCE", f"Evidence {evidence_id} does not exist.")
@@ -203,164 +303,182 @@ class EvidenceRepository:
         path = self._evidence_path(evidence_id)
         if not path.is_dir():
             raise RepositoryError("MISSING_EVIDENCE", f"Evidence {evidence_id} does not exist.")
-        return self._validate_evidence(path)
+        return path
+
+    def _read_manifest(self, evidence_id: str) -> EvidenceManifest:
+        return self._validate_evidence(self._require_evidence_path(evidence_id))
+
+    def select_source(
+        self, evidence_id: str, *, selector: str | None, role: str | None
+    ) -> EvidenceSelection:
+        """Resolve validated metadata without reading payloads before runtime admission."""
+        manifest = self._parse_evidence(self._require_evidence_path(evidence_id))
+        logical = manifest.body.source_layout.sources
+        files = [
+            LogicalSource(
+                role=item.role,
+                sha256=item.sha256,
+                size_bytes=item.size_bytes,
+                format=item.format,
+                producer=item.producer,
+                is_directory=False,
+                artifact_indices=[index],
+                relative_paths=[],
+            )
+            for index, item in enumerate(manifest.body.artifacts)
+        ]
+        selected = None
+        if selector is not None:
+            selected = next(
+                (
+                    item
+                    for collection, items in (("artifact", files), ("logical", logical))
+                    for index, item in enumerate(items)
+                    if artifact_selector(evidence_id, collection, index) == selector
+                ),
+                None,
+            )
+        elif role is not None:
+            selected = next((item for item in [*files, *logical] if item.role == role), None)
+        else:
+            candidates = [
+                item
+                for item in logical
+                if not item.role.endswith(
+                    ("/stdout", "/stderr", "/oracle_stdout", "/oracle_stderr")
+                )
+            ]
+            if len(candidates) != 1:
+                raise RepositoryError(
+                    "INVALID_INPUT", "A selector is required for multiple logical sources."
+                )
+            selected = candidates[0]
+        if selected is None:
+            raise RepositoryError("MISSING_EVIDENCE", "The requested evidence source is absent.")
+        paths = selected.relative_paths
+        members = []
+        for position, index in enumerate(selected.artifact_indices):
+            item = manifest.body.artifacts[index]
+            relative = None
+            if selected.is_directory:
+                relative = paths[position]
+            members.append(
+                (
+                    relative,
+                    NativeSource(
+                        self._artifact_path(item.sha256) / "payload",
+                        item.sha256,
+                        item.size_bytes,
+                        item.format,
+                        item.producer,
+                        item.role,
+                    ),
+                )
+            )
+        return EvidenceSelection(evidence_id, selected, tuple(members))
+
+    def verify_source(self, selection: EvidenceSelection) -> None:
+        for _, source in selection.members:
+            self._validate_artifact(
+                source.path.parent,
+                {
+                    "format_version": REPOSITORY_FORMAT,
+                    "sha256": source.sha256,
+                    "size_bytes": source.size_bytes,
+                },
+            )
 
     def read_agent_projection(self, evidence_id: str) -> dict[str, Any]:
         """Return a bounded MCP-safe view without weakening canonical provenance."""
 
-        manifest = self.read(evidence_id)
-        body = manifest["body"]
-        logical_artifacts = self.logical_artifacts(body)
-        capture_request = body["capture_request"]
-        safe_capture: dict[str, Any] | None = None
-        if capture_request is not None:
-            target = capture_request.get("target", {})
-            executions = capture_request.get("executions", [])
+        manifest = self._read_manifest(evidence_id)
+        body = manifest.body
+        capture = body.capture_request
+        safe_capture = None
+        if capture is not None:
             safe_capture = {
-                "request_sha256": hashlib.sha256(canonical_bytes(capture_request)).hexdigest(),
-                "mode": capture_request.get("mode"),
+                "request_sha256": hashlib.sha256(
+                    canonical_bytes(capture.model_dump(mode="json", exclude_unset=True))
+                ).hexdigest(),
+                "mode": capture.mode,
                 "target": {
-                    "provider_id": target.get("provider_id"),
-                    "argument_count": len(target.get("argv", [])),
-                    "environment_override_count": len(target.get("environment", {})),
+                    "provider_id": capture.target.provider_id,
+                    "argument_count": len(capture.target.argv),
+                    "environment_override_count": len(capture.target.environment),
                 },
-                "experiment_present": capture_request.get("experiment") is not None,
-                "executions": [self._safe_execution_projection(item) for item in executions],
+                "experiment_present": capture.experiment is not None,
+                "executions": [
+                    self._safe_execution_projection(item) for item in capture.executions
+                ],
             }
-        analysis_request = body["analysis_request"]
+        analysis = body.analysis_request
         safe_analysis = {
-            "request_sha256": hashlib.sha256(canonical_bytes(analysis_request)).hexdigest(),
-            "capability_id": analysis_request.get("capability_id"),
-            "inputs": [
-                {key: value for key, value in item.items() if key in {"sha256", "format"}}
-                for item in analysis_request.get("inputs", [])
-            ],
-            "offset": analysis_request.get("offset"),
-            "failure": (
-                {"code": analysis_request["failure"].get("code")}
-                if isinstance(analysis_request.get("failure"), dict)
-                else None
-            ),
+            "request_sha256": hashlib.sha256(
+                canonical_bytes(analysis.model_dump(mode="json", exclude_unset=True))
+            ).hexdigest(),
+            "capability_id": analysis.capability_id,
+            "inputs": [{"sha256": item.sha256, "format": item.format} for item in analysis.inputs],
+            "offset": analysis.offset,
+            "failure": {"code": analysis.failure.code} if analysis.failure is not None else None,
         }
-        limitations = body["limitations"]
         return {
-            "format_version": manifest["format_version"],
-            "evidence_id": manifest["evidence_id"],
-            "analysis_sources": self._analysis_sources(manifest, logical_artifacts),
+            "format_version": manifest.format_version,
+            "evidence_id": manifest.evidence_id,
+            "analysis_sources": [
+                evidence_source(evidence_id, "logical", index)
+                for index in body.source_layout.analysis_sources
+            ],
             "logical_sources": [
-                {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                {"sha256": item.sha256, "size_bytes": item.size_bytes, "format": item.format}
                 | {"source": evidence_source(evidence_id, "logical", index)}
-                for index, item in enumerate(logical_artifacts)
+                for index, item in enumerate(body.source_layout.sources)
             ],
             "body": {
-                "evidence_kind": body["evidence_kind"],
-                "capability_id": body["capability_id"],
-                "provider": body["provider"],
+                "evidence_kind": body.evidence_kind,
+                "capability_id": body.capability_id,
+                "provider": body.provider.model_dump(mode="json"),
                 "inputs": [
-                    {key: item[key] for key in ("sha256", "size_bytes", "format")}
-                    for item in body["inputs"]
+                    item.model_dump(include={"sha256", "size_bytes", "format"})
+                    for item in body.inputs
                 ],
                 "capture_request": safe_capture,
                 "analysis_request": safe_analysis,
-                "episode": body["episode"],
-                "coverage": body["coverage"],
+                "episode": body.episode.model_dump(mode="json"),
+                "coverage": body.coverage.model_dump(mode="json"),
                 "limitations": {
-                    "count": len(limitations),
-                    "sha256": hashlib.sha256(canonical_bytes(limitations)).hexdigest(),
+                    "count": len(body.limitations),
+                    "sha256": hashlib.sha256(canonical_bytes(body.limitations)).hexdigest(),
                 },
                 "artifacts": [
-                    {key: item[key] for key in ("sha256", "size_bytes", "format")}
+                    item.model_dump(include={"sha256", "size_bytes", "format"})
                     | {"source": evidence_source(evidence_id, "artifact", index)}
-                    for index, item in enumerate(body["artifacts"])
+                    for index, item in enumerate(body.artifacts)
                 ],
                 "data_files": [
-                    {key: item[key] for key in ("sha256", "size_bytes", "media_type")}
-                    for item in body["data_files"]
+                    item.model_dump(include={"sha256", "size_bytes", "media_type"})
+                    for item in body.data_files
                 ],
             },
         }
 
     @staticmethod
-    def logical_artifacts(body: Mapping[str, Any]) -> list[dict[str, Any]]:
-        if "source_layout" in body:
-            return cast(list[dict[str, Any]], body["source_layout"]["sources"])
-        artifacts = body["artifacts"]
-        logical = [item | {"is_directory": False} for item in artifacts if ":" not in item["role"]]
-        bundles: dict[str, list[dict[str, Any]]] = {}
-        for artifact in artifacts:
-            if ":" in artifact["role"]:
-                bundles.setdefault(artifact["role"].split(":", 1)[0], []).append(artifact)
-        for role, members in bundles.items():
-            digest = hashlib.sha256()
-            for member in sorted(members, key=lambda item: Path(item["role"].split(":", 1)[1])):
-                relative = member["role"].split(":", 1)[1]
-                digest.update(relative.encode() + bytes.fromhex(member["sha256"]))
-            logical.append(
-                {
-                    "role": role,
-                    "sha256": digest.hexdigest(),
-                    "size_bytes": sum(item["size_bytes"] for item in members),
-                    "format": members[0]["format"],
-                    "producer": members[0].get("producer"),
-                    "is_directory": True,
-                    "artifact_indices": [
-                        index for index, item in enumerate(artifacts) if item in members
-                    ],
-                }
-            )
-        return logical
-
-    @staticmethod
-    def _analysis_sources(
-        manifest: Mapping[str, Any],
-        logical_artifacts: list[dict[str, Any]],
-    ) -> list[dict[str, str]]:
-        body = manifest["body"]
-        if "source_layout" in body:
-            return [
-                evidence_source(manifest["evidence_id"], "logical", index)
-                for index in body["source_layout"]["analysis_sources"]
-            ]
-        sources = []
-        for item in body["analysis_request"].get("inputs", []):
-            matching = [
-                (index, artifact)
-                for index, artifact in enumerate(logical_artifacts)
-                if artifact["sha256"] == item["sha256"]
-                and artifact["format"] == item["format"]
-                and artifact.get("producer") == item.get("producer")
-            ]
-            if not matching:
-                return []
-            # Preserve identity when distinct sources happen to have identical bytes.
-            index, _ = next(
-                (match for match in matching if match[1]["role"] == item.get("role")),
-                matching[0],
-            )
-            sources.append(evidence_source(manifest["evidence_id"], "logical", index))
-        return sources
-
-    @staticmethod
-    def _safe_execution_projection(execution: Mapping[str, Any]) -> dict[str, Any]:
-        oracle = execution.get("semantic_oracle")
-        safe_oracle = None
-        if isinstance(oracle, dict):
-            safe_oracle = {key: oracle.get(key) for key in ("returncode", "status", "failure_code")}
-        return {
-            key: execution.get(key)
-            for key in (
-                "block",
-                "returncode",
-                "returncode_scope",
-                "executable_sha256",
-                "workload_returncode",
-                "status",
-                "failure_code",
-                "missing_artifact_roles",
-                "wall_time_ns",
-                "containment",
-            )
-        } | {"semantic_oracle": safe_oracle}
+    def _safe_execution_projection(execution: CaptureExecution) -> dict[str, Any]:
+        return execution.model_dump(
+            mode="json",
+            include={
+                "block": True,
+                "returncode": True,
+                "returncode_scope": True,
+                "executable_sha256": True,
+                "workload_returncode": True,
+                "status": True,
+                "failure_code": True,
+                "missing_artifact_roles": True,
+                "wall_time_ns": True,
+                "containment": True,
+                "semantic_oracle": {"returncode", "status", "failure_code"},
+            },
+        )
 
     def query(
         self,
@@ -418,7 +536,7 @@ class EvidenceRepository:
         next_offset: int | None = None
         for index, path in enumerate(inventory[offset:], offset):
             manifest = self._validate_evidence(path.parent)
-            body = manifest["body"]
+            body = manifest.body
             if not self._matches(
                 body,
                 evidence_kind=evidence_kind,
@@ -462,15 +580,10 @@ class EvidenceRepository:
             except (PermissionError, OSError):
                 continue
 
-    def _publish_artifact(self, artifact: NativeArtifact) -> dict[str, Any]:
+    def _publish_artifact(self, artifact: NativeSource) -> dict[str, Any]:
         if not artifact.path.is_file():
             raise RepositoryError(
                 "UNSUPPORTED_FORMAT", "Only regular native artifact files can be preserved."
-            )
-        actual_digest, actual_size = sha256_file(artifact.path)
-        if (actual_digest, actual_size) != (artifact.sha256, artifact.size_bytes):
-            raise RepositoryError(
-                "MISSING_OR_CHANGED_INPUT", f"Input changed before preservation: {artifact.path}"
             )
         destination = self._artifact_path(artifact.sha256)
         metadata = {
@@ -483,13 +596,17 @@ class EvidenceRepository:
         else:
             stage = self._new_stage("artifact")
             try:
-                shutil.copyfile(artifact.path, stage / "payload")
+                try:
+                    copy_verified_file(artifact, stage / "payload")
+                except RuntimeFailure as error:
+                    raise RepositoryError(error.code, error.message) from error
                 with (stage / "payload").open("rb") as stream:
                     os.fsync(stream.fileno())
                 self._write_file(stage / "artifact.json", canonical_bytes(metadata))
                 self._validate_artifact(stage, metadata)
                 self._publish_directory(stage, destination)
-                self._validate_artifact(destination, metadata)
+                if stage.exists():
+                    self._validate_artifact(destination, metadata)
             finally:
                 if stage.exists():
                     shutil.rmtree(stage)
@@ -501,6 +618,7 @@ class EvidenceRepository:
         }
 
     def _publish_directory(self, stage: Path, destination: Path) -> None:
+        """Rename a validated stage; a remaining stage means another publisher won."""
         self._assert_no_symlink_path(destination.parent)
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._assert_no_symlink_path(destination.parent)
@@ -519,32 +637,23 @@ class EvidenceRepository:
         self._assert_no_symlink_path(root)
         return Path(tempfile.mkdtemp(prefix=f"{kind}-{uuid4().hex}-", dir=root))
 
+    def _read_document[M: BaseModel](self, path: Path, model: type[M]) -> M:
+        self._assert_no_symlink_path(path)
+        try:
+            value = json.loads(path.read_bytes())
+            header = VersionHeader.model_validate(value)
+            if header.format_version != REPOSITORY_FORMAT:
+                raise RepositoryError(
+                    "UNSUPPORTED_REPOSITORY_FORMAT", "The evidence format is unsupported."
+                )
+            return model.model_validate(value)
+        except (OSError, ValueError) as exc:
+            raise RepositoryError(
+                "REPOSITORY_CORRUPTION", "Evidence metadata is unreadable or invalid."
+            ) from exc
+
     def _validate_repository(self) -> None:
-        self._assert_no_symlink_path(self.root / "repository.json")
-        try:
-            metadata = json.loads((self.root / "repository.json").read_bytes())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "repository.json is unreadable."
-            ) from exc
-        if metadata.get("format_version") != REPOSITORY_FORMAT:
-            raise RepositoryError(
-                "UNSUPPORTED_REPOSITORY_FORMAT", "The evidence repository format is unsupported."
-            )
-        if set(metadata) != {"format_version", "created_at"}:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "repository.json contains unsupported metadata."
-            )
-        try:
-            created_at = datetime.fromisoformat(str(metadata["created_at"]))
-        except (TypeError, ValueError) as exc:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "repository.json creation metadata is invalid."
-            ) from exc
-        if created_at.tzinfo is None:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "repository.json creation time lacks a timezone."
-            )
+        self._read_document(self.root / "repository.json", RepositoryMetadata)
         self._validate_repository_layout()
 
     def _validate_artifact(self, path: Path, expected: Mapping[str, Any]) -> None:
@@ -555,103 +664,63 @@ class EvidenceRepository:
                 item.is_symlink() for item in path.iterdir()
             ):
                 raise RepositoryError("REPOSITORY_CORRUPTION", "Artifact bundle layout is invalid.")
-            metadata = json.loads((path / "artifact.json").read_bytes())
-            digest, size = sha256_file(path / "payload")
+            metadata = self._read_document(path / "artifact.json", ArtifactMetadata).model_dump(
+                mode="json"
+            )
+            digest, size = sha256_file(path / "payload", max_bytes=expected["size_bytes"])
         except RepositoryError:
             raise
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, RuntimeFailure) as exc:
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Artifact bundle is incomplete."
             ) from exc
         if metadata != expected or digest != expected["sha256"] or size != expected["size_bytes"]:
             raise RepositoryError("REPOSITORY_CORRUPTION", "Artifact bundle digest mismatch.")
 
-    def _validate_evidence(
+    def _parse_evidence(
         self, path: Path, expected: Mapping[str, Any] | None = None
-    ) -> dict[str, Any]:
-        self._assert_no_symlink_path(path)
-        self._assert_no_symlink_path(path / "manifest.json")
+    ) -> EvidenceManifest:
+        manifest = self._read_document(path / "manifest.json", EvidenceManifest)
+        serialized = manifest.model_dump(mode="json", exclude_unset=True)
         try:
-            manifest = json.loads((path / "manifest.json").read_bytes())
-        except (OSError, json.JSONDecodeError) as exc:
+            evidence_id = hashlib.sha256(canonical_bytes(serialized["body"])).hexdigest()
+        except ValueError as exc:
             raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence manifest is unreadable."
+                "REPOSITORY_CORRUPTION", "Evidence is not canonical JSON."
             ) from exc
-        if manifest.get("format_version") != REPOSITORY_FORMAT:
-            raise RepositoryError(
-                "UNSUPPORTED_REPOSITORY_FORMAT", "The evidence manifest format is unsupported."
-            )
-        if set(manifest) != {"format_version", "evidence_id", "body"}:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence manifest contains unsupported metadata."
-            )
-        body = manifest.get("body")
-        if not isinstance(body, dict):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence manifest body is invalid.")
-        self._validate_manifest_body(body)
-        evidence_id = hashlib.sha256(canonical_bytes(body)).hexdigest()
-        if evidence_id != manifest.get("evidence_id") or (
-            expected is None and evidence_id != path.name
-        ):
+        if evidence_id != manifest.evidence_id or (expected is None and evidence_id != path.name):
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Evidence identity does not match its body."
             )
-        if expected is not None and manifest != expected:
+        if expected is not None and serialized != expected:
             raise RepositoryError("REPOSITORY_CORRUPTION", "Existing evidence bundle differs.")
-        for item in body["data_files"]:
-            relative = item.get("path")
-            if (
-                not isinstance(relative, str)
-                or Path(relative).is_absolute()
-                or ".." in Path(relative).parts
-            ):
-                raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence data path is invalid.")
+        return manifest
+
+    def _validate_evidence(
+        self, path: Path, expected: Mapping[str, Any] | None = None
+    ) -> EvidenceManifest:
+        manifest = self._parse_evidence(path, expected)
+        for item in manifest.body.data_files:
             try:
-                data_path = path / relative
+                data_path = path / item.path
                 self._assert_no_symlink_path(data_path)
-                digest, size = sha256_file(data_path)
+                digest, size = sha256_file(data_path, max_bytes=item.size_bytes)
             except RepositoryError:
                 raise
-            except OSError as exc:
+            except (OSError, RuntimeFailure) as exc:
                 raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence data is missing.") from exc
-            if digest != item.get("sha256") or size != item.get("size_bytes"):
+            if (digest, size) != (item.sha256, item.size_bytes):
                 raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence data digest mismatch.")
-        artifact_entries = body["artifacts"]
-        roles = [item.get("role") for item in artifact_entries if isinstance(item, dict)]
-        if len(roles) != len(artifact_entries) or len(set(roles)) != len(roles):
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence artifact roles must be unique."
-            )
-        for item in artifact_entries:
-            digest = item.get("sha256")
-            size = item.get("size_bytes")
-            role = item.get("role")
-            format_name = item.get("format")
-            producer = item.get("producer")
-            if (
-                not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-                or not isinstance(size, int)
-                or size < 0
-                or not isinstance(role, str)
-                or not role
-                or not isinstance(format_name, str)
-                or not format_name
-                or (producer is not None and not isinstance(producer, str))
-            ):
-                raise RepositoryError(
-                    "REPOSITORY_CORRUPTION", "Evidence artifact reference is invalid."
-                )
+        for artifact in manifest.body.artifacts:
             self._validate_artifact(
-                self._artifact_path(digest),
+                self._artifact_path(artifact.sha256),
                 {
                     "format_version": REPOSITORY_FORMAT,
-                    "sha256": digest,
-                    "size_bytes": size,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
                 },
             )
-        return cast(dict[str, Any], manifest)
+        return manifest
 
     def _validate_repository_layout(self) -> None:
         for path in (
@@ -711,366 +780,8 @@ class EvidenceRepository:
                 )
 
     @staticmethod
-    def _validate_manifest_body(body: Mapping[str, Any]) -> None:
-        expected_keys = {
-            "evidence_kind",
-            "capability_id",
-            "provider",
-            "inputs",
-            "capture_request",
-            "analysis_request",
-            "episode",
-            "coverage",
-            "limitations",
-            "artifacts",
-            "data_files",
-        }
-        if set(body) not in (expected_keys, expected_keys | {"source_layout"}):
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence manifest body has an invalid shape."
-            )
-        if not all(
-            isinstance(body.get(name), str) and body[name]
-            for name in ("evidence_kind", "capability_id")
-        ):
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence manifest identity fields are invalid."
-            )
-        provider = body["provider"]
-        if (
-            not isinstance(provider, dict)
-            or set(provider) != {"id", "version"}
-            or not all(isinstance(provider.get(name), str) and provider[name] for name in provider)
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence provider identity is invalid.")
-        inputs = body["inputs"]
-        if not isinstance(inputs, list) or not inputs:
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence inputs are invalid.")
-        for item in inputs:
-            if (
-                not isinstance(item, dict)
-                or set(item) != {"sha256", "size_bytes", "format", "role"}
-                or not _is_digest(item.get("sha256"))
-                or type(item.get("size_bytes")) is not int
-                or item["size_bytes"] < 0
-                or not isinstance(item.get("format"), str)
-                or not item["format"]
-                or not isinstance(item.get("role"), str)
-                or not item["role"]
-            ):
-                raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence input is invalid.")
-        EvidenceRepository._validate_capture_request(body["capture_request"])
-        EvidenceRepository._validate_analysis_request(body["analysis_request"])
-        episode = body["episode"]
-        try:
-            created_at = datetime.fromisoformat(episode["created_at"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence episode is invalid.") from exc
-        if set(episode) != {"created_at"} or created_at.tzinfo is None:
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence episode is invalid.")
-        coverage = body["coverage"]
-        if (
-            not isinstance(coverage, dict)
-            or set(coverage) != {"rows_returned", "rows_observed", "complete"}
-            or type(coverage.get("rows_returned")) is not int
-            or coverage["rows_returned"] < 0
-            or type(coverage.get("rows_observed")) is not int
-            or coverage["rows_observed"] < 0
-            or type(coverage.get("complete")) is not bool
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence coverage is invalid.")
-        limitations = body["limitations"]
-        if not isinstance(limitations, list) or any(
-            not isinstance(item, str) for item in limitations
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence limitations are invalid.")
-        data_files = body["data_files"]
-        if not isinstance(data_files, list) or not data_files:
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence data files are invalid.")
-        for item in data_files:
-            if (
-                not isinstance(item, dict)
-                or set(item) != {"path", "sha256", "size_bytes", "media_type"}
-                or not isinstance(item.get("path"), str)
-                or not item["path"]
-                or not _is_digest(item.get("sha256"))
-                or type(item.get("size_bytes")) is not int
-                or item["size_bytes"] < 0
-                or not isinstance(item.get("media_type"), str)
-                or not item["media_type"]
-            ):
-                raise RepositoryError(
-                    "REPOSITORY_CORRUPTION", "Evidence data file reference is invalid."
-                )
-        artifacts = body["artifacts"]
-        if not isinstance(artifacts, list):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence artifacts are invalid.")
-        if "source_layout" in body:
-            EvidenceRepository._validate_source_layout(body)
-
-    @staticmethod
-    def _validate_source_layout(body: Mapping[str, Any]) -> None:
-        layout = body["source_layout"]
-        if (
-            not isinstance(layout, dict)
-            or set(layout) != {"sources", "analysis_sources"}
-            or not isinstance(layout["sources"], list)
-            or not isinstance(layout["analysis_sources"], list)
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence source layout is invalid.")
-        artifacts = body["artifacts"]
-        used: set[int] = set()
-        roles: set[str] = set()
-        for item in layout["sources"]:
-            if (
-                not isinstance(item, dict)
-                or set(item)
-                != {
-                    "role",
-                    "sha256",
-                    "size_bytes",
-                    "format",
-                    "producer",
-                    "is_directory",
-                    "artifact_indices",
-                }
-                or not isinstance(item["role"], str)
-                or not item["role"]
-                or item["role"] in roles
-                or not _is_digest(item["sha256"])
-                or type(item["size_bytes"]) is not int
-                or item["size_bytes"] < 0
-                or not isinstance(item["format"], str)
-                or not item["format"]
-                or (item["producer"] is not None and not isinstance(item["producer"], str))
-                or type(item["is_directory"]) is not bool
-                or not isinstance(item["artifact_indices"], list)
-            ):
-                raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence source layout is invalid.")
-            roles.add(item["role"])
-            members = []
-            for index in item["artifact_indices"]:
-                if type(index) is not int or not 0 <= index < len(artifacts) or index in used:
-                    raise RepositoryError(
-                        "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
-                    )
-                used.add(index)
-                member = artifacts[index]
-                if (
-                    not isinstance(member, dict)
-                    or not isinstance(member.get("role"), str)
-                    or not _is_digest(member.get("sha256"))
-                    or type(member.get("size_bytes")) is not int
-                    or member["size_bytes"] < 0
-                    or member.get("format") != item["format"]
-                    or member.get("producer") != item["producer"]
-                ):
-                    raise RepositoryError(
-                        "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
-                    )
-                members.append(member)
-            if item["is_directory"]:
-                prefix = item["role"] + ":"
-                digest = hashlib.sha256()
-                for member in sorted(
-                    members, key=lambda member: Path(member["role"][len(prefix) :])
-                ):
-                    relative = member["role"][len(prefix) :]
-                    path = Path(relative)
-                    if (
-                        not member["role"].startswith(prefix)
-                        or path.is_absolute()
-                        or ".." in path.parts
-                        or not path.parts
-                    ):
-                        raise RepositoryError(
-                            "REPOSITORY_CORRUPTION", "Evidence membership is invalid."
-                        )
-                    digest.update(relative.encode() + bytes.fromhex(member["sha256"]))
-                expected_digest = digest.hexdigest()
-            else:
-                if len(members) != 1 or members[0]["role"] != item["role"]:
-                    raise RepositoryError(
-                        "REPOSITORY_CORRUPTION", "Evidence file membership is invalid."
-                    )
-                expected_digest = members[0]["sha256"]
-            if item["sha256"] != expected_digest or item["size_bytes"] != sum(
-                member["size_bytes"] for member in members
-            ):
-                raise RepositoryError(
-                    "REPOSITORY_CORRUPTION", "Evidence source identity is invalid."
-                )
-        if used != set(range(len(artifacts))):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence membership is incomplete.")
-        inputs = body["analysis_request"].get("inputs", [])
-        indices = layout["analysis_sources"]
-        if indices and len(indices) != len(inputs):
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence analysis source layout is invalid."
-            )
-        for index, input_item in zip(indices, inputs, strict=False):
-            if type(index) is not int or not 0 <= index < len(layout["sources"]):
-                raise RepositoryError(
-                    "REPOSITORY_CORRUPTION", "Evidence analysis source layout is invalid."
-                )
-            source = layout["sources"][index]
-            if any(
-                source.get(key) != input_item.get(key) for key in ("sha256", "format", "producer")
-            ):
-                raise RepositoryError(
-                    "REPOSITORY_CORRUPTION", "Evidence analysis source identity is invalid."
-                )
-
-    @staticmethod
-    def _validate_capture_request(value: Any) -> None:
-        if value is None:
-            return
-        if not isinstance(value, dict):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        if set(value) != {"target", "mode", "experiment", "executions"}:
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        target = value.get("target")
-        executions = value.get("executions")
-        try:
-            CaptureTarget.model_validate(target)
-            experiment = value.get("experiment")
-            if experiment is not None:
-                ExperimentDesign.model_validate(experiment)
-        except (TypeError, ValueError) as error:
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Evidence capture request is invalid."
-            ) from error
-        if value.get("mode") not in {"single", "experiment"} or not isinstance(executions, list):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        for execution in executions:
-            EvidenceRepository._validate_capture_execution(execution)
-
-    @staticmethod
-    def _validate_capture_execution(value: Any) -> None:
-        fields = {
-            "case",
-            "block",
-            "argv",
-            "capture_argv",
-            "cwd",
-            "returncode",
-            "status",
-            "failure_code",
-            "missing_artifact_roles",
-            "semantic_oracle",
-            "wall_time_ns",
-            "containment",
-            "limit",
-        }
-        attribution_fields = {"returncode_scope", "workload_returncode", "executable_sha256"}
-        if not isinstance(value, dict) or set(value) not in (fields, fields | attribution_fields):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        if attribution_fields <= set(value) and (
-            value["returncode_scope"] not in {"workload", "collector"}
-            or not isinstance(value["executable_sha256"], str)
-            or re.fullmatch(LOWERCASE_SHA256_PATTERN, value["executable_sha256"]) is None
-            or (
-                value["workload_returncode"] is not None
-                and type(value["workload_returncode"]) is not int
-            )
-            or (
-                value["returncode_scope"] == "collector"
-                and value["workload_returncode"] is not None
-            )
-            or (
-                value["returncode_scope"] == "workload"
-                and value["workload_returncode"] != value["returncode"]
-            )
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Capture exit attribution is invalid.")
-        argv_fields = (value.get("argv"), value.get("capture_argv"))
-        missing_roles = value.get("missing_artifact_roles")
-        scalar_valid = (
-            isinstance(value.get("case"), str)
-            and type(value.get("block")) is int
-            and value["block"] >= 1
-            and isinstance(value.get("cwd"), str)
-            and Path(value["cwd"]).is_absolute()
-            and (value.get("returncode") is None or type(value["returncode"]) is int)
-            and value.get("status") in {"pending", "succeeded", "failed"}
-            and (value.get("failure_code") is None or isinstance(value["failure_code"], str))
-            and (value.get("wall_time_ns") is None or type(value["wall_time_ns"]) is int)
-            and isinstance(value.get("containment"), str)
-        )
-        if (
-            not scalar_valid
-            or any(
-                not isinstance(argv, list)
-                or not argv
-                or any(not isinstance(item, str) or not item or "\x00" in item for item in argv)
-                for argv in argv_fields
-            )
-            or not isinstance(missing_roles, list)
-            or any(not isinstance(role, str) or not role for role in missing_roles)
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        limit = value.get("limit")
-        if limit is not None and (
-            not isinstance(limit, dict)
-            or set(limit)
-            != {"kind", "configured", "observed", "unit", "observation_available", "recovery"}
-            or not isinstance(limit.get("kind"), str)
-            or not isinstance(limit.get("configured"), int | float)
-            or isinstance(limit.get("configured"), bool)
-            or (
-                limit.get("observed") is not None
-                and (
-                    not isinstance(limit["observed"], int | float)
-                    or isinstance(limit["observed"], bool)
-                )
-            )
-            or not isinstance(limit.get("unit"), str)
-            or type(limit.get("observation_available")) is not bool
-            or not isinstance(limit.get("recovery"), str)
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-        oracle = value.get("semantic_oracle")
-        if oracle is not None and (
-            not isinstance(oracle, dict)
-            or set(oracle) != {"argv", "returncode", "status", "failure_code"}
-            or not isinstance(oracle.get("argv"), list)
-            or not oracle["argv"]
-            or any(
-                not isinstance(item, str) or not item or "\x00" in item for item in oracle["argv"]
-            )
-            or (oracle.get("returncode") is not None and type(oracle["returncode"]) is not int)
-            or oracle.get("status") not in {"passed", "failed"}
-            or (
-                oracle.get("failure_code") is not None
-                and not isinstance(oracle["failure_code"], str)
-            )
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence capture request is invalid.")
-
-    @staticmethod
-    def _validate_analysis_request(value: Any) -> None:
-        if not isinstance(value, dict) or not isinstance(value.get("capability_id"), str):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
-        inputs = value.get("inputs", [])
-        if not isinstance(inputs, list) or any(
-            not isinstance(item, dict)
-            or not _is_digest(item.get("sha256"))
-            or not isinstance(item.get("format"), str)
-            for item in inputs
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
-        offset = value.get("offset")
-        if offset is not None and (type(offset) is not int or offset < 0):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
-        failure = value.get("failure")
-        if failure is not None and (
-            not isinstance(failure, dict) or not isinstance(failure.get("code"), str)
-        ):
-            raise RepositoryError("REPOSITORY_CORRUPTION", "Evidence analysis request is invalid.")
-
-    @staticmethod
     def _matches(
-        body: Mapping[str, Any],
+        body: ManifestBody,
         *,
         evidence_kind: str | None,
         capability_id: str | None,
@@ -1079,37 +790,32 @@ class EvidenceRepository:
         created_after: datetime | None,
         created_before: datetime | None,
     ) -> bool:
-        if evidence_kind is not None and body.get("evidence_kind") != evidence_kind:
+        if evidence_kind is not None and body.evidence_kind != evidence_kind:
             return False
-        if capability_id is not None and body.get("capability_id") != capability_id:
+        if capability_id is not None and body.capability_id != capability_id:
             return False
-        provider = body.get("provider", {})
-        if provider_id is not None and provider.get("id") != provider_id:
+        if provider_id is not None and body.provider.id != provider_id:
             return False
-        inputs = body.get("inputs", [])
-        if input_sha256 is not None and all(item.get("sha256") != input_sha256 for item in inputs):
+        if input_sha256 is not None and all(item.sha256 != input_sha256 for item in body.inputs):
             return False
-        try:
-            created_at = datetime.fromisoformat(str(body["episode"]["created_at"]))
-        except (KeyError, TypeError, ValueError):
-            return False
+        created_at = datetime.fromisoformat(body.episode.created_at)
         return not (
             (created_after is not None and created_at < created_after)
             or (created_before is not None and created_at > created_before)
         )
 
     @staticmethod
-    def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
-        body = manifest["body"]
+    def _summary(manifest: EvidenceManifest) -> dict[str, Any]:
+        body = manifest.body
         return {
-            "evidence_id": manifest["evidence_id"],
-            "uri": f"flameox://evidence/{manifest['evidence_id']}",
-            "evidence_kind": body.get("evidence_kind"),
-            "capability_id": body.get("capability_id"),
-            "provider": body.get("provider"),
-            "created_at": body.get("episode", {}).get("created_at"),
-            "coverage": body.get("coverage"),
-            "limitations": body.get("limitations", []),
+            "evidence_id": manifest.evidence_id,
+            "uri": f"flameox://evidence/{manifest.evidence_id}",
+            "evidence_kind": body.evidence_kind,
+            "capability_id": body.capability_id,
+            "provider": body.provider.model_dump(mode="json"),
+            "created_at": body.episode.created_at,
+            "coverage": body.coverage.model_dump(mode="json"),
+            "limitations": body.limitations,
         }
 
     @staticmethod
