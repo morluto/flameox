@@ -2,6 +2,13 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.6] - 2026-09-06
+
+### Bug Fixes
+
+- **evidence:** Enforce explicit source ownership and bounds (#469) ([#469](https://github.com/morluto/flameox/pull/469))
+- **runtime:** Make capture evidence and provider handoffs composable (#468) ([#468](https://github.com/morluto/flameox/pull/468))
+- **setup:** Refresh selected MCP registrations
 ## [0.2.5] - 2026-09-04
 
 ### Bug Fixes

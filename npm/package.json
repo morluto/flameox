@@ -1,6 +1,6 @@
 {
   "name": "flameox",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Print the local flameox MCP stdio setup through uvx",
   "homepage": "https://github.com/morluto/flameox#readme",
   "bugs": {
