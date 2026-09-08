@@ -416,9 +416,11 @@ def test_repository_corruption_has_path_free_recovery(tmp_path: Path) -> None:
 
 @pytest.mark.process
 @pytest.mark.skipif(os.name == "nt", reason="POSIX collector fixture")
+@pytest.mark.parametrize("full_output", [False, True])
 def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    full_output: bool,
 ) -> None:
     collector = tmp_path / "collector"
     collector.write_text(
@@ -441,7 +443,11 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
             result = await client.call_tool(
                 "capture_cpu_hotspots",
                 {
-                    "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
+                    "target": {
+                        "argv": [sys.executable, "-c", "pass"],
+                        "cwd": str(tmp_path),
+                        **({"console_output": "full"} if full_output else {}),
+                    },
                     "provider": {"kind": "py-spy"},
                     "execution": {"kind": "single"},
                     "preserve": True,
@@ -466,7 +472,17 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
                     texts.extend(
                         row["text"] for row in preview.structured_content["blocks"][1]["rows"]
                     )
-            assert "collector could not reap child" in texts
+            if full_output:
+                assert "collector could not reap child" in texts
+                assert execution["output_streams"]["stderr_complete"] is True
+            else:
+                diagnostics = execution["console_diagnostics"]
+                assert diagnostics["stderr"] == "collector could not reap child\n"
+                assert diagnostics["stderr_omitted_bytes"] == 0
+                assert diagnostics["stderr_complete"] is True
+                assert texts == []
+                assert len(projection["body"]["artifacts"]) == 1
+                assert projection["body"]["artifacts"][0]["format"] == "py-spy"
             assert partial["blocks"][1]["rows"]
 
     anyio.run(exercise)
