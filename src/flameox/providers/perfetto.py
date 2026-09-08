@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -93,14 +92,15 @@ class PerfettoProvider:
         )
         if not isinstance(response, PerfettoExtractResult):
             raise ProviderFailure("DECODE_FAILURE", "Perfetto returned another operation")
+        metrics: dict[str, Any]
         if capability_id == "trace.call_graph":
             rows = [row.model_dump(mode="json") for row in response.call_graph_rows]
-            slice_count = 0
+            metrics = {"edge_count": response.projected_total}
         else:
             slices = [row.model_dump(mode="json") for row in response.rows]
             rows = self._project(capability_id, slices)
             slice_count = len(slices)
-        metrics: dict[str, Any] = {"slice_count": slice_count}
+            metrics = {"slice_count": slice_count}
         limitations = [
             "Slice duration is inclusive and nested slices can overlap.",
             "Trace nesting does not by itself prove causal dependence.",
@@ -130,28 +130,6 @@ class PerfettoProvider:
 
     @staticmethod
     def _project(capability_id: str, slices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if capability_id == "trace.call_graph":
-            by_id = {int(row["id"]): row for row in slices}
-            edges: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-            for row in slices:
-                parent_id = row.get("parent_id")
-                if parent_id is None or int(parent_id) not in by_id:
-                    continue
-                parent = by_id[int(parent_id)]
-                aggregate = edges[(str(parent["name"]), str(row["name"]))]
-                aggregate[0] += 1
-                aggregate[1] += int(row["dur"])
-            return [
-                {
-                    "parent": parent,
-                    "child": child,
-                    "sample_count": values[0],
-                    "inclusive_duration_ns": values[1],
-                }
-                for (parent, child), values in sorted(
-                    edges.items(), key=lambda item: (-item[1][1], item[0])
-                )
-            ]
         if capability_id == "trace.pytorch":
             rows = []
             for row in slices:

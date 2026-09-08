@@ -6,7 +6,11 @@ from typing import Any
 import pytest
 
 from flameox.providers.perfetto import PerfettoProvider
-from flameox.workers.perfetto_contract import PerfettoExtractResult, PerfettoSliceRow
+from flameox.workers.perfetto_contract import (
+    PerfettoCallGraphRow,
+    PerfettoExtractResult,
+    PerfettoSliceRow,
+)
 
 
 class _Harness:
@@ -98,13 +102,38 @@ def test_pytorch_projection_excludes_generic_perfetto_slices(
     assert harness.requests[-1].projection == "pytorch"
 
 
-def test_pytorch_projection_does_not_replace_existing_call_graph_projection() -> None:
-    rows = [
-        _slice(1, "parent").model_dump(mode="json"),
-        _slice(2, "child", parent_id=1).model_dump(mode="json"),
-    ]
-
-    assert PerfettoProvider._project("trace.call_graph", rows) == [
+@pytest.mark.parametrize("total", [1, 111])
+def test_call_graph_reports_edge_population_instead_of_zero_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, total: int
+) -> None:
+    harness = _Harness(
+        PerfettoExtractResult(
+            truncated=total > 1,
+            rows=(),
+            call_graph_rows=(
+                PerfettoCallGraphRow(
+                    parent="parent", child="child", sample_count=1, inclusive_duration_ns=5
+                ),
+            ),
+            projected_total=total,
+        )
+    )
+    provider = PerfettoProvider(harness)  # type: ignore[arg-type]
+    monkeypatch.setattr(PerfettoProvider, "_binary", staticmethod(lambda: tmp_path / "reader"))
+    monkeypatch.setattr(PerfettoProvider, "_identity", staticmethod(lambda _path: "test"))
+    result = provider.analyze(
+        "trace.call_graph",
+        tmp_path / "trace.json",
+        {},
+        max_rows=1,
+        timeout_seconds=1,
+        maximum_rss_bytes=1024,
+        maximum_output_bytes=1024,
+    )
+    assert result.blocks[0]["values"] == {"edge_count": total}
+    assert result.rows_observed == total
+    assert result.complete is (total == 1)
+    assert result.blocks[1]["rows"] == [
         {
             "parent": "parent",
             "child": "child",
