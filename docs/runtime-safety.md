@@ -12,7 +12,8 @@ include an expected SHA-256 checked before decoding. Flameox never searches pare
 treats local marker directories as discovery state.
 
 Environment overrides are bounded by count and length. The subprocess broker retains its
-dangerous-variable and credential-name checks, exact executable binding, output ceiling, timeout,
+dangerous-variable and credential-name checks, exact executable binding, selected output ceiling,
+explicit workload timeout,
 resource observation, process-group cleanup, and descendant cleanup behavior. The target remains a
 trusted local process with the operating-system permissions of Flameox; `cwd` is context, not a
 sandbox.
@@ -24,9 +25,58 @@ context. Cancellation propagates to the broker, which terminates the process
 group and settles bounded output readers before unwinding. No operation can be
 polled, resumed, or recovered after restart.
 
+After exceptional execution, the broker also closes the asyncio subprocess
+transport while the loop remains active. On the tested CPython 3.12 runtime,
+`Process` retains that transport privately; leaving interrupted pipes for its
+destructor can attempt callbacks on a closed loop. This is an isolated
+implementation dependency, not a public `Process.close()` contract. The upstream
+[transport contract](https://docs.python.org/3.12/library/asyncio-protocol.html#asyncio.SubprocessTransport.close)
+closes pipes and kills a still-running subprocess. The broker already owns
+termination and reader settlement before this close. Calling `communicate()` to
+collect an unbounded remainder would conflict with bounded diagnostics and could
+wait for inherited pipe writers; it is not used as the recovery path.
+
 The broker shields asynchronous finalization from AnyIO cancellation scopes; callers do not
 detach or shield broker work themselves. Worker sessions retain their job directory until their
 child has settled, including when request encoding, a heartbeat, or the consuming callback fails.
+
+Ordinary subprocess startup checks for request-scope cancellation before launch.
+Transport acquisition is shielded from repeated scope cancellation so a created
+process reaches broker-owned cleanup; an explicitly configured deadline remains active.
+Cancellation before acquisition returns a cleanup receipt with an unreported
+termination, not a fabricated exit code.
+
+No-deadline execution passes `None` to the standard
+[`asyncio.timeout_at`](https://docs.python.org/3.12/library/asyncio-task.html#asyncio.timeout_at)
+context rather than substituting a distant deadline. The observed-process backend
+likewise skips deadline comparisons when no budget was selected. Cleanup grace
+periods and reader-settlement bounds remain finite; they are not workload budgets.
+
+Writable-root and staging-size baselines are measured before subprocess launch,
+not when the asynchronous observer first runs. Otherwise an early workload write
+could be mistaken for pre-existing data. Growth enforcement remains sampled;
+the baseline is not an atomic filesystem snapshot or a strict disk quota.
+Process completion wakes the observer for a final persistent-output check, even
+if the process exited before the first periodic sample. Final disk checks do not
+invalidate an RSS peak already observed while the process was alive; a process
+that exited without any RSS sample still reports that metric as unavailable.
+
+Synchronous adapters running in an AnyIO worker thread return broker execution to the
+originating request's event loop and cancellation scope. They do not create a second event loop
+for that subprocess. Scope cancellation settles the child before the adapter unwinds and retains
+the `ProcessCancelledError` output and cleanup receipt, including peak-RSS execution.
+The outer thread wait must remain request-owned: `abandon_on_cancel=True` or raw
+`asyncio.Task.cancel()` is not a substitute for cancelling the owning AnyIO scope and joining
+cleanup. Arbitrary synchronous reader code is not made interruptible by this bridge.
+MCP analysis, preservation, query and resource reads use `AnalysisRuntime.run_in_request`.
+It serializes shared-state phases in a worker thread owned by an AnyIO task group;
+the group joins the worker before releasing state, including direct caller task
+cancellation. Capture admission, finalization, scratch accounting and cleanup use
+the same boundary. Capture subprocesses and provider installation do not hold the
+state lock; provider preparation acquires it only to publish a verified binding.
+Independent capture workloads can therefore overlap while cache mutations remain
+coordinated. Synchronous Python callers still own serialization of direct runtime
+method calls; those methods are not an independently thread-safe API.
 
 Session scratch has byte and file ceilings. A capture is rejected before its
 declared output budget could exhaust remaining capacity. Least-recently-used session analyses and
@@ -53,10 +103,20 @@ checks are part of the capture request rather than a separate plan or preflight 
 
 ## Input and output bounds
 
+Capture console retention is independent of its response page. Default diagnostics
+drain both streams while retaining bounded in-memory prefixes and counting observed
+omissions; console verbosity alone does not terminate that mode. Full-output
+collection uses request-owned disk files and the existing combined output ceiling.
+Native artifact growth and decoder bounds still apply. Workload time/RSS budgets
+are optional fields on `target.budget`; absent values do not inherit decoder
+limits. The same explicit budget applies separately to each capture and oracle.
+Cancellation and cleanup remain mandatory. Remaining storage-bound separation is tracked in
+[workload resources and evidence bounds](workload-resource-policy.md).
+
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
 - result JSON is capped at 256 KiB by default;
 - continuations bind request arguments, limits, formats, and input digests;
-- capture argv, merged environment, timeout, combined output, and durable
+- capture argv, merged environment, explicitly selected timeout, full output, and durable
   provenance are bounded;
 - experiment cases and blocks have explicit maxima.
 

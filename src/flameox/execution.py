@@ -11,6 +11,8 @@ import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +58,7 @@ INSTALLER_ENVIRONMENT_ALLOWLIST = (
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
 )
+_SINK_PREVIEW_BYTES = 64 * 1024
 
 
 class ProcessContainment(StrEnum):
@@ -98,9 +101,25 @@ class ExecutionRequest(ContractModel):
     environment_allowlist: tuple[str, ...] = ("PATH",)
     environment_overrides: dict[str, str] = Field(default_factory=dict)
     allowed_working_roots: tuple[Path, ...]
-    timeout_seconds: float = Field(default=300, gt=0, le=86_400)
+    timeout_seconds: float | None = Field(default=300, gt=0, le=86_400)
     graceful_shutdown_seconds: float = Field(default=5, ge=0, le=60)
     max_output_bytes: int = Field(default=16_777_216, gt=0)
+    diagnostic_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        exclude=True,
+        description="Internal bounded per-stream diagnostic prefix size.",
+    )
+    output_directory: Path | None = Field(
+        default=None,
+        exclude=True,
+        description="Internal request-owned directory for exact stdout/stderr prefixes.",
+    )
+    output_root: Path | None = Field(
+        default=None,
+        exclude=True,
+        description="Internal owner root containing output_directory.",
+    )
     observation: Literal["child_peak_rss"] | None = None
     systemd_scope_unit: str | None = None
     resource_policy: ResourcePolicy | None = None
@@ -145,6 +164,30 @@ class ExecutionRequest(ContractModel):
                 raise ValueError("only directory descriptors can be inherited")
         return self
 
+    @model_validator(mode="after")
+    def validate_output_directory(self) -> ExecutionRequest:
+        if self.diagnostic_bytes is not None and self.output_directory is not None:
+            raise ValueError("diagnostic_bytes cannot be combined with output_directory")
+        if self.diagnostic_bytes is not None and self.observation == "child_peak_rss":
+            raise ValueError("diagnostic_bytes is unsupported with child_peak_rss observation")
+        if self.output_directory is None:
+            return self
+        if self.observation == "child_peak_rss":
+            raise ValueError("output_directory is unsupported with child_peak_rss observation")
+        if not self.output_directory.is_absolute() or "\x00" in str(self.output_directory):
+            raise ValueError("output_directory must be an absolute path without NUL")
+        output_directory = self.output_directory.resolve(strict=False)
+        if self.output_root is None or not self.output_root.is_absolute():
+            raise ValueError("output_root is required and must be absolute with output_directory")
+        output_root = self.output_root.resolve(strict=False)
+        if self.output_root.exists() and self.output_root.is_symlink():
+            raise ValueError("output_root cannot be a symlink")
+        if self.output_directory.exists() and self.output_directory.is_symlink():
+            raise ValueError("output_directory cannot be a symlink")
+        if not (output_directory == output_root or output_directory.is_relative_to(output_root)):
+            raise ValueError("output_directory must be beneath output_root")
+        return self
+
     @field_validator("systemd_scope_unit")
     @classmethod
     def validate_scope_unit(cls, value: str | None) -> str | None:
@@ -157,6 +200,8 @@ class ExecutionRequest(ContractModel):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionOutcome:
+    """Settled execution; stdout/stderr are previews when output_sink is present."""
+
     process: ProcessResult
     stdout: bytes
     stderr: bytes
@@ -165,6 +210,66 @@ class ExecutionOutcome:
     executable_binding: ResolvedExecutable
     peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
+    output_sink: OutputSink | None = None
+    diagnostic_output: DiagnosticOutput | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticOutput:
+    """Bounded in-memory console diagnostic accounting, without output content."""
+
+    stdout_observed_bytes: int
+    stderr_observed_bytes: int
+    stdout_retained_bytes: int
+    stderr_retained_bytes: int
+    stdout_omitted_bytes: int
+    stderr_omitted_bytes: int
+    stdout_complete: bool
+    stderr_complete: bool
+
+    def as_details(self) -> dict[str, object]:
+        return {
+            "stdout_observed_bytes": self.stdout_observed_bytes,
+            "stderr_observed_bytes": self.stderr_observed_bytes,
+            "stdout_retained_bytes": self.stdout_retained_bytes,
+            "stderr_retained_bytes": self.stderr_retained_bytes,
+            "stdout_omitted_bytes": self.stdout_omitted_bytes,
+            "stderr_omitted_bytes": self.stderr_omitted_bytes,
+            "stdout_complete": self.stdout_complete,
+            "stderr_complete": self.stderr_complete,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSink:
+    """Exact stream prefixes on disk plus the smaller in-memory response previews."""
+
+    directory: Path
+    stdout_path: Path
+    stderr_path: Path
+    stdout_bytes: int
+    stderr_bytes: int
+    stdout_preview_bytes: int
+    stderr_preview_bytes: int
+    io_error: bool
+    stdout_complete: bool
+    stderr_complete: bool
+
+    @property
+    def complete(self) -> bool:
+        return self.stdout_complete and self.stderr_complete
+
+    def as_details(self) -> dict[str, object]:
+        return {
+            "stdout_bytes": self.stdout_bytes,
+            "stderr_bytes": self.stderr_bytes,
+            "stdout_preview_bytes": self.stdout_preview_bytes,
+            "stderr_preview_bytes": self.stderr_preview_bytes,
+            "stdout_complete": self.stdout_complete,
+            "stderr_complete": self.stderr_complete,
+            "complete": self.complete,
+            "io_error": self.io_error,
+        }
 
 
 class ProcessObservation(ContractModel):
@@ -202,12 +307,16 @@ class ProcessExecutionError(DomainError):
         process_observations: tuple[ProcessObservation, ...],
         stdout: bytes | None = None,
         stderr: bytes | None = None,
+        output_sink: OutputSink | None = None,
+        diagnostic_output: DiagnosticOutput | None = None,
         retryable: bool = False,
     ) -> None:
         self.process = process
         self.process_observations = process_observations
         self.stdout = stdout
         self.stderr = stderr
+        self.output_sink = output_sink
+        self.diagnostic_output = diagnostic_output
         super().__init__(
             code,
             message,
@@ -216,6 +325,12 @@ class ProcessExecutionError(DomainError):
                 "process_observations": [
                     item.model_dump(mode="json") for item in process_observations
                 ],
+                **({"output_sink": output_sink.as_details()} if output_sink is not None else {}),
+                **(
+                    {"diagnostic_output": diagnostic_output.as_details()}
+                    if diagnostic_output is not None
+                    else {}
+                ),
             },
             retryable=retryable,
         )
@@ -231,15 +346,23 @@ class ProcessCancelledError(asyncio.CancelledError):
         process_observations: tuple[ProcessObservation, ...],
         stdout: bytes,
         stderr: bytes,
+        output_sink: OutputSink | None = None,
+        diagnostic_output: DiagnosticOutput | None = None,
     ) -> None:
         super().__init__("process execution cancelled")
         self.process = process
         self.process_observations = process_observations
         self.stdout = stdout
         self.stderr = stderr
+        self.output_sink = output_sink
+        self.diagnostic_output = diagnostic_output
 
 
 class _OutputLimitExceeded(Exception):
+    pass
+
+
+class _OutputSinkFailure(Exception):
     pass
 
 
@@ -273,6 +396,136 @@ class _OutputBudget:
     @property
     def exceeded(self) -> bool:
         return self.remaining < 0
+
+
+@dataclass(slots=True)
+class _DiagnosticOutputState:
+    limit: int
+    observed: dict[str, int]
+    retained: dict[str, int]
+    complete: dict[str, bool]
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.observed = {"stdout": 0, "stderr": 0}
+        self.retained = {"stdout": 0, "stderr": 0}
+        self.complete = {"stdout": False, "stderr": False}
+
+    def record(self, stream: Literal["stdout", "stderr"], size: int, retained: int) -> None:
+        self.observed[stream] += size
+        self.retained[stream] += retained
+
+    def finish(self, stream: Literal["stdout", "stderr"], complete: bool) -> None:
+        self.complete[stream] = self.complete[stream] or complete
+
+    def mark_incomplete(self, *streams: Literal["stdout", "stderr"]) -> None:
+        for stream in streams:
+            self.complete[stream] = False
+
+    def snapshot(self) -> DiagnosticOutput:
+        return DiagnosticOutput(
+            stdout_observed_bytes=self.observed["stdout"],
+            stderr_observed_bytes=self.observed["stderr"],
+            stdout_retained_bytes=self.retained["stdout"],
+            stderr_retained_bytes=self.retained["stderr"],
+            stdout_omitted_bytes=self.observed["stdout"] - self.retained["stdout"],
+            stderr_omitted_bytes=self.observed["stderr"] - self.retained["stderr"],
+            stdout_complete=self.complete["stdout"],
+            stderr_complete=self.complete["stderr"],
+        )
+
+
+class _AsyncOutputSink:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink():
+            raise ValueError("output sink directory cannot be a symlink")
+        self.stdout_path = directory / "stdout"
+        self.stderr_path = directory / "stderr"
+        self._streams: dict[str, IO[bytes]] = {}
+        try:
+            for name, path in (("stdout", self.stdout_path), ("stderr", self.stderr_path)):
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(path, flags, 0o600)
+                self._streams[name] = os.fdopen(descriptor, "wb", buffering=0)
+        except BaseException:
+            for stream in self._streams.values():
+                with suppress(OSError):
+                    stream.close()
+            raise
+        self._bytes = {"stdout": 0, "stderr": 0}
+        self._preview_bytes = {"stdout": 0, "stderr": 0}
+        self._complete = {"stdout": False, "stderr": False}
+        self._io_error = False
+
+    def write(self, stream: Literal["stdout", "stderr"], content: bytes) -> None:
+        remaining = memoryview(content)
+        while remaining:
+            written = self._streams[stream].write(remaining)
+            if written is None or written <= 0:
+                raise OSError("Output sink write made no progress")
+            self._bytes[stream] += written
+            remaining = remaining[written:]
+
+    @staticmethod
+    async def _run_owned_io[T](operation: Callable[[], T]) -> T:
+        # A raw asyncio cancellation must join the thread, not merely abandon
+        # its future. The child task's AnyIO thread wait is joined by the group.
+        result: Future[T] = Future()
+
+        async def execute() -> None:
+            try:
+                result.set_result(await anyio.to_thread.run_sync(operation))
+            except BaseException as error:
+                result.set_exception(error)
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+        return result.result()
+
+    async def write_async(self, stream: Literal["stdout", "stderr"], content: bytes) -> None:
+        try:
+            await self._run_owned_io(lambda: self.write(stream, content))
+        except OSError as exc:
+            self._io_error = True
+            raise _OutputSinkFailure from exc
+
+    def finish(
+        self, stream: Literal["stdout", "stderr"], complete: bool, preview_bytes: int
+    ) -> None:
+        self._complete[stream] = complete
+        self._preview_bytes[stream] = preview_bytes
+
+    def mark_incomplete(self) -> None:
+        for stream in self._complete:
+            self._complete[stream] = False
+
+    def _close(self) -> OutputSink:
+        for stream in self._streams.values():
+            try:
+                stream.close()
+            except OSError:
+                self._io_error = True
+        return OutputSink(
+            directory=self.directory,
+            stdout_path=self.stdout_path,
+            stderr_path=self.stderr_path,
+            stdout_bytes=self._bytes["stdout"],
+            stderr_bytes=self._bytes["stderr"],
+            stdout_preview_bytes=self._preview_bytes["stdout"],
+            stderr_preview_bytes=self._preview_bytes["stderr"],
+            io_error=self._io_error,
+            stdout_complete=self._complete["stdout"] and not self._io_error,
+            stderr_complete=self._complete["stderr"] and not self._io_error,
+        )
+
+    async def close(self) -> OutputSink:
+        with anyio.CancelScope(shield=True):
+            result = await self._run_owned_io(self._close)
+        return result
 
 
 @dataclass(slots=True)
@@ -322,7 +575,7 @@ class _ObservedOutput:
                         self._limit_exceeded.set()
                         self._stop.set()
                         return
-        except (OSError, ValueError):
+        except (_OutputSinkFailure, OSError, ValueError):
             if not self._stop.is_set():
                 self._io_failed.set()
                 self._stop.set()
@@ -383,6 +636,14 @@ class SubprocessBroker:
     ) -> ExecutionOutcome:
         """Run through the async broker while preserving synchronous adapter APIs."""
 
+        try:
+            anyio.from_thread.check_cancelled()
+        except RuntimeError:
+            # Ordinary synchronous callers have no owning AnyIO request scope.
+            pass
+        else:
+            return self._run_from_anyio_worker(request, on_started, on_cleanup)
+
         if request.observation == "child_peak_rss":
             if on_started is not None or on_cleanup is not None:
                 raise DomainError(
@@ -442,7 +703,31 @@ class SubprocessBroker:
             raise RuntimeError("subprocess broker did not return an outcome")
         return result[0]
 
-    async def run(
+    def _run_from_anyio_worker(
+        self,
+        request: ExecutionRequest,
+        on_started: Callable[[int], Awaitable[None]] | None,
+        on_cleanup: Callable[[bool], Awaitable[None]] | None,
+    ) -> ExecutionOutcome:
+        async def execute() -> ExecutionOutcome | ProcessCancelledError:
+            try:
+                return await self.run(request, on_started=on_started, on_cleanup=on_cleanup)
+            except ProcessCancelledError as error:
+                # AnyIO translates asyncio cancellation into a concurrent-futures
+                # exception across this boundary. Return the settled receipt so its
+                # native output and cleanup evidence survive that translation.
+                return error
+
+        try:
+            result = anyio.from_thread.run(execute)
+        except FutureCancelledError:
+            # Cancellation before the broker starts has no process receipt.
+            raise asyncio.CancelledError from None
+        if isinstance(result, ProcessCancelledError):
+            raise result
+        return result
+
+    async def run(  # noqa: C901
         self,
         request: ExecutionRequest,
         *,
@@ -458,25 +743,62 @@ class SubprocessBroker:
         executable = binding.invocation_path
         argv = (str(executable), *request.argv[1:])
         started = time.monotonic_ns()
-        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
+        deadline = (
+            None
+            if request.timeout_seconds is None
+            else asyncio.get_running_loop().time() + request.timeout_seconds
+        )
         process_observations: list[ProcessObservation] = []
+        policy = request.resource_policy
+        initial_sizes = (
+            {
+                str(root): self._bounded_tree_size(root, max_files=policy.max_observed_files)
+                for root in policy.writable_roots
+            }
+            if policy is not None
+            else {}
+        )
+        initial_staging = (
+            self._bounded_tree_size(policy.staging_root, max_files=policy.max_observed_files)
+            if policy is not None and policy.staging_root is not None
+            else None
+        )
+        output_sink = (
+            _AsyncOutputSink(request.output_directory)
+            if request.output_directory is not None
+            else None
+        )
+        diagnostic_state = (
+            _DiagnosticOutputState(request.diagnostic_bytes)
+            if request.diagnostic_bytes is not None
+            else None
+        )
+        output_sink_metadata: OutputSink | None = None
         try:
             async with asyncio.timeout_at(deadline):
-                process = await asyncio.create_subprocess_exec(
-                    *argv,
-                    cwd=cwd,
-                    env=environment,
-                    stdin=(
-                        asyncio.subprocess.PIPE
-                        if request.stdin_bytes is not None
-                        else asyncio.subprocess.DEVNULL
-                    ),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=os.name == "posix",
-                    pass_fds=request.inherited_directory_fds,
-                )
+                await anyio.lowlevel.checkpoint_if_cancelled()
+                # Acquire the handle before request-scope cancellation can unwind.
+                # asyncio's transport startup cleanup is not level-cancellation safe.
+                # The broker deadline still bounds this acquisition.
+                with anyio.CancelScope(shield=True):
+                    process = await asyncio.create_subprocess_exec(
+                        *argv,
+                        cwd=cwd,
+                        env=environment,
+                        stdin=(
+                            asyncio.subprocess.PIPE
+                            if request.stdin_bytes is not None
+                            else asyncio.subprocess.DEVNULL
+                        ),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=os.name == "posix",
+                        pass_fds=request.inherited_directory_fds,
+                    )
         except TimeoutError as exc:
+            if output_sink is not None:
+                output_sink.mark_incomplete()
+                output_sink_metadata = await output_sink.close()
             cleanup_complete = True
             if on_cleanup is not None:
                 with anyio.CancelScope(shield=True):
@@ -491,12 +813,33 @@ class SubprocessBroker:
                 f"Process exceeded {request.timeout_seconds} seconds.",
                 process=timeout_process,
                 process_observations=tuple(process_observations),
+                output_sink=output_sink_metadata,
+                diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
                 retryable=True,
             ) from exc
         except asyncio.CancelledError:
+            if output_sink is not None:
+                output_sink.mark_incomplete()
+                output_sink_metadata = await output_sink.close()
             if on_cleanup is not None:
                 with anyio.CancelScope(shield=True):
                     await on_cleanup(True)
+            raise ProcessCancelledError(
+                process=ProcessResult(
+                    wall_time_ns=time.monotonic_ns() - started,
+                    cancellation_cause=ProcessCancellationCause.CALLER_CANCELLED,
+                    cleanup_complete=True,
+                ),
+                process_observations=(),
+                stdout=b"",
+                stderr=b"",
+                output_sink=output_sink_metadata,
+                diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
+            ) from None
+        except BaseException:
+            if output_sink is not None:
+                output_sink.mark_incomplete()
+                output_sink_metadata = await output_sink.close()
             raise
         assert process.stdout is not None
         assert process.stderr is not None
@@ -506,15 +849,36 @@ class SubprocessBroker:
         stderr_buffer = bytearray()
         tracked_descendants: dict[int, float | None] = {}
         stdout_task = asyncio.create_task(
-            self._read_bounded(process.stdout, output_budget, output=stdout_buffer)
+            self._read_bounded(
+                process.stdout,
+                output_budget,
+                output=stdout_buffer,
+                sink=output_sink,
+                stream_name="stdout",
+                diagnostic_limit=request.diagnostic_bytes,
+                diagnostic_state=diagnostic_state,
+            )
         )
         stderr_task = asyncio.create_task(
-            self._read_bounded(process.stderr, output_budget, output=stderr_buffer)
+            self._read_bounded(
+                process.stderr,
+                output_budget,
+                output=stderr_buffer,
+                sink=output_sink,
+                stream_name="stderr",
+                diagnostic_limit=request.diagnostic_bytes,
+                diagnostic_state=diagnostic_state,
+            )
         )
         stop_observation = asyncio.Event()
         resource_task = asyncio.create_task(
             self._observe_resources(
-                process, request.resource_policy, tracked_descendants, stop_observation
+                process,
+                request.resource_policy,
+                tracked_descendants,
+                stop_observation,
+                initial_sizes,
+                initial_staging,
             )
         )
         stdin_task: asyncio.Task[None] | None = None
@@ -541,10 +905,16 @@ class SubprocessBroker:
                     tracked_descendants,
                 )
                 observed_identities = self._observation_identities(process_observations)
+
+                async def wait_for_exit() -> int:
+                    returncode = await process.wait()
+                    stop_observation.set()
+                    return returncode
+
                 results = await asyncio.gather(
                     asyncio.shield(stdout_task),
                     asyncio.shield(stderr_task),
-                    process.wait(),
+                    wait_for_exit(),
                     asyncio.shield(resource_task),
                     *([asyncio.shield(stdin_task)] if stdin_task is not None else []),
                 )
@@ -562,9 +932,18 @@ class SubprocessBroker:
                 finally:
                     stop_observation.set()
                     await self._settle_readers(stdout_task, stderr_task)
+                    if diagnostic_state is not None:
+                        # A terminated request cannot claim that no inherited
+                        # writer remains, even if cleanup happened to produce
+                        # EOF while the readers were settling.
+                        diagnostic_state.mark_incomplete("stdout", "stderr")
+                    self._close_async_process_transport(process)
                     resources = await self._collect_resource(resource_task)
                     await self._settle_task(stdin_task)
             partial_stdout, partial_stderr = bytes(stdout_buffer), bytes(stderr_buffer)
+            if output_sink is not None:
+                output_sink.mark_incomplete()
+                output_sink_metadata = await output_sink.close()
             retryable = False
             if isinstance(exc, TimeoutError):
                 cause = ProcessCancellationCause.TIMEOUT
@@ -588,6 +967,10 @@ class SubprocessBroker:
                     }
                     else "Process tree exceeded the configured memory budget."
                 )
+            elif isinstance(exc, _OutputSinkFailure):
+                cause = ProcessCancellationCause.IO_FAILURE
+                code = ErrorCode.EXECUTION_FAILURE
+                message = "Process output could not be written to the request-owned sink."
             elif isinstance(exc, asyncio.CancelledError):
                 cause = ProcessCancellationCause.CALLER_CANCELLED
             else:
@@ -608,6 +991,8 @@ class SubprocessBroker:
                     process_observations=tuple(process_observations),
                     stdout=partial_stdout,
                     stderr=partial_stderr,
+                    output_sink=output_sink_metadata,
+                    diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
                 ) from None
             raise ProcessExecutionError(
                 code,
@@ -616,6 +1001,8 @@ class SubprocessBroker:
                 process_observations=tuple(process_observations),
                 stdout=partial_stdout,
                 stderr=partial_stderr,
+                output_sink=output_sink_metadata,
+                diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
                 retryable=retryable,
             ) from exc
 
@@ -636,6 +1023,21 @@ class SubprocessBroker:
             peak_rss_bytes=resources.peak_rss_bytes if resources is not None else None,
             resources=resources,
         )
+        if output_sink is not None:
+            output_sink_metadata = await output_sink.close()
+        if output_sink_metadata is not None and output_sink_metadata.io_error:
+            raise ProcessExecutionError(
+                ErrorCode.EXECUTION_FAILURE,
+                "Process output could not be finalized in the request-owned sink.",
+                process=result.model_copy(
+                    update={"cancellation_cause": ProcessCancellationCause.IO_FAILURE}
+                ),
+                process_observations=tuple(process_observations),
+                stdout=stdout,
+                stderr=stderr,
+                output_sink=output_sink_metadata,
+                diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
+            )
         return ExecutionOutcome(
             process=result,
             stdout=stdout,
@@ -652,6 +1054,8 @@ class SubprocessBroker:
                 )
             ),
             process_observations=tuple(process_observations),
+            output_sink=output_sink_metadata,
+            diagnostic_output=diagnostic_state.snapshot() if diagnostic_state else None,
         )
 
     async def _terminate_with_observation(
@@ -711,7 +1115,13 @@ class SubprocessBroker:
                 outcome = await observation
                 if on_cleanup is not None:
                     await on_cleanup(outcome.process.cleanup_complete is True)
-            raise
+            raise ProcessCancelledError(
+                process=outcome.process,
+                process_observations=outcome.process_observations,
+                stdout=outcome.stdout,
+                stderr=outcome.stderr,
+                output_sink=outcome.output_sink,
+            ) from None
 
     def _snapshot_processes(
         self,
@@ -872,12 +1282,12 @@ class SubprocessBroker:
         cleanup_action: str | None,
         cleanup_outcome: str | None,
         *,
-        deadline: float,
+        deadline: float | None,
     ) -> ProcessObservation:
         failures: list[str] = []
 
         def read(name: str, default: Any = None) -> Any:
-            if time.monotonic() > deadline:
+            if deadline is not None and time.monotonic() > deadline:
                 failures.append("observation_budget_exceeded")
                 return default
             try:
@@ -946,7 +1356,9 @@ class SubprocessBroker:
         output = _ObservedOutput(request.max_output_bytes)
         reader_threads: tuple[threading.Thread, ...] = ()
         stdin_thread: threading.Thread | None = None
-        deadline = time.monotonic() + request.timeout_seconds
+        deadline = (
+            None if request.timeout_seconds is None else time.monotonic() + request.timeout_seconds
+        )
         try:
             process = subprocess.Popen(
                 argv,
@@ -1100,7 +1512,7 @@ class SubprocessBroker:
         self,
         process: subprocess.Popen[bytes],
         *,
-        deadline: float,
+        deadline: float | None,
         output: _ObservedOutput,
         cancellation: threading.Event | None,
         observations: list[ProcessObservation],
@@ -1119,7 +1531,7 @@ class SubprocessBroker:
                     elif output.io_failed:
                         terminating = ProcessCancellationCause.IO_FAILURE
                         self._terminate_observed_with_observation(process, observations, force=True)
-                    elif time.monotonic() >= deadline:
+                    elif deadline is not None and time.monotonic() >= deadline:
                         terminating = ProcessCancellationCause.TIMEOUT
                         self._terminate_observed_with_observation(process, observations, force=True)
                 waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
@@ -1149,7 +1561,7 @@ class SubprocessBroker:
                 elif output.io_failed:
                     terminating = ProcessCancellationCause.IO_FAILURE
                     self._terminate_observed_with_observation(process, observations, force=True)
-                elif time.monotonic() >= deadline:
+                elif deadline is not None and time.monotonic() >= deadline:
                     terminating = ProcessCancellationCause.TIMEOUT
                     self._terminate_observed_with_observation(process, observations, force=True)
             time.sleep(0.005)
@@ -1275,6 +1687,8 @@ class SubprocessBroker:
         policy: ResourcePolicy | None,
         tracked_descendants: dict[int, float | None],
         stop: asyncio.Event,
+        initial_sizes: dict[str, int | None],
+        initial_staging: int | None,
     ) -> RuntimeResourceSummary | None:
         interval = 0.1 if policy is None else policy.sampling_interval_ms / 1_000
         if policy is None:
@@ -1288,19 +1702,9 @@ class SubprocessBroker:
         free_sampled = False
         rss_sampled = False
         unavailable: set[str] = set()
-        initial_sizes = {
-            str(root): self._bounded_tree_size(
-                root,
-                max_files=policy.max_observed_files,
-            )
-            for root in policy.writable_roots
-        }
-        initial_staging = (
-            self._bounded_tree_size(policy.staging_root, max_files=policy.max_observed_files)
-            if policy.staging_root is not None
-            else None
-        )
-        while process.returncode is None and not stop.is_set():
+        # Check persistent output even if the child exits before the first sample,
+        # and once more when the stop notification arrives between samples.
+        while True:
             self._track_current_descendants(process.pid, tracked_descendants)
             try:
                 free = shutil.disk_usage(policy.filesystem_path).free
@@ -1309,24 +1713,21 @@ class SubprocessBroker:
                 free = None
             else:
                 free_sampled = True
-                previous_free = minimum_free
-                if previous_free is None:
-                    minimum_free = free
-                else:
-                    minimum_free = min(previous_free, cast(int, free))
+                minimum_free = free if minimum_free is None else min(minimum_free, cast(int, free))
             rss = 0
-            try:
-                parent = psutil.Process(process.pid)
-                processes = (parent, *parent.children(recursive=True))
-                for observed in processes:
-                    try:
-                        rss += observed.memory_info().rss
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-                rss_sampled = True
-                peak_rss = max(peak_rss, rss)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                unavailable.add("peak_rss_bytes")
+            if process.returncode is None:
+                try:
+                    parent = psutil.Process(process.pid)
+                    processes = (parent, *parent.children(recursive=True))
+                    for observed in processes:
+                        try:
+                            rss += observed.memory_info().rss
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    rss_sampled = True
+                    peak_rss = max(peak_rss, rss)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    unavailable.add("peak_rss_bytes")
             if free is not None and free < policy.minimum_free_bytes:
                 summary = self._resource_summary(
                     policy,
@@ -1386,6 +1787,8 @@ class SubprocessBroker:
                         summary,
                         ProcessCancellationCause.WRITABLE_LIMIT_EXCEEDED,
                     )
+            if process.returncode is not None or stop.is_set():
+                break
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)
         if not free_sampled:
@@ -1474,24 +1877,56 @@ class SubprocessBroker:
 
     async def _read_bounded(
         self,
-        stream: asyncio.StreamReader,
+        reader: asyncio.StreamReader,
         budget: _OutputBudget,
         *,
         drain_on_limit: bool = False,
+        diagnostic_limit: int | None = None,
+        diagnostic_state: _DiagnosticOutputState | None = None,
         output: bytearray | None = None,
+        sink: _AsyncOutputSink | None = None,
+        stream_name: Literal["stdout", "stderr"] | None = None,
     ) -> bytes:
         output = output if output is not None else bytearray()
-        while chunk := await stream.read(64 * 1024):
-            retained = min(len(chunk), max(budget.remaining, 0))
-            output.extend(chunk[:retained])
-            try:
-                budget.consume(len(chunk))
-            except _OutputLimitExceeded:
-                if not drain_on_limit:
-                    raise
-                while await stream.read(64 * 1024):
-                    pass
-                break
+        name = stream_name
+        complete = False
+        try:
+            while chunk := await reader.read(64 * 1024):
+                if diagnostic_limit is not None:
+                    retained = min(
+                        len(chunk),
+                        max(diagnostic_limit - len(output), 0),
+                    )
+                    if diagnostic_state is not None and name is not None:
+                        diagnostic_state.record(name, len(chunk), retained)
+                    output.extend(chunk[:retained])
+                    continue
+                retained = min(len(chunk), max(budget.remaining, 0))
+                exceeded = False
+                try:
+                    budget.consume(len(chunk))
+                except _OutputLimitExceeded:
+                    exceeded = True
+                if sink is not None and name is not None:
+                    await sink.write_async(name, chunk[:retained])
+                preview = (
+                    retained
+                    if sink is None
+                    else min(retained, max(_SINK_PREVIEW_BYTES - len(output), 0))
+                )
+                output.extend(chunk[:preview])
+                if exceeded:
+                    if not drain_on_limit:
+                        raise _OutputLimitExceeded
+                    while await reader.read(64 * 1024):
+                        pass
+                    break
+            complete = True
+        finally:
+            if diagnostic_state is not None and name is not None:
+                diagnostic_state.finish(name, complete)
+            if sink is not None and name is not None:
+                sink.finish(name, complete, len(output))
         return bytes(output)
 
     async def _terminate(
@@ -1650,6 +2085,15 @@ class SubprocessBroker:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
+        # A cancelled reader can leave an asyncio pipe transport alive after
+        # the process has been reaped. Close the owning transport while its
+        # event loop is still active, avoiding loop-closed __del__ warnings.
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            transport.close()
 
     async def _collect_readers(
         self,

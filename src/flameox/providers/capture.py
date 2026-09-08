@@ -56,6 +56,17 @@ def _arguments(request: CaptureBuildRequest, expected: type[CaptureArguments]) -
     return request.arguments
 
 
+def _triton(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
+    _arguments(request, EmptyArguments)
+    output = request.directory / "triton-cache"
+    return CaptureInvocation(
+        tuple(request.target_argv),
+        {**request.environment, "TRITON_CACHE_DIR": str(output), "TRITON_CACHE_AUTOTUNING": "1"},
+        ((output, "triton-cache", "autotune"),),
+        "workload",
+    )
+
+
 def _direct(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
     _arguments(request, EmptyArguments)
     return CaptureInvocation(tuple(request.target_argv), request.environment, (), "workload")
@@ -236,6 +247,8 @@ def _compute_sanitizer(request: CaptureBuildRequest, _: ManagedExecutable) -> Ca
         "compute-sanitizer",
         "--tool",
         arguments.tool,
+        "--print-limit",
+        "0",
         "--xml",
         "--save",
         str(output),
@@ -440,6 +453,7 @@ CAPTURE_BUILDERS: dict[str, CaptureBuilder] = {
     "pytest": _pytest,
     "rocprofv3": _rocprof,
     "torch-profiler": _torch_profiler,
+    "triton": _triton,
     "xctrace": _xctrace,
 }
 
@@ -467,6 +481,7 @@ def materialize_capture_support(provider_id: str, directory: Path) -> None:
     child_directory = {
         "nvbench": "nvbench",
         "torch-profiler": "torch-profiler",
+        "triton": "triton-cache",
         "rocprofv3": "rocprof",
     }.get(provider_id)
     if child_directory is not None:

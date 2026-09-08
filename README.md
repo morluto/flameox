@@ -73,6 +73,16 @@ directory and stores native bytes and a canonical evidence bundle by SHA-256. `F
 overrides the platform default for isolation or another storage location. Flameox never edits
 project Git files.
 
+The console-retention default is bounded diagnostics in memory, with explicit
+omission counts. Keep native artifacts when needed; retain full console output on
+disk only when it is the evidence, an oracle needs it, or the caller requests it.
+Preservation alone does not request full logs. See
+[console retention](docs/storage-and-evidence.md#console-retention-and-disk-backing).
+
+Workload time and RSS budgets are optional: use `target.budget` in MCP or
+`--workload-budget` in CLI capture. They do not inherit analysis-worker limits;
+cancellation and storage protection remain active when no workload budget is set.
+
 The agent owns hypotheses and narrative findings in its own notes. Flameox owns
 only observed inputs, effective requests, execution provenance, typed evidence,
 coverage, truncation, limitations, and optional immutable preservation.
@@ -81,12 +91,12 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 The server exposes actual evidence operations for client-side tool search instead of hiding its
 capabilities behind `discover`, `inspect`, or generic `analyze(capability_id, arguments)` calls.
-There are 26 read-only analysis tools, 18 executing capture tools, and three lifecycle tools. For
+There are 26 read-only analysis tools, 20 executing capture tools, and three lifecycle tools. For
 example:
 
 ```text
 analyze_cpu_hotspots       capture_cpu_hotspots
-analyze_cpu_callers
+analyze_cpu_callers        capture_cpu_callers
 analyze_gpu_launches       capture_gpu_launches
 analyze_benchmark_compare  capture_benchmark_summary
 analyze_kernel_validation  capture_sanitizer_failures

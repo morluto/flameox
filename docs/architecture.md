@@ -16,7 +16,8 @@ control plane.
 | Completed preserved evidence | Immutable manifest in the user Flameox data directory |
 | Native bytes | Content-addressed artifact bundle |
 | Query view | Sorted manifest inventory pinned for one query |
-| Limits | Startup defaults, lowerable per request |
+| Analysis/storage limits | Startup defaults, lowerable per request |
+| Workload time/RSS | Optional explicit target budget |
 | Hypotheses and narrative | Agent-owned notes outside Flameox |
 
 The runtime has no workspace identity and never searches parent directories. Analysis consumes
@@ -25,6 +26,21 @@ Neither is interpreted relative to server startup.
 
 ## Process model
 
+Capture retains bounded, memory-backed console diagnostics by default.
+Native artifacts remain useful when an investigation needs their contents; full
+console output is retained only when it is the requested evidence, an oracle
+requires it, or the caller explicitly requests it. Only that full-output case
+needs a disk-backed console sink. Preservation controls durability, not an
+implicit expansion of what is collected. See
+[workload resources and evidence bounds](workload-resource-policy.md) for the
+remaining native-artifact and storage-admission work.
+
+`DirectTarget.budget` owns optional workload time and sampled process-tree RSS
+controls. Absent values impose neither a workload deadline nor an RSS cap.
+Capture and semantic oracles use that budget; worker and conversion protection
+continues to use `RequestLimits`. Storage bounds and cancellation are independent
+of both. There is no hidden inheritance from decoder limits to trusted workloads.
+
 `AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch artifacts
 (conversions and materialized evidence), and least-recently-used session analysis cache.
 The MCP lifespan creates one runtime, exposes it through the SDK request context, and destroys its
@@ -32,6 +48,13 @@ scratch on shutdown. Evicting
 a capture analysis removes its native session artifacts; a later preservation attempt reports that
 the session handle expired. Long work stays inside the request that started it. Progress is reported
 through the SDK context and cancellation unwinds the broker, including descendant cleanup.
+
+MCP shared-state operations enter `AnalysisRuntime.run_in_request`, which owns a
+task-group-joined worker thread and a per-runtime lock. The same boundary covers
+capture admission/finalization and scratch bookkeeping. It keeps blocking readers
+off the transport loop without allowing overlapping cache or protection-set
+mutations. Capture subprocesses run outside the lock. Dependency preparation only
+joins the state boundary when publishing a verified collector binding.
 
 `analysis_id` is a session handle. It is intentionally meaningless after
 restart and can only be passed to `preserve_evidence`. `evidence_id` is a

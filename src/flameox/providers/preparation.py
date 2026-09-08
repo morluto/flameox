@@ -38,10 +38,13 @@ PY_SPY_VERSION = "0.4.2"
 class ProviderDependencies:
     """Own verified executable bindings, never an installed-provider inventory."""
 
-    def __init__(self, broker: SubprocessBroker, scratch: Path) -> None:
+    def __init__(
+        self, broker: SubprocessBroker, scratch: Path, *, state_lock: anyio.Lock | None = None
+    ) -> None:
         self.broker = broker
         self.scratch = scratch
         self._py_spy: ResolvedExecutable | None = None
+        self._state_lock = state_lock or anyio.Lock()
 
     def py_spy_executable(self) -> str | None:
         if self._py_spy is None:
@@ -187,8 +190,10 @@ class ProviderDependencies:
             activation if managed else "not_applicable",
         )
         # Publish session state only after every requested preparation succeeds.
-        # No await follows this commit, and failed requests never roll back another
-        # concurrent request's successful binding.
+        # Admission may be hashing the previous binding in a worker thread. Join
+        # the runtime's state boundary before replacing that binding; preparation
+        # subprocesses themselves do not hold this lock.
         if collector is not None:
-            self._py_spy = collector
+            async with self._state_lock:
+                self._py_spy = collector
         return preparation

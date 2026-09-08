@@ -41,6 +41,12 @@ error with either an exact `prepare_providers` retry action or external host gui
 
 ## Evidence and capture support
 
+SARIF analysis accepts an explicit absolute `source_root` in its options when the
+report is exported outside the source tree. Paths and include/exclude filters are
+normalized against that root without reading source contents. Outside-root paths,
+traversal, remote URIs and unsupported URI bases remain rejected. If omitted, the
+artifact's analysis directory remains the default; use an explicit root for replay.
+
 The registry covers CPU profiles, memory profiles, benchmarks, inference
 exports, execution traces, GPU launches and kernel metrics, correctness and
 sanitizer failures, coverage, static candidates, and bounded generic previews.
@@ -49,10 +55,11 @@ Artifact analysis and typed capture are separate contracts:
 | Evidence family | Explicit artifact analysis | Typed capture provider |
 | --- | --- | --- |
 | CPU profiles | Node/V8, cProfile pstats, py-spy Speedscope, perf collapsed stacks, perf data | `node-cpu-profile`, `py-spy`, `perf` |
+| CPU caller edges | cProfile pstats, py-spy Speedscope | `py-spy` |
 | Memory profiles | Memray, Node/V8 sampling heap profiles | `memray`, `node-heap-profile` |
 | Benchmarks | pyperf, benchmark samples, PyTorch samples, NVBench | `pyperf`, `benchmark-samples`, `nvbench` |
 | Execution traces | Perfetto/Chrome, PyTorch, OTLP, ROCprof PFTrace, xctrace, Nsight Systems | `torch-profiler`, `rocprofv3`, `xctrace`, `nsight-systems` |
-| GPU and kernels | Nsight Systems, Nsight Compute, Compute Sanitizer, Triton, kernel validation | `nsight-systems`, `nsight-compute`, `compute-sanitizer` |
+| GPU and kernels | Nsight Systems, Nsight Compute, Compute Sanitizer, Triton, kernel validation | `nsight-systems`, `nsight-compute`, `compute-sanitizer`, `triton` |
 | Reliability | pytest events, observations, coverage.py | `pytest`, `observations`, `coverage` |
 | Static candidates | SARIF | — |
 | Inference exports | AIPerf, vLLM, SGLang, Mooncake | — |
@@ -61,6 +68,20 @@ Artifact analysis and typed capture are separate contracts:
 An em dash means callers provide an explicit artifact path; it does not mean
 the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
+
+`triton.autotune` reads native `*.autotune.json` caches (`triton-cache`) emitted
+by Triton's `cache_results=True`, as well as the existing listener-event format.
+Native timing values retain producer order, including positive-infinity sentinels;
+they are not averaged as repeated samples. The best configuration is derived
+using Triton's lexicographic comparison. Native caches do not prove cache hits,
+device identity, semantic correctness, or representative performance improvement.
+
+`capture_triton_autotune` uses Triton 3.7 in the declared workload interpreter.
+It sets `TRITON_CACHE_AUTOTUNING=1` and a fresh request-owned `TRITON_CACHE_DIR`,
+preserving the native cache bundle, including compilation artifacts. This is a
+cold-cache tuning experiment, not a warm-cache benchmark. Kernels must already
+use Triton's autotuner; Flameox does not invent configurations or patch kernels.
+An emitted cache without autotune records produces an explicit analysis failure.
 Pytest capture runs an explicit `python -m pytest` target with a request-bound,
 bounded event plugin.
 

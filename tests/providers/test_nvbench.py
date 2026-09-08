@@ -255,8 +255,6 @@ output.write_text(json.dumps({
     assert result["blocks"][1]["rows"][1]["value_float"] == pytest.approx(0.006)
     assert reanalyzed["provider"] == {"id": "nvbench", "version": "0.1.0"}
     assert {item["role"] for item in manifest["body"]["artifacts"]} == {
-        "capture-0001/stdout",
-        "capture-0001/stderr",
         "capture-0001/benchmark:results.json",
         "capture-0001/benchmark:results.json-bin/0.bin",
     }

@@ -178,6 +178,11 @@ class StructuredWorkerProviders:
                 ],
                 rows_observed=len(sanitizer_result.records) + int(sanitizer_result.truncated),
                 complete=not sanitizer_result.truncated,
-                limitations=list(sanitizer_result.limitations),
+                limitations=[
+                    *sanitizer_result.limitations,
+                    "Counts cover saved XML records only. Producer print limits may omit "
+                    "errors from imported reports; consult original capture diagnostics. "
+                    "Flameox capture disables that print limit, subject to execution budgets.",
+                ],
             )
         return None

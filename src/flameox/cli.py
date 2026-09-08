@@ -5,15 +5,22 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, Literal, NoReturn, cast
 
 import anyio
 import typer
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
-from flameox.runtime_contracts import CaptureTarget, ExperimentDesign, PathSource, RuntimeFailure
+from flameox.runtime_contracts import (
+    CaptureTarget,
+    ExperimentDesign,
+    PathSource,
+    RequestLimits,
+    RuntimeFailure,
+    WorkloadBudget,
+)
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
@@ -61,8 +68,15 @@ def main(
     """Run Flameox without creating a workspace or repository."""
 
 
-def _runtime() -> AnalysisRuntime:
-    return AnalysisRuntime()
+def _runtime(limits_json: str = "{}") -> AnalysisRuntime:
+    return AnalysisRuntime(limits=_startup_limits(limits_json))
+
+
+def _startup_limits(value: str) -> RequestLimits:
+    try:
+        return RequestLimits.model_validate(_json_object(value, option="--limits"))
+    except ValidationError as error:
+        _cli_failure(error)
 
 
 def _json_object(value: str, *, option: str) -> dict[str, Any]:
@@ -314,10 +328,13 @@ def analyze(
     arguments: Annotated[str, typer.Option("--arguments")] = "{}",
     format_name: Annotated[str | None, typer.Option("--format")] = None,
     continuation: Annotated[str | None, typer.Option("--continuation")] = None,
+    limits: Annotated[
+        str, typer.Option("--limits", help="Startup RequestLimits as a JSON object.")
+    ] = "{}",
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
 ) -> None:
     """Analyze explicit artifacts and optionally preserve the result."""
-    runtime = _runtime()
+    runtime = _runtime(limits)
     try:
         result = runtime.analyze(
             capability_id,
@@ -342,6 +359,18 @@ def capture(
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
     capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
     analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
+    console_output: Annotated[
+        str, typer.Option("--console-output", help="Console retention: diagnostics or full.")
+    ] = "diagnostics",
+    workload_budget: Annotated[
+        str,
+        typer.Option(
+            "--workload-budget", help="Optional target/oracle time and RSS budgets as JSON."
+        ),
+    ] = "{}",
+    limits: Annotated[
+        str, typer.Option("--limits", help="Startup RequestLimits as a JSON object.")
+    ] = "{}",
     experiment_json: Annotated[
         str | None,
         typer.Option(
@@ -368,12 +397,18 @@ def capture(
         )
     except ValidationError as error:
         _cli_failure(error)
-    runtime = _runtime()
+    runtime = _runtime(limits)
 
     async def execute() -> dict[str, Any]:
         return await runtime.capture_and_analyze(
             CaptureTarget(
                 argv=argv,
+                budget=WorkloadBudget.model_validate(
+                    _json_object(workload_budget, option="--workload-budget")
+                ),
+                console_output=TypeAdapter(Literal["diagnostics", "full"]).validate_python(
+                    console_output
+                ),
                 cwd=str(cwd.resolve(strict=True)),
                 provider_id=provider_id,
                 capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
@@ -453,9 +488,16 @@ def evidence_show(
 
 
 @mcp_app.command("serve")
-def mcp_serve() -> None:
+def mcp_serve(
+    limits: Annotated[
+        str,
+        typer.Option(
+            "--limits", help="Startup RequestLimits JSON; requests may only lower these bounds."
+        ),
+    ] = "{}",
+) -> None:
     """Serve composable Flameox evidence tools over stdio."""
-    run_server()
+    run_server(limits=_startup_limits(limits))
 
 
 @mcp_app.command("inspect")

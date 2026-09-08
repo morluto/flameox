@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
+from flameox.runtime_contracts import RequestLimits
 from flameox.setup import CliVersionAdvisory, ExternalRequirement, ProviderPreparation, SetupClient
 
 pytestmark = pytest.mark.integration
@@ -34,6 +35,41 @@ def test_help_exposes_current_command_families() -> None:
             "evidence",
         )
     )
+
+
+def test_mcp_startup_limits_reach_the_shared_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    received: list[RequestLimits | None] = []
+
+    def serve(*, limits: RequestLimits | None = None) -> None:
+        received.append(limits)
+
+    monkeypatch.setattr("flameox.cli.run_server", serve)
+    result = CliRunner().invoke(
+        app, ["mcp", "serve", "--limits", '{"max_memory_bytes":8589934592}']
+    )
+    assert result.exit_code == 0, result.output
+    assert received == [RequestLimits(max_memory_bytes=8 * 1024**3)]
+
+
+@pytest.mark.parametrize("value", ["[]", "not-json", '{"max_memory_bytes":0}', '{"typo":1}'])
+def test_mcp_startup_rejects_invalid_limits(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected(*, limits: RequestLimits | None = None) -> None:
+        pytest.fail("invalid limits must not start the server")
+
+    monkeypatch.setattr("flameox.cli.run_server", unexpected)
+    result = CliRunner().invoke(app, ["mcp", "serve", "--limits", value])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
+def test_analyze_enforces_cli_startup_input_limit(tmp_path: Path) -> None:
+    artifact = tmp_path / "oversized.txt"
+    artifact.write_text("x" * 2048)
+    result = CliRunner().invoke(
+        app, ["analyze", "artifact.preview", str(artifact), "--limits", '{"max_input_bytes":1024}']
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["code"] == "LIMIT_EXCEEDED"
 
 
 def test_analyze_preserves_only_when_requested(tmp_path: Path) -> None:
@@ -152,6 +188,117 @@ def test_capture_returns_nonzero_for_failed_target(tmp_path: Path) -> None:
 
     assert result.exit_code == 1, result.output
     assert json.loads(result.stdout)["capture"]["executions"][0]["returncode"] == 7
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("retention", ["diagnostics", "full"])
+def test_capture_console_retention_option_reaches_native_capture(
+    tmp_path: Path, retention: str
+) -> None:
+    workload = tmp_path / "workload.py"
+    workload.write_text("print('console-evidence')\n")
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "coverage",
+            "--capability",
+            "coverage.summary",
+            "--cwd",
+            str(tmp_path),
+            "--console-output",
+            retention,
+            "--",
+            sys.executable,
+            str(workload),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    execution = json.loads(result.stdout)["capture"]["executions"][0]
+    if retention == "diagnostics":
+        assert execution["console_diagnostics"]["stdout"] == "console-evidence\n"
+        assert execution.get("output_streams") is None
+    else:
+        assert execution["output_streams"]["stdout_bytes"] == len(b"console-evidence\n")
+        assert execution.get("console_diagnostics") is None
+
+
+def test_capture_rejects_unknown_console_retention_before_execution(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--console-output",
+            "automatic",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+    assert result.exit_code != 0
+    assert not marker.exists()
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.process
+def test_capture_workload_budget_is_independent_of_decoder_limits(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--limits",
+            '{"timeout_seconds":0.01}',
+            "--workload-budget",
+            '{"timeout_seconds":0.2}',
+            "--",
+            sys.executable,
+            "-c",
+            "import time; print('started', flush=True); time.sleep(5)",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    execution = json.loads(result.stdout)["capture"]["executions"][0]
+    assert execution["limit"]["kind"] == "timeout"
+    assert execution["limit"]["configured"] == 0.2
+
+
+@pytest.mark.parametrize(
+    "budget", ["[]", '{"timeout_seconds":0}', '{"max_memory_bytes":-1}', '{"unknown":1}']
+)
+def test_capture_rejects_invalid_workload_budget_before_execution(
+    tmp_path: Path, budget: str
+) -> None:
+    marker = tmp_path / "executed"
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--workload-budget",
+            budget,
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+    assert result.exit_code != 0
+    assert not marker.exists()
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.process

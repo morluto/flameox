@@ -63,7 +63,7 @@ class SourceEvidenceProvider:
             return None
         parsed = parse_sarif(
             path,
-            source_root=path.parent,
+            source_root=Path(arguments.get("source_root") or path.parent).resolve(),
             include_paths=tuple(arguments.get("include_paths", ())),
             exclude_paths=tuple(arguments.get("exclude_paths", ())),
             default_exclude_paths=DEFAULT_EXCLUDE_PATHS,

@@ -14,13 +14,16 @@ import statistics
 import sys
 import tempfile
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import anyio
 import ijson
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -28,11 +31,15 @@ from pydantic import TypeAdapter
 
 from flameox import __version__
 from flameox.adapters.json_preview import iter_json_rows
+from flameox.adapters.text_preview import iter_text_fragments
 from flameox.canonical import canonical_bytes
 from flameox.command_binding import ExecutableResolver
+from flameox.evidence_models import ConsoleDiagnostics, OutputStreams
 from flameox.executable_models import ResolvedExecutable
 from flameox.execution import (
+    ExecutionOutcome,
     ExecutionRequest,
+    OutputSink,
     ProcessExecutionError,
     ResourcePolicy,
     SubprocessBroker,
@@ -95,6 +102,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     Source,
+    WorkloadBudget,
     compatible_capture_providers,
 )
 from flameox.runtime_errors import DomainError, ErrorCode
@@ -194,7 +202,28 @@ class AnalysisRuntime:
         self.scratch_artifacts: OrderedDict[tuple[str, str], Path] = OrderedDict()
         self._protected_sources: set[Path] = set()
         self._capture_reservations: dict[Path, tuple[int, int]] = {}
-        self.dependencies = ProviderDependencies(self.broker, self.scratch)
+        self._request_lock = anyio.Lock()
+        self.dependencies = ProviderDependencies(
+            self.broker, self.scratch, state_lock=self._request_lock
+        )
+
+    async def run_in_request[T](self, operation: Callable[[], T]) -> T:
+        """Join blocking state work before releasing its ownership to another request."""
+        result: Future[T] = Future()
+
+        async def execute() -> None:
+            try:
+                async with self._request_lock:
+                    result.set_result(await anyio.to_thread.run_sync(operation))
+            except BaseException as error:
+                # Preserve domain exceptions without adding an ExceptionGroup envelope.
+                result.set_exception(error)
+
+        # The child owns the thread wait. Cancelling the caller cancels this group
+        # and joins that wait, rather than abandoning shared state on Task.cancel().
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+        return result.result()
 
     def close(self) -> None:
         self._temporary.cleanup()
@@ -352,6 +381,15 @@ class AnalysisRuntime:
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         validated = TypeAdapter(capability.model).validate_python(arguments)
         resolved = self._resolve_sources(sources, selected_limits)
+        text_fragment_chars = (
+            validated.text_fragment_chars if isinstance(validated, PreviewArguments) else None
+        )
+        if text_fragment_chars is not None and any(
+            source.format != "text" or source.path.is_dir() for source in resolved
+        ):
+            raise RuntimeFailure(
+                "INVALID_INPUT", "text_fragment_chars requires text file sources only."
+            )
         if capability.id != "artifact.preview" and (
             bad := next(
                 (item.format for item in resolved if item.format not in capability.formats), None
@@ -415,7 +453,10 @@ class AnalysisRuntime:
         if provider_analysis is None:
             try:
                 rows, observed, complete = self._read_rows(
-                    resolved, offset, selected_limits.max_rows
+                    resolved,
+                    offset,
+                    selected_limits.max_rows,
+                    text_fragment_chars=text_fragment_chars,
                 )
             except (ijson.JSONError, json.JSONDecodeError, UnicodeDecodeError) as error:
                 raise RuntimeFailure(
@@ -434,6 +475,12 @@ class AnalysisRuntime:
             ]
             provider_identity = {"id": "flameox", "version": __version__}
             limitations = [capability.limitation]
+            if text_fragment_chars is not None:
+                limitations.append(
+                    "Text fragments use UTF-8 replacement decoding and LF-delimited lines; "
+                    "offsets count fragments, not bytes. "
+                    "Native artifacts retain the original bytes."
+                )
         else:
             provider_rows = provider_analysis.blocks[-1]["rows"]
             if not isinstance(provider_rows, list):
@@ -601,97 +648,125 @@ class AnalysisRuntime:
         blocks = validated_capture.blocks
         sequence = self._capture_sequence(cases, blocks, experiment)
         total = len(sequence)
+        has_oracle = experiment is not None and experiment.semantic_oracle is not None
+        full_output = (
+            target.console_output == "full" or target.provider_id == "direct" or has_oracle
+        )
+        full_oracle_output = target.console_output == "full"
+        diagnostic_bytes = 0
         cwd = self._resolve_capture_cwd(target.cwd)
-        with self._capture_scope() as request_scratch:
-            pending_executions: list[dict[str, Any]] = []
-            bound_captures: list[BoundCapture] = []
-            probed_workloads: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-            for sequence_number, block, case in sequence:
-                argv = case.argv or target.argv
-                environment = {**target.environment, **case.environment}
-                if len(environment) > 32:
-                    raise RuntimeFailure(
-                        "INVALID_INPUT",
-                        "merged capture environment must contain at most 32 entries",
-                    )
-                directory = request_scratch / f"case-{sequence_number:04d}"
-                invocation = build_capture_invocation(
-                    target.provider_id,
-                    argv,
-                    environment,
-                    capture_arguments,
-                    directory,
-                    self._require_managed_executable,
-                )
-                workload_key = (argv[0], tuple(sorted(environment.items())))
-                if workload_key not in probed_workloads:
-                    self._require_workload_python_provider(
-                        target.provider_id, argv, environment, cwd=cwd
-                    )
-                    probed_workloads.add(workload_key)
-                binding = self._require_host_tool(
-                    invocation.argv[0],
-                    cwd=cwd,
-                    environment={**os.environ, **invocation.environment},
-                    provider_id=target.provider_id,
-                )
-                if (
-                    target.provider_id == "nsight-compute"
-                    and self.nsight_compute.resolve_interface(binding.invocation_path) is None
-                ):
-                    raise RuntimeFailure(
-                        "UNAVAILABLE_CAPABILITY",
-                        "The official Nsight Compute ncu_report.py interface is missing.",
-                        details={
-                            "provider_id": target.provider_id,
-                            "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[target.provider_id],
-                        },
-                    )
-                self.dependencies.verify_capture_binding(target.provider_id, binding)
-                if experiment is not None and experiment.semantic_oracle is not None:
-                    self._require_host_tool(
-                        experiment.semantic_oracle[0],
-                        cwd=cwd,
-                        environment={**os.environ, **environment},
-                    )
-                bound_captures.append(
-                    BoundCapture(
-                        sequence_number,
-                        block,
-                        case,
+        async with self._capture_scope() as request_scratch:
+
+            def admit() -> list[BoundCapture]:
+                nonlocal diagnostic_bytes
+                pending_executions: list[dict[str, Any]] = []
+                bound_captures: list[BoundCapture] = []
+                probed_workloads: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+                for sequence_number, block, case in sequence:
+                    argv = case.argv or target.argv
+                    environment = {**target.environment, **case.environment}
+                    if len(environment) > 32:
+                        raise RuntimeFailure(
+                            "INVALID_INPUT",
+                            "merged capture environment must contain at most 32 entries",
+                        )
+                    directory = request_scratch / f"case-{sequence_number:04d}"
+                    invocation = build_capture_invocation(
+                        target.provider_id,
                         argv,
                         environment,
+                        capture_arguments,
                         directory,
-                        invocation,
-                        binding,
+                        self._require_managed_executable,
+                    )
+                    workload_key = (argv[0], tuple(sorted(environment.items())))
+                    if workload_key not in probed_workloads:
+                        self._require_workload_python_provider(
+                            target.provider_id, argv, environment, cwd=cwd
+                        )
+                        probed_workloads.add(workload_key)
+                    binding = self._require_host_tool(
+                        invocation.argv[0],
+                        cwd=cwd,
+                        environment={**os.environ, **invocation.environment},
+                        provider_id=target.provider_id,
+                    )
+                    if (
+                        target.provider_id == "nsight-compute"
+                        and self.nsight_compute.resolve_interface(binding.invocation_path) is None
+                    ):
+                        raise RuntimeFailure(
+                            "UNAVAILABLE_CAPABILITY",
+                            "The official Nsight Compute ncu_report.py interface is missing.",
+                            details={
+                                "provider_id": target.provider_id,
+                                "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[
+                                    target.provider_id
+                                ],
+                            },
+                        )
+                    self.dependencies.verify_capture_binding(target.provider_id, binding)
+                    if experiment is not None and experiment.semantic_oracle is not None:
+                        self._require_host_tool(
+                            experiment.semantic_oracle[0],
+                            cwd=cwd,
+                            environment={**os.environ, **environment},
+                        )
+                    bound_captures.append(
+                        BoundCapture(
+                            sequence_number,
+                            block,
+                            case,
+                            argv,
+                            environment,
+                            directory,
+                            invocation,
+                            binding,
+                        )
+                    )
+                    pending_executions.append(
+                        self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
+                        | {
+                            "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                            "returncode_scope": invocation.returncode_scope,
+                            "workload_returncode": None,
+                        }
+                    )
+                self._check_capture_provenance_capacity(
+                    target=target,
+                    mode=mode,
+                    experiment=experiment,
+                    executions=pending_executions,
+                    limit=selected_limits.max_provenance_bytes,
+                )
+                request_bytes = len(
+                    canonical_bytes(
+                        self._capture_request_body(target, mode, experiment, pending_executions)
                     )
                 )
-                pending_executions.append(
-                    self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
-                    | {
-                        "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
-                        "returncode_scope": invocation.returncode_scope,
-                        "workload_returncode": None,
-                    }
+                # JSON escaping can expand each retained byte to six bytes. Share
+                # half the remaining budget between both streams of all executions;
+                # the other half remains available for completed execution metadata.
+                diagnostic_bytes = min(
+                    4096,
+                    (selected_limits.max_provenance_bytes - request_bytes)
+                    // (24 * total * (1 + has_oracle)),
                 )
-            self._check_capture_provenance_capacity(
-                target=target,
-                mode=mode,
-                experiment=experiment,
-                executions=pending_executions,
-                limit=selected_limits.max_provenance_bytes,
-            )
-            self._reserve_capture_capacity(
-                total,
-                request_scratch=request_scratch,
-                provider_id=target.provider_id,
-                has_oracle=experiment is not None and experiment.semantic_oracle is not None,
-                limits=selected_limits,
-            )
-            request_scratch.mkdir()
-            for item in bound_captures:
-                item.directory.mkdir()
-                materialize_capture_support(target.provider_id, item.directory)
+                self._reserve_capture_capacity(
+                    total,
+                    request_scratch=request_scratch,
+                    provider_id=target.provider_id,
+                    full_output=full_output,
+                    full_oracle_output=has_oracle and full_oracle_output,
+                    limits=selected_limits,
+                )
+                request_scratch.mkdir()
+                for item in bound_captures:
+                    item.directory.mkdir()
+                    materialize_capture_support(target.provider_id, item.directory)
+                return bound_captures
+
+            bound_captures = await self.run_in_request(admit)
             captured: list[NativeSource] = []
             analysis_sources: list[NativeSource] = []
             executions: list[dict[str, Any]] = []
@@ -708,66 +783,118 @@ class AnalysisRuntime:
                     environment_allowlist=("PATH",),
                     environment_overrides=invocation.environment,
                     allowed_working_roots=(cwd,),
-                    timeout_seconds=selected_limits.timeout_seconds,
+                    timeout_seconds=target.budget.timeout_seconds,
                     max_output_bytes=selected_limits.max_output_bytes,
-                    resource_policy=self._resource_policy(selected_limits, writable_root=directory),
+                    diagnostic_bytes=None if full_output else diagnostic_bytes,
+                    output_directory=request_scratch / f"console-{sequence_number:04d}"
+                    if full_output
+                    else None,
+                    output_root=request_scratch if full_output else None,
+                    resource_policy=await self.run_in_request(
+                        partial(
+                            self._capture_resource_policy,
+                            selected_limits,
+                            budget=target.budget,
+                            writable_root=directory,
+                        )
+                    ),
                 )
                 failure_code: str | None = None
                 try:
                     outcome = await self.broker.run(request)
-                    stdout = outcome.stdout
-                    stderr = outcome.stderr
+                    receipt: ExecutionOutcome | ProcessExecutionError = outcome
                     process = outcome.process
                     containment = outcome.containment.value
                 except ProcessExecutionError as error:
-                    stdout = error.stdout or b""
-                    stderr = error.stderr or b""
+                    receipt = error
                     process = error.process
                     containment = "broker"
                     failure_code = error.code.value
-                for role, content in (("stdout", stdout), ("stderr", stderr)):
-                    path = directory / f"{role}.txt"
-                    path.write_bytes(content)
-                    digest, size = sha256_file(path)
-                    resolved_output = NativeSource(
-                        path,
-                        digest,
-                        size,
-                        "text",
-                        target.provider_id,
-                        f"capture-{sequence_number:04d}/{role}",
-                    )
-                    captured.append(resolved_output)
-                    if target.provider_id == "direct":
-                        analysis_sources.append(resolved_output)
-                missing_artifact_roles: list[str] = []
-                for path, format_name, role in invocation.artifacts:
-                    native = self._resolve_capture_artifact(
-                        path,
-                        format_name=format_name,
-                        role=role,
+                output_sources, console_metadata = await self.run_in_request(
+                    partial(
+                        self._capture_console_output,
+                        receipt,
                         provider_id=target.provider_id,
-                        limits=selected_limits,
+                        role_prefix=f"capture-{sequence_number:04d}/",
                     )
+                )
+                captured.extend(output_sources)
+                if target.provider_id == "direct":
+                    analysis_sources.extend(output_sources)
+                missing_artifact_roles: list[str] = []
+                artifact_rejections: list[dict[str, str]] = []
+                resolved_artifacts: list[NativeSource] = []
+                for path, format_name, role in invocation.artifacts:
+                    try:
+                        native = await self.run_in_request(
+                            partial(
+                                self._resolve_capture_artifact,
+                                path,
+                                format_name=format_name,
+                                role=role,
+                                provider_id=target.provider_id,
+                            )
+                        )
+                    except RuntimeFailure as error:
+                        artifact_rejections.append(
+                            {
+                                "role": role,
+                                "code": error.code,
+                                "message": (
+                                    "Capture artifact exceeds session storage bounds; "
+                                    "the case's native output bundle was discarded."
+                                    if error.code == "LIMIT_EXCEEDED"
+                                    else "Capture artifact failed validation; "
+                                    "the case's native output bundle was discarded."
+                                ),
+                            }
+                        )
+                        break
+                    except OSError:
+                        artifact_rejections.append(
+                            {
+                                "role": role,
+                                "code": "ARTIFACT_IO_FAILURE",
+                                "message": (
+                                    "Capture artifact could not be inspected; "
+                                    "the case's native output bundle was discarded."
+                                ),
+                            }
+                        )
+                        break
                     if native is None:
                         missing_artifact_roles.append(role)
                         continue
-                    captured_native = NativeSource(
-                        native.path,
-                        native.sha256,
-                        native.size_bytes,
-                        native.format,
-                        native.producer,
-                        f"capture-{sequence_number:04d}/{native.role}",
+                    resolved_artifacts.append(native)
+                if artifact_rejections:
+                    await self.run_in_request(
+                        partial(
+                            self._discard_rejected_capture_directory,
+                            directory,
+                            request_scratch,
+                        )
                     )
-                    captured.append(captured_native)
-                    analysis_sources.append(captured_native)
+                else:
+                    for native in resolved_artifacts:
+                        captured_native = NativeSource(
+                            native.path,
+                            native.sha256,
+                            native.size_bytes,
+                            native.format,
+                            native.producer,
+                            f"capture-{sequence_number:04d}/{native.role}",
+                        )
+                        captured.append(captured_native)
+                        analysis_sources.append(captured_native)
                 termination = process.termination
                 exit_code = getattr(termination, "exit_code", None)
-                status = "succeeded" if exit_code == 0 else "failed"
+                status = "succeeded" if exit_code == 0 and failure_code is None else "failed"
                 if status == "succeeded" and missing_artifact_roles:
                     status = "failed"
                     failure_code = "CAPTURE_ARTIFACT_MISSING"
+                if artifact_rejections:
+                    status = "failed"
+                    failure_code = failure_code or "CAPTURE_ARTIFACT_REJECTED"
                 oracle: dict[str, Any] | None = None
                 if (
                     status == "succeeded"
@@ -777,8 +904,8 @@ class AnalysisRuntime:
                     oracle_argv = experiment.semantic_oracle
                     oracle_environment = {
                         **environment,
-                        SEMANTIC_ORACLE_STDOUT_ENV: str(directory / "stdout.txt"),
-                        SEMANTIC_ORACLE_STDERR_ENV: str(directory / "stderr.txt"),
+                        SEMANTIC_ORACLE_STDOUT_ENV: str(output_sources[0].path),
+                        SEMANTIC_ORACLE_STDERR_ENV: str(output_sources[1].path),
                     }
                     oracle_binding = self._require_host_tool(
                         oracle_argv[0],
@@ -792,48 +919,56 @@ class AnalysisRuntime:
                         environment_allowlist=("PATH",),
                         environment_overrides=oracle_environment,
                         allowed_working_roots=(cwd,),
-                        timeout_seconds=selected_limits.timeout_seconds,
+                        timeout_seconds=target.budget.timeout_seconds,
                         max_output_bytes=selected_limits.max_output_bytes,
-                        resource_policy=self._resource_policy(
-                            selected_limits, writable_root=directory
+                        diagnostic_bytes=None if full_oracle_output else diagnostic_bytes,
+                        output_directory=request_scratch / f"oracle-console-{sequence_number:04d}"
+                        if full_oracle_output
+                        else None,
+                        output_root=request_scratch if full_oracle_output else None,
+                        resource_policy=await self.run_in_request(
+                            partial(
+                                self._capture_resource_policy,
+                                selected_limits,
+                                budget=target.budget,
+                                writable_root=directory,
+                            )
                         ),
                     )
                     try:
                         oracle_outcome = await self.broker.run(oracle_request)
-                        oracle_stdout = oracle_outcome.stdout
-                        oracle_stderr = oracle_outcome.stderr
+                        oracle_receipt: ExecutionOutcome | ProcessExecutionError = oracle_outcome
                         oracle_process = oracle_outcome.process
                         oracle_failure_code: str | None = None
                     except ProcessExecutionError as error:
-                        oracle_stdout = error.stdout or b""
-                        oracle_stderr = error.stderr or b""
+                        oracle_receipt = error
                         oracle_process = error.process
                         oracle_failure_code = error.code.value
                     oracle_exit_code = getattr(oracle_process.termination, "exit_code", None)
-                    for role, content in (
-                        ("oracle_stdout", oracle_stdout),
-                        ("oracle_stderr", oracle_stderr),
-                    ):
-                        path = directory / f"{role}.txt"
-                        path.write_bytes(content)
-                        digest, size = sha256_file(path)
-                        captured.append(
-                            NativeSource(
-                                path,
-                                digest,
-                                size,
-                                "text",
-                                target.provider_id,
-                                f"capture-{sequence_number:04d}/{role}",
-                            )
+                    oracle_sources, oracle_metadata = await self.run_in_request(
+                        partial(
+                            self._capture_console_output,
+                            oracle_receipt,
+                            provider_id=target.provider_id,
+                            role_prefix=f"capture-{sequence_number:04d}/oracle_",
                         )
+                    )
+                    captured.extend(oracle_sources)
                     oracle = {
                         "argv": oracle_argv,
                         "returncode": oracle_exit_code,
-                        "status": "passed" if oracle_exit_code == 0 else "failed",
+                        "status": "passed"
+                        if oracle_exit_code == 0 and oracle_failure_code is None
+                        else "failed",
                         "failure_code": oracle_failure_code,
+                        "limit": self._terminated_limit(
+                            oracle_process, selected_limits, target.budget
+                        ),
+                        **oracle_metadata,
                     }
-                self._prune_scratch(protected_root=request_scratch)
+                await self.run_in_request(
+                    partial(self._prune_scratch, protected_root=request_scratch)
+                )
                 if oracle is not None and oracle["status"] == "failed":
                     status = "failed"
                     failure_code = "SEMANTIC_ORACLE_FAILED"
@@ -852,11 +987,13 @@ class AnalysisRuntime:
                         else None,
                         "status": status,
                         "failure_code": failure_code,
+                        **console_metadata,
                         "missing_artifact_roles": missing_artifact_roles,
+                        "artifact_rejections": artifact_rejections,
                         "semantic_oracle": oracle,
                         "wall_time_ns": process.wall_time_ns,
                         "containment": containment,
-                        "limit": self._terminated_limit(process, selected_limits),
+                        "limit": self._terminated_limit(process, selected_limits, target.budget),
                     }
                 )
                 self._check_capture_provenance_capacity(
@@ -868,66 +1005,124 @@ class AnalysisRuntime:
                 )
                 if progress:
                     await progress(sequence_number, total, f"captured {case.name} block {block}")
-            effective_capability_id, analysis_sources = self._capture_analysis_sources(
-                capability_id, analysis_sources, captured
-            )
-            try:
-                result = self.analyze(
-                    effective_capability_id,
-                    [
-                        PathSource(path=str(item.path), format=item.format, producer=item.producer)
-                        for item in analysis_sources
-                    ],
-                    target.analysis_arguments,
-                    limits=selected_limits,
+
+            def finish_analysis() -> dict[str, Any]:
+                effective_capability_id, selected_sources = self._capture_analysis_sources(
+                    capability_id, analysis_sources, captured
                 )
-            except RuntimeFailure as error:
-                if not preserve:
-                    raise
-                result = self._capture_failure_result(
-                    target=target,
+                try:
+                    if not selected_sources:
+                        raise RuntimeFailure(
+                            "EXECUTION_FAILURE",
+                            "Capture produced no native artifacts for the requested analysis.",
+                            details={"provider_id": target.provider_id},
+                        )
+                    result = self.analyze(
+                        effective_capability_id,
+                        [
+                            PathSource(
+                                path=str(item.path), format=item.format, producer=item.producer
+                            )
+                            for item in selected_sources
+                        ],
+                        target.analysis_arguments,
+                        limits=selected_limits,
+                    )
+                except RuntimeFailure as error:
+                    result = self._capture_failure_result(
+                        target=target,
+                        capability_id=capability_id,
+                        mode=mode,
+                        experiment=experiment,
+                        executions=executions,
+                        captured=captured,
+                        analysis_sources=selected_sources,
+                        limits=selected_limits,
+                        failure=error,
+                    )
+                    if preserve:
+                        result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                    return result
+                cached = self.analyses[str(result["analysis_id"])]
+                if target.provider_id == "py-spy":
+                    py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
+                    process_scope = (
+                        "the target and newly created Python subprocesses"
+                        if py_spy_arguments.subprocesses
+                        else "the target process only"
+                    )
+                    result["limitations"].append(
+                        f"py-spy sampled {process_scope}; sampled stacks are not complete "
+                        "process-tree execution evidence."
+                    )
+                cached.sources = captured
+                cached.manifest_body["capture_request"] = {
+                    "target": target.model_dump(mode="json"),
+                    "mode": mode,
+                    "experiment": experiment.model_dump(mode="json") if experiment else None,
+                    "executions": executions,
+                }
+                result = self._finalize_capture_result(
+                    result,
+                    cached,
                     capability_id=capability_id,
                     mode=mode,
                     experiment=experiment,
                     executions=executions,
-                    captured=captured,
-                    limits=selected_limits,
-                    failure=error,
+                    max_result_bytes=selected_limits.max_result_bytes,
                 )
-                result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                if preserve:
+                    result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                self._prune_scratch(protected_root=request_scratch)
                 return result
-            cached = self.analyses[str(result["analysis_id"])]
-            if target.provider_id == "py-spy":
-                py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
-                process_scope = (
-                    "the target and newly created Python subprocesses"
-                    if py_spy_arguments.subprocesses
-                    else "the target process only"
-                )
-                result["limitations"].append(
-                    f"py-spy sampled {process_scope}; sampled stacks are not complete process-tree "
-                    "execution evidence."
-                )
-            cached.sources = captured
-            cached.manifest_body["capture_request"] = {
-                "target": target.model_dump(mode="json"),
-                "mode": mode,
-                "experiment": experiment.model_dump(mode="json") if experiment else None,
-                "executions": executions,
-            }
-            result = self._finalize_capture_result(
-                result,
-                cached,
-                capability_id=capability_id,
-                mode=mode,
-                experiment=experiment,
-                executions=executions,
-                max_result_bytes=selected_limits.max_result_bytes,
+
+            return await self.run_in_request(finish_analysis)
+
+    @staticmethod
+    def _capture_console_output(
+        receipt: ExecutionOutcome | ProcessExecutionError, *, provider_id: str, role_prefix: str
+    ) -> tuple[list[NativeSource], dict[str, Any]]:
+        diagnostics = receipt.diagnostic_output
+        if diagnostics is not None:
+            metadata = ConsoleDiagnostics.model_validate(
+                diagnostics.as_details()
+                | {
+                    "stdout": (receipt.stdout or b"").decode("utf-8", errors="replace"),
+                    "stderr": (receipt.stderr or b"").decode("utf-8", errors="replace"),
+                }
             )
-            if preserve:
-                result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
-            self._prune_scratch(protected_root=request_scratch)
-            return result
+            return [], {"console_diagnostics": metadata.model_dump(mode="json")}
+        sources, streams = AnalysisRuntime._capture_output_sources(
+            receipt.output_sink, provider_id=provider_id, role_prefix=role_prefix
+        )
+        return sources, {"output_streams": streams.model_dump(mode="json")}
+
+    @staticmethod
+    def _capture_output_sources(
+        sink: OutputSink | None, *, provider_id: str, role_prefix: str
+    ) -> tuple[list[NativeSource], OutputStreams]:
+        if sink is None:
+            raise RuntimeFailure("EXECUTION_FAILURE", "Capture did not return disk-backed output.")
+        sources = []
+        for role, path, expected_size in (
+            ("stdout", sink.stdout_path, sink.stdout_bytes),
+            ("stderr", sink.stderr_path, sink.stderr_bytes),
+        ):
+            digest, size = sha256_file(path)
+            if size != expected_size:
+                raise RuntimeFailure(
+                    "MISSING_OR_CHANGED_INPUT", "Captured output changed after broker settlement."
+                )
+            sources.append(
+                NativeSource(path, digest, size, "text", provider_id, role_prefix + role)
+            )
+        return sources, OutputStreams(
+            stdout_bytes=sink.stdout_bytes,
+            stderr_bytes=sink.stderr_bytes,
+            stdout_complete=sink.stdout_complete,
+            stderr_complete=sink.stderr_complete,
+            io_error=sink.io_error,
+        )
 
     def _capture_failure_result(
         self,
@@ -938,6 +1133,7 @@ class AnalysisRuntime:
         experiment: ExperimentDesign | None,
         executions: list[dict[str, Any]],
         captured: list[NativeSource],
+        analysis_sources: list[NativeSource],
         limits: RequestLimits,
         failure: RuntimeFailure,
     ) -> dict[str, Any]:
@@ -949,6 +1145,16 @@ class AnalysisRuntime:
         }
         analysis_request = {
             "capability_id": capability_id,
+            "inputs": [
+                {
+                    "path": str(item.path),
+                    "sha256": item.sha256,
+                    "format": item.format,
+                    "producer": item.producer,
+                    "role": item.role,
+                }
+                for item in analysis_sources
+            ],
             "arguments": target.analysis_arguments,
             "limits": limits.model_dump(mode="json"),
             "failure": failure_body,
@@ -977,8 +1183,8 @@ class AnalysisRuntime:
             "coverage": {"rows_returned": 0, "rows_observed": 0, "complete": False},
             "truncation": None,
             "limitations": [
-                "Native capture succeeded, but requested analysis failed; no analysis claims "
-                "are available."
+                "Requested analysis failed; inspect the capture outcome and retained diagnostics. "
+                "No analysis claims are available."
             ],
             "continuation": None,
             "capture": {
@@ -989,6 +1195,7 @@ class AnalysisRuntime:
             },
             "analysis_failure": failure_body,
         }
+        self._bound_capture_result(result, limits.max_result_bytes, analysis_request, 0)
         validated = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
@@ -1246,18 +1453,33 @@ class AnalysisRuntime:
         format_name: str,
         role: str,
         provider_id: str,
-        limits: RequestLimits,
     ) -> NativeSource | None:
-        if not path.exists() or (not path.is_file() and not path.is_dir()):
+        if path.is_symlink():
+            raise RuntimeFailure("INVALID_INPUT", "Capture artifact must not be a symlink")
+        if not path.exists():
             return None
+        if not path.is_file() and not path.is_dir():
+            raise RuntimeFailure("INVALID_INPUT", "Capture artifact must be a regular file")
         digest, size, file_count = hash_path(
             path,
-            max_bytes=limits.max_input_bytes,
-            max_files=limits.max_input_files,
+            max_bytes=MAX_SESSION_SCRATCH_BYTES,
+            max_files=MAX_SESSION_SCRATCH_FILES,
         )
         if file_count == 0:
             return None
         return NativeSource(path, digest, size, format_name, provider_id, role)
+
+    @staticmethod
+    def _discard_rejected_capture_directory(directory: Path, request_scratch: Path) -> None:
+        """Remove only a rejected, runtime-owned capture directory."""
+        if directory.parent != request_scratch:
+            return
+        if directory.is_symlink():
+            directory.unlink()
+            return
+        if not directory.is_dir():
+            return
+        shutil.rmtree(directory)
 
     @staticmethod
     def _capture_analysis_sources(
@@ -1284,12 +1506,13 @@ class AnalysisRuntime:
         *,
         request_scratch: Path,
         provider_id: str,
-        has_oracle: bool,
+        full_output: bool,
+        full_oracle_output: bool,
         limits: RequestLimits,
     ) -> None:
         provider_files = 2 if provider_id == "coverage" else int(provider_id != "direct")
-        files_per_capture = 2 + provider_files + (2 if has_oracle else 0)
-        bounded_outputs = 1 + int(provider_id != "direct") + int(has_oracle)
+        files_per_capture = 2 * int(full_output) + provider_files + 2 * int(full_oracle_output)
+        bounded_outputs = int(full_output) + int(provider_id != "direct") + int(full_oracle_output)
         reserved_bytes = total * bounded_outputs * limits.max_output_bytes
         reserved_files = total * files_per_capture
         self._prune_scratch(reserved_bytes=reserved_bytes, reserved_files=reserved_files)
@@ -1333,7 +1556,9 @@ class AnalysisRuntime:
         return dict(cached.preserved)
 
     @staticmethod
-    def _terminated_limit(process: ProcessResult, limits: RequestLimits) -> dict[str, Any] | None:
+    def _terminated_limit(
+        process: ProcessResult, limits: RequestLimits, budget: WorkloadBudget
+    ) -> dict[str, Any] | None:
         cause = process.cancellation_cause
         if cause is None:
             return None
@@ -1343,19 +1568,19 @@ class AnalysisRuntime:
         unit: str | None = None
         recovery: str | None = None
         if cause.value == "timeout":
-            configured = limits.timeout_seconds
+            configured = budget.timeout_seconds
             observed = process.wall_time_ns / 1_000_000_000 if process.wall_time_ns else None
             unit = "seconds"
-            recovery = "Retry with a larger timeout_seconds if the workload duration is expected."
+            recovery = "Adjust target.budget.timeout_seconds if the workload duration is expected."
         elif cause.value == "output_limit":
             configured = limits.max_output_bytes
             unit = "bytes"
             recovery = "Retry with a larger max_output_bytes or reduce target output."
         elif cause.value == "memory_limit_exceeded":
-            configured = limits.max_memory_bytes
+            configured = budget.max_memory_bytes
             observed = process.peak_rss_bytes
             unit = "bytes"
-            recovery = "Retry with a larger max_memory_bytes only if the workload is trusted."
+            recovery = "Adjust target.budget.max_memory_bytes only if the workload is trusted."
         elif cause.value == "writable_limit_exceeded":
             configured = limits.max_output_bytes
             if resources is not None and resources.writable_root_growth_bytes:
@@ -1559,6 +1784,8 @@ class AnalysisRuntime:
 
     @staticmethod
     def _sniff(path: Path) -> str:
+        if path.name.lower().endswith(".autotune.json"):
+            return "triton-cache"
         known = {
             ".json": "json",
             ".jsonl": "jsonl",
@@ -1645,12 +1872,22 @@ class AnalysisRuntime:
         )
 
     def _read_rows(
-        self, sources: list[NativeSource], offset: int, limit: int
+        self,
+        sources: list[NativeSource],
+        offset: int,
+        limit: int,
+        *,
+        text_fragment_chars: int | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
         rows: list[dict[str, Any]] = []
         observed = 0
         for source in sources:
-            for row in self._iter_rows(source.path, source.format):
+            source_rows = (
+                iter_text_fragments(source.path, text_fragment_chars)
+                if text_fragment_chars is not None
+                else self._iter_rows(source.path, source.format)
+            )
+            for row in source_rows:
                 if observed >= offset and len(rows) < limit:
                     normalized = json.loads(json.dumps(row, default=str))
                     rows.append({**normalized, "input_sha256": source.sha256})
@@ -1670,15 +1907,17 @@ class AnalysisRuntime:
     ) -> ProviderAnalysis | None:
         try:
             if (
-                capability_id == "cpu.hotspots"
+                capability_id in {"cpu.hotspots", "cpu.callers"}
                 and len(sources) == 1
                 and (
                     cpu_profile := self.cpu_profiles.analyze(
+                        capability_id,
                         *(
                             self._perf_collapsed(sources[0], limits)
                             if sources[0].format == "perf-data"
                             else (sources[0].path, sources[0].format)
                         ),
+                        arguments,
                         max_rows=max_rows,
                     )
                 )
@@ -2062,7 +2301,9 @@ class AnalysisRuntime:
         self._cache_scratch_artifact(key, output)
         return output, provider_version
 
-    def _resource_policy(self, limits: RequestLimits, *, writable_root: Path) -> ResourcePolicy:
+    def _capture_resource_policy(
+        self, limits: RequestLimits, *, budget: WorkloadBudget, writable_root: Path
+    ) -> ResourcePolicy:
         _used_bytes, used_files = self._scratch_commitment(consuming_root=writable_root)
         remaining_files = MAX_SESSION_SCRATCH_FILES - used_files - 4
         if remaining_files < 1:
@@ -2073,8 +2314,8 @@ class AnalysisRuntime:
             filesystem_path=self.scratch,
             writable_roots=(writable_root,),
             minimum_free_bytes=64 * 1024 * 1024,
-            maximum_rss_bytes=limits.max_memory_bytes,
-            max_observed_files=min(limits.max_input_files, remaining_files),
+            maximum_rss_bytes=budget.max_memory_bytes,
+            max_observed_files=remaining_files,
             maximum_writable_growth_bytes=limits.max_output_bytes,
         )
 
@@ -2122,9 +2363,32 @@ class AnalysisRuntime:
             result["truncation"] = {"reason": "result_bytes", "next_offset": offset + len(rows)}
             result["continuation"] = self._encode_continuation(identity, offset + len(rows))
         if had_rows and not rows:
+            recovery: dict[str, Any] = {}
+            if identity.get("capability_id") == "artifact.preview" and all(
+                item["format"] == "text" for item in identity.get("inputs", [])
+            ):
+                fragment_chars = identity.get("arguments", {}).get("text_fragment_chars")
+                if fragment_chars == 1:
+                    recovery = {
+                        "recovery": (
+                            "A single-character fragment and result metadata do not fit. "
+                            "Use a larger max_result_bytes within server limits."
+                        )
+                    }
+                else:
+                    suggested = 128 if fragment_chars is None else max(1, fragment_chars // 2)
+                    recovery = {
+                        "recovery": (
+                            f"Retry preview_artifact with text_fragment_chars={suggested} "
+                            "and start a fresh page. Fragment offsets differ from line offsets. "
+                            "If metadata still cannot fit, use a larger max_result_bytes "
+                            "within server limits."
+                        )
+                    }
             raise RuntimeFailure(
                 "LIMIT_EXCEEDED",
                 "A result row exceeds max_result_bytes and cannot form an advancing page",
+                details=recovery,
             )
         if len(canonical_bytes(result)) > limit:
             raise RuntimeFailure("LIMIT_EXCEEDED", "Result metadata exceeds max_result_bytes")
@@ -2154,6 +2418,7 @@ class AnalysisRuntime:
                         "status": item["semantic_oracle"]["status"],
                         "returncode": item["semantic_oracle"]["returncode"],
                         "failure_code": item["semantic_oracle"]["failure_code"],
+                        "limit": item["semantic_oracle"].get("limit"),
                     }
                     if item["semantic_oracle"] is not None
                     else None
@@ -2368,25 +2633,30 @@ class AnalysisRuntime:
             used_files += max(0, reserved_files - len(allocated))
         return used_bytes, used_files
 
-    @contextmanager
-    def _capture_scope(self) -> Iterator[Path]:
+    @asynccontextmanager
+    async def _capture_scope(self) -> AsyncIterator[Path]:
         root = self.scratch / f"capture-{secrets.token_hex(12)}"
+        failed = True
         try:
             yield root
-        except BaseException:
+            failed = False
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.run_in_request(partial(self._release_capture_scope, root, failed))
+
+    def _release_capture_scope(self, root: Path, failed: bool) -> None:
+        if failed:
             for analysis_id, cached in list(self.analyses.items()):
                 if any(
                     source.path.is_relative_to(root) or root.is_relative_to(source.path)
                     for source in cached.sources
                 ):
                     del self.analyses[analysis_id]
-            raise
-        finally:
-            self._capture_reservations.pop(root, None)
-            if not any(
-                source.path.is_relative_to(root) or root.is_relative_to(source.path)
-                for cached in self.analyses.values()
-                if cached.preserved is None
-                for source in cached.sources
-            ):
-                shutil.rmtree(root, ignore_errors=True)
+        self._capture_reservations.pop(root, None)
+        if not any(
+            source.path.is_relative_to(root) or root.is_relative_to(source.path)
+            for cached in self.analyses.values()
+            if cached.preserved is None
+            for source in cached.sources
+        ):
+            shutil.rmtree(root, ignore_errors=True)

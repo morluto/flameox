@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
+from collections.abc import Mapping
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,38 +25,37 @@ _SPEEDSCOPE_TIME_SCALES = {
 class CpuProfileProvider:
     """Bounded readers for py-spy Speedscope and collapsed perf stacks."""
 
-    def analyze(self, path: Path, format_name: str, *, max_rows: int) -> ProviderAnalysis | None:
+    def analyze(
+        self,
+        capability_id: str,
+        path: Path,
+        format_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        max_rows: int,
+    ) -> ProviderAnalysis | None:
         if format_name == "py-spy":
-            return self._speedscope(path, max_rows=max_rows)
-        if format_name == "perf":
+            return self._speedscope(capability_id, path, arguments, max_rows=max_rows)
+        if format_name == "perf" and capability_id == "cpu.hotspots":
             return self._collapsed(path, max_rows=max_rows)
         return None
 
     @staticmethod
-    def _speedscope(path: Path, *, max_rows: int) -> ProviderAnalysis:
-        if path.stat().st_size > _MAX_PROFILE_BYTES:
-            raise ProviderFailure("LIMIT_EXCEEDED", "py-spy profile exceeds 64 MiB")
-        try:
-            document = json.loads(path.read_bytes())
-        except (OSError, json.JSONDecodeError) as error:
-            raise ProviderFailure(
-                "DECODE_FAILURE", "py-spy Speedscope profile is invalid"
-            ) from error
-        root = _object(document, "Speedscope profile")
-        shared = _object(root.get("shared"), "Speedscope shared data")
-        frames = shared.get("frames")
-        profiles = root.get("profiles")
-        if not isinstance(frames, list) or len(frames) > _MAX_FRAMES:
-            raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope frame count is invalid")
-        if not isinstance(profiles, list) or not profiles:
-            raise ProviderFailure("DECODE_FAILURE", "Speedscope profiles are missing")
-        normalized_frames = [_frame(value, index) for index, value in enumerate(frames)]
+    def _speedscope(
+        capability_id: str, path: Path, arguments: Mapping[str, Any], *, max_rows: int
+    ) -> ProviderAnalysis:
+        normalized_frames, profiles = _read_speedscope(path)
+        callers = (
+            _SampledCallers(normalized_frames, arguments)
+            if capability_id == "cpu.callers"
+            else None
+        )
         self_weights: defaultdict[int, float] = defaultdict(float)
         inclusive_weights: defaultdict[int, float] = defaultdict(float)
         sample_count = 0
         unresolved_sample_count = 0
         weight_units: set[str] = set()
-        for profile_value in profiles:
+        for profile_index, profile_value in enumerate(profiles):
             profile = _object(profile_value, "Speedscope sampled profile")
             if profile.get("type") != "sampled":
                 raise ProviderFailure(
@@ -91,6 +92,8 @@ class CpuProfileProvider:
                 self_weights[stack[-1]] += weight
                 for frame_index in set(stack):
                     inclusive_weights[frame_index] += weight
+                if callers is not None:
+                    callers.add(profile_index, stack, weight)
         rows = [
             {
                 **normalized_frames[index],
@@ -114,12 +117,20 @@ class CpuProfileProvider:
                 "frames and were excluded from frame aggregation."
             )
         metrics = {
-            "frame_count": len(frames),
+            "frame_count": len(normalized_frames),
             "sample_count": sample_count,
             "weight_unit": next(iter(weight_units)),
         }
         if unresolved_sample_count:
             metrics["unresolved_sample_count"] = unresolved_sample_count
+        if callers is not None:
+            rows = callers.rows(next(iter(weight_units)))
+            metrics["edge_count"] = len(rows)
+            limitations.append(
+                "Each edge is counted once per sampled stack, including recursive self-edges; "
+                "sample counts and weights are not function invocation counts. "
+                "Profiles remain separate."
+            )
         return ProviderAnalysis(
             provider_id="py-spy-speedscope",
             provider_version="speedscope-1",
@@ -188,6 +199,79 @@ class CpuProfileProvider:
                 "Input must be collapsed perf stacks, not raw perf.data or perf script output."
             ],
         )
+
+
+class _SampledCallers:
+    def __init__(self, frames: list[dict[str, Any]], arguments: Mapping[str, Any]) -> None:
+        self.frames = frames
+        self.direction = arguments.get("direction", "both")
+        function = arguments.get("function")
+        self.matches = {
+            index
+            for index, frame in enumerate(frames)
+            if function is None
+            or function.casefold()
+            in f"{frame['file']}:{frame['line']}:{frame['function']}".casefold()
+        }
+        self.weights: defaultdict[tuple[int, int, int], float] = defaultdict(float)
+        self.samples: defaultdict[tuple[int, int, int], int] = defaultdict(int)
+
+    def add(self, profile: int, stack: list[int], weight: float) -> None:
+        for caller, callee in set(pairwise(stack)):
+            if self.direction == "callers":
+                matches = callee in self.matches
+            elif self.direction == "callees":
+                matches = caller in self.matches
+            else:
+                matches = caller in self.matches or callee in self.matches
+            if not matches:
+                continue
+            key = (profile, caller, callee)
+            if key not in self.weights and len(self.weights) >= 100_000:
+                raise ProviderFailure(
+                    "LIMIT_EXCEEDED", "Speedscope caller edge count exceeds the limit"
+                )
+            self.weights[key] += weight
+            self.samples[key] += 1
+
+    def rows(self, unit: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "profile_index": profile,
+                **{
+                    f"caller_{field}": self.frames[caller][field]
+                    for field in ("frame_index", "function", "file", "line", "column")
+                },
+                **{
+                    f"callee_{field}": self.frames[callee][field]
+                    for field in ("frame_index", "function", "file", "line", "column")
+                },
+                "sample_count": self.samples[(profile, caller, callee)],
+                "weight": weight,
+                "unit": unit,
+            }
+            for (profile, caller, callee), weight in sorted(
+                self.weights.items(), key=lambda item: (-item[1], item[0])
+            )
+        ]
+
+
+def _read_speedscope(path: Path) -> tuple[list[dict[str, Any]], list[Any]]:
+    if path.stat().st_size > _MAX_PROFILE_BYTES:
+        raise ProviderFailure("LIMIT_EXCEEDED", "py-spy profile exceeds 64 MiB")
+    try:
+        document = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProviderFailure("DECODE_FAILURE", "py-spy Speedscope profile is invalid") from error
+    root = _object(document, "Speedscope profile")
+    shared = _object(root.get("shared"), "Speedscope shared data")
+    frames = shared.get("frames")
+    profiles = root.get("profiles")
+    if not isinstance(frames, list) or len(frames) > _MAX_FRAMES:
+        raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope frame count is invalid")
+    if not isinstance(profiles, list) or not profiles:
+        raise ProviderFailure("DECODE_FAILURE", "Speedscope profiles are missing")
+    return [_frame(value, index) for index, value in enumerate(frames)], profiles
 
 
 def _object(value: object, subject: str) -> dict[str, Any]:

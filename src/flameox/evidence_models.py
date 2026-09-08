@@ -103,11 +103,57 @@ class ExecutionLimit(EvidenceModel):
     recovery: str
 
 
+class OutputStreams(EvidenceModel):
+    stdout_bytes: int = Field(ge=0)
+    stderr_bytes: int = Field(ge=0)
+    stdout_complete: bool
+    stderr_complete: bool
+    io_error: bool
+
+    @model_validator(mode="after")
+    def io_failure_is_incomplete(self) -> OutputStreams:
+        if self.io_error and (self.stdout_complete or self.stderr_complete):
+            raise ValueError("Output I/O failures cannot claim complete streams")
+        return self
+
+
+class ConsoleDiagnostics(EvidenceModel):
+    stdout: str = Field(max_length=4096)
+    stderr: str = Field(max_length=4096)
+    stdout_observed_bytes: int = Field(ge=0)
+    stderr_observed_bytes: int = Field(ge=0)
+    stdout_retained_bytes: int = Field(ge=0)
+    stderr_retained_bytes: int = Field(ge=0)
+    stdout_omitted_bytes: int = Field(ge=0)
+    stderr_omitted_bytes: int = Field(ge=0)
+    stdout_complete: bool
+    stderr_complete: bool
+
+    @model_validator(mode="after")
+    def byte_accounting(self) -> ConsoleDiagnostics:
+        for stream in ("stdout", "stderr"):
+            observed = getattr(self, f"{stream}_observed_bytes")
+            retained = getattr(self, f"{stream}_retained_bytes")
+            omitted = getattr(self, f"{stream}_omitted_bytes")
+            if observed != retained + omitted:
+                raise ValueError("Console byte counts must satisfy observed = retained + omitted")
+        return self
+
+
 class OracleOutcome(EvidenceModel):
     argv: Argv
     returncode: int | None
     status: Literal["passed", "failed"]
     failure_code: str | None
+    output_streams: OutputStreams | None = None
+    console_diagnostics: ConsoleDiagnostics | None = None
+    limit: ExecutionLimit | None = None
+
+
+class ArtifactRejection(EvidenceModel):
+    role: Nonempty
+    code: Nonempty
+    message: Nonempty
 
 
 class CaptureExecution(EvidenceModel):
@@ -119,6 +165,8 @@ class CaptureExecution(EvidenceModel):
     returncode: int | None
     status: Literal["pending", "succeeded", "failed"]
     failure_code: str | None
+    output_streams: OutputStreams | None = None
+    console_diagnostics: ConsoleDiagnostics | None = None
     missing_artifact_roles: list[Nonempty]
     semantic_oracle: OracleOutcome | None
     wall_time_ns: int | None
@@ -127,6 +175,7 @@ class CaptureExecution(EvidenceModel):
     returncode_scope: Literal["workload", "collector"]
     workload_returncode: int | None
     executable_sha256: Digest
+    artifact_rejections: list[ArtifactRejection] = Field(default_factory=list)
 
     @field_validator("cwd")
     @classmethod
@@ -215,7 +264,7 @@ class ManifestBody(EvidenceModel):
     evidence_kind: Nonempty
     capability_id: Nonempty
     provider: ProviderIdentity
-    inputs: Annotated[list[InputIdentity], Field(min_length=1)]
+    inputs: list[InputIdentity]
     capture_request: CaptureRequest | None
     analysis_request: AnalysisRequest
     episode: Episode
@@ -227,6 +276,12 @@ class ManifestBody(EvidenceModel):
 
     @model_validator(mode="after")
     def membership(self) -> ManifestBody:
+        if not self.inputs and (
+            self.evidence_kind != "capture"
+            or self.capture_request is None
+            or self.analysis_request.failure is None
+        ):
+            raise ValueError("Only failed capture analysis may have no native inputs")
         if len({item.role for item in self.artifacts}) != len(self.artifacts):
             raise ValueError("Evidence artifact roles must be unique")
         layout = self.source_layout

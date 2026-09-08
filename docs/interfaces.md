@@ -10,12 +10,12 @@ search/inspect protocol in front of its operations. A caller that knows the evid
 invoke its tool directly; an unfamiliar caller relies on the MCP client's ordinary tool search and
 then receives the selected tool's complete schema.
 
-There are exactly 47 tools:
+There are exactly 49 tools:
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
 | Existing-artifact analysis | 26 | `analyze_cpu_hotspots`, `analyze_cpu_callers`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_pytest_fixtures`, `preview_artifact` | Read-only and idempotent. |
-| Capture and immediate analysis | 18 | `capture_cpu_hotspots`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
+| Capture and immediate analysis | 20 | `capture_cpu_hotspots`, `capture_cpu_callers`, `capture_triton_autotune`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 3 | `prepare_providers`, `preserve_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
 The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
@@ -138,6 +138,23 @@ A changed input cannot reuse a continuation. Tokens issued by older path-bound i
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
+For oversized text lines, `preview_artifact` also accepts
+`options: {"text_fragment_chars": 1024}` (1–4,096 decoded characters per fragment).
+This opt-in mode requires text files and counts fragment rows instead of lines;
+start a fresh page when switching modes. Rows carry one-based `line`, zero-based
+`fragment` within that line, `text`, and `line_terminated` (true only for a fragment
+ending in LF). Text retains LF and CR characters. An unterminated final line stays
+`line_terminated=false` even when coverage is complete. UTF-8 decoding replaces
+invalid byte sequences; fragments and offsets are not byte-exact slices. Original
+native bytes remain unchanged and can be preserved with the analysis handle.
+Continuations bind fragment size as well as the native source identity. Lower
+fragment sizes can accommodate tighter result-byte limits. The default remains
+whole-line preview with its existing offsets.
+
+The fragment reader uses Python's bounded
+[text `readline(size)`](https://docs.python.org/3.12/library/io.html#io.TextIOBase.readline)
+and explicit LF newline handling; it does not accumulate a whole oversized line.
+
 JSON preview traverses the document once in document order. A root array yields its elements;
 a root scalar yields one value row. At the root object, arrays yield section rows, scalar fields
 yield key/value rows, and nested objects yield key/type summaries. Object keys are literal strings,
@@ -157,7 +174,7 @@ it never promises access beyond a provider's declared projection bound. MCP summ
 terminal case toward a narrower semantic query or a reduced recapture; preservation cannot recover
 rows the provider never returned.
 
-Requests may lower startup row, result-byte, timeout, output-byte, and durable
+Requests may lower startup row, result-byte, decoder timeout/RSS, output-byte, and durable
 provenance-byte limits. Durable provenance bounds the captured argv and execution
 metadata retained for explicit preservation.
 They cannot raise them.
@@ -167,10 +184,39 @@ inventory snapshot and the original filters; callers resume by repeating those f
 
 ## Capture
 
+Capture retains bounded console diagnostics by default, with
+explicit omission counts. Full console retention is reserved for process-output
+evidence, semantic-oracle inputs, or an explicit caller request; only that mode
+requires disk backing. Requesting preservation makes selected evidence durable
+but does not silently request full logs. Set `target.console_output` to `full`
+(CLI: `--console-output full`) for explicit retention; the default is `diagnostics`.
+An oracle's own output remains diagnostic unless `full` is explicitly selected.
+Diagnostics retain at most 4,096 bytes per stream, lowered by the provenance
+budget, with UTF-8 replacement decoding. `console_diagnostics` reports observed,
+retained, and omitted byte counts and stream completeness; full-output metadata
+is reported under `output_streams`. Omitted bytes cannot be recovered later. See
+[workload resources and evidence bounds](workload-resource-policy.md).
+
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields live in the capture tool's
 typed provider union, and analysis fields live in its capability-specific `options` model. Shell
 command strings are not accepted.
+
+`target.budget` controls workload execution independently of analysis limits:
+
+```json
+{"budget": {"timeout_seconds": 600, "max_memory_bytes": 8589934592}}
+```
+
+Both fields default to null: no Flameox workload deadline or RSS cap. An explicit
+time budget applies separately to each capture invocation and each semantic
+oracle; it is not an experiment-wide deadline. RSS covers the sampled process
+tree, including a collector, and is best-effort rather than an OS quota. Timeout
+and memory termination report the configured workload budget, including oracle
+failures. Request cancellation and descendant cleanup remain active without a
+budget. Client timeouts, native-tool limits, and operating-system limits still
+apply. Decoder limits are not workload ceilings and cannot be raised through
+`target.budget`.
 
 Provider output formats are compared with the requested capability before scratch allocation or
 execution. Statically incompatible pairs fail with the declared formats and compatible capture
@@ -200,7 +246,7 @@ diagnostics fit inline. Each execution identifies whether `returncode` belongs t
 collector, retains the invoked executable SHA-256, and leaves `workload_returncode` null for wrapped
 captures. Exit ownership is declared by each invocation builder: self-reporting workloads retain
 their observed exit even when they use a provider other than `direct`. A usable profile does not
-prove workload success. Preserved stdout, stderr, and profiles
+prove workload success. When retained, preserved stdout, stderr, and profiles
 are individually selectable from the evidence resource.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
 its environment overrides the target environment. Each block randomizes case order from the
@@ -230,11 +276,22 @@ The retained surface is:
 
 ```text
 flameox setup
-flameox mcp serve|inspect
-flameox analyze [--continuation TOKEN] [--preserve]
-flameox capture [--experiment JSON] [--preserve] -- <argv...>
+flameox mcp serve [--limits JSON]
+flameox mcp inspect
+flameox analyze [--limits JSON] [--continuation TOKEN] [--preserve]
+flameox capture [--limits JSON] [--workload-budget JSON] [--experiment JSON] [--preserve] -- <argv...>
 flameox evidence query|show|location
 ```
+
+`--limits` validates the existing `RequestLimits` JSON contract and sets startup
+bounds for analysis and storage in that invocation. Its `timeout_seconds` and
+`max_memory_bytes` protect conversions and analysis workers, not capture targets.
+For example, `flameox capture --workload-budget
+'{"max_memory_bytes":8589934592}' ...` requests an 8 GiB workload process-tree
+budget without changing decoder protection. Unspecified analysis limits retain
+their defaults and hard contract
+maxima still apply. MCP request limits may only lower these startup bounds; no
+tool can raise them or reconfigure the server. No workspace configuration is created.
 
 `setup` detects supported coding agents and uses one multi-select prompt to choose which global MCP
 client configurations to update. It preserves unrelated JSON or TOML content and writes stdio

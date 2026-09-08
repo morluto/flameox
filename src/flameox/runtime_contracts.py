@@ -97,11 +97,23 @@ class EmptyArguments(StrictModel):
 
 
 class PreviewArguments(StrictModel):
+    text_fragment_chars: int | None = Field(
+        default=None,
+        description=(
+            "For text files only, return bounded fragments of this many decoded characters "
+            "instead of whole lines. Enables recovery of oversized log lines; offset and "
+            "continuations count fragment rows. Text retains LF delimiters and uses UTF-8 "
+            "replacement decoding; these are not native-byte offsets."
+        ),
+        ge=1,
+        le=4096,
+    )
     offset: int = Field(
         default=0,
         description=(
             "Zero-based logical row offset: text lines, JSONL records, CSV data records, "
-            "Parquet records, or projected JSON entries. Continuations advance in the same unit."
+            "Parquet records, or projected JSON entries. With text_fragment_chars, counts "
+            "text fragments instead. Continuations advance in the same unit."
         ),
         ge=0,
     )
@@ -154,6 +166,15 @@ class ScalingArguments(StrictModel):
 
 
 class StaticArguments(StrictModel):
+    source_root: str | None = Field(
+        default=None,
+        description=(
+            "Absolute source-tree root for SARIF location normalization and path filters; "
+            "does not read source contents. Set when the report is exported elsewhere."
+        ),
+        min_length=1,
+        max_length=4096,
+    )
     include_paths: list[str] = Field(
         default_factory=list,
         description="Path patterns eligible for static analysis.",
@@ -170,6 +191,13 @@ class StaticArguments(StrictModel):
     def bounded_patterns(cls, value: list[str]) -> list[str]:
         if any(not pattern or len(pattern) > 256 or "\x00" in pattern for pattern in value):
             raise ValueError("path patterns must be non-empty, bounded, and contain no NUL")
+        return value
+
+    @field_validator("source_root")
+    @classmethod
+    def absolute_source_root(cls, value: str | None) -> str | None:
+        if value is not None and ("\x00" in value or not Path(value).is_absolute()):
+            raise ValueError("source_root must be an absolute path without NUL")
         return value
 
 
@@ -243,7 +271,7 @@ class RequestLimits(StrictModel):
     )
     timeout_seconds: float = Field(
         default=300,
-        description="Maximum time for each bounded capture, conversion, or worker in seconds.",
+        description="Maximum time for each conversion or analysis worker; not the capture target.",
         gt=0,
         le=3600,
     )
@@ -255,7 +283,7 @@ class RequestLimits(StrictModel):
     )
     max_memory_bytes: int = Field(
         default=1024**3,
-        description="Maximum resident memory for each bounded capture or worker process tree.",
+        description="Maximum RSS for each analysis worker tree; not the capture target.",
         ge=16 * 1024 * 1024,
         le=16 * 1024**3,
     )
@@ -276,7 +304,41 @@ class RequestLimits(StrictModel):
         return RequestLimits.model_validate(effective)
 
 
+class WorkloadBudget(StrictModel):
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        le=86_400,
+        description=(
+            "Optional wall-time budget per target or semantic-oracle invocation, in seconds. "
+            "Omitted or null means no Flameox workload deadline; cancellation still applies."
+        ),
+    )
+    max_memory_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        le=2**53 - 1,
+        description=(
+            "Optional sampled RSS ceiling for the capture process tree, including its collector. "
+            "Also applies separately to each semantic oracle. Omitted or null means no RSS cap. "
+            "This is best-effort observation, not an operating-system memory quota."
+        ),
+    )
+
+
 class DirectTarget(StrictModel):
+    budget: WorkloadBudget = Field(
+        default_factory=WorkloadBudget,
+        description="Optional workload time and memory budgets, independent of analysis limits.",
+    )
+    console_output: Literal["diagnostics", "full"] = Field(
+        default="diagnostics",
+        description=(
+            "Keep bounded in-memory console diagnostics with omission counts by default. "
+            "Select full for disk-backed console retention. Process-output evidence and "
+            "semantic-oracle inputs always retain full output; preservation alone does not."
+        ),
+    )
     argv: list[str] = Field(
         description="Executable and arguments passed directly without a shell.",
         min_length=1,
@@ -626,6 +688,13 @@ CAPTURE_PROVIDER_CONTRACTS = {
             "native PyTorch Chrome trace",
         ),
         _capture_provider(
+            "triton",
+            EmptyArguments,
+            (("autotune", "triton-cache"),),
+            "fresh native Triton cache including compilation artifacts and autotune timings; "
+            "forces cold-cache tuning, not representative warm-cache execution",
+        ),
+        _capture_provider(
             "benchmark-samples",
             BenchmarkSamplesCaptureArguments,
             (("benchmark", "samples"),),
@@ -956,8 +1025,9 @@ CAPABILITIES = tuple(
     )
     + _caps(
         ("cpu.callers",),
-        "Project bounded caller-callee edges from deterministic pstats evidence.",
-        ("pstats",),
+        "Project bounded caller-callee edges from pstats or sampled py-spy stacks. "
+        "Sample weights are not deterministic invocation counts.",
+        ("pstats", "py-spy"),
         CpuCallGraphArguments,
     )
     + _caps(
@@ -1022,8 +1092,8 @@ CAPABILITIES = tuple(
     )
     + _caps(
         ("triton.autotune",),
-        "Summarize Triton autotune evidence.",
-        ("triton",),
+        "Summarize Triton autotune events or native configuration-timing caches.",
+        ("triton", "triton-cache"),
         EmptyArguments,
     )
     + _caps(

@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from flameox.canonical import canonical_bytes, content_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
+from flameox.source_files import directory_files
 
 _MAX_LINE_BYTES = 64 * 1024
 _MAX_KERNEL_BYTES = 64 * 1024 * 1024
@@ -43,6 +44,10 @@ class KernelEvidenceProvider:
                 return self._summarize_kernel(documents[0], max_rows=max_rows)
         if capability_id == "triton.autotune" and len(paths) == 1 and formats[0] == "triton":
             return self._triton(paths[0], max_rows=max_rows)
+        if capability_id == "triton.autotune" and len(paths) == 1 and formats[0] == "triton-cache":
+            if paths[0].is_dir():
+                return _triton_cache_directory(paths[0], max_rows=max_rows)
+            return _triton_cache(paths[0], max_rows=max_rows)
         return None
 
     @staticmethod
@@ -333,6 +338,126 @@ class KernelEvidenceProvider:
             complete=observed <= len(rows),
             limitations=limitations,
         )
+
+
+def _triton_cache_directory(path: Path, *, max_rows: int) -> ProviderAnalysis:
+    rows: list[dict[str, Any]] = []
+    observed = 0
+    caches = 0
+    limitations: list[str] = []
+    for member in directory_files(path, max_files=4096):
+        if not member.name.endswith(".autotune.json"):
+            continue
+        result = _triton_cache(member, max_rows=max_rows)
+        metrics = result.blocks[0]["values"]
+        for row in result.blocks[1]["rows"]:
+            if len(rows) < max_rows:
+                rows.append(
+                    {
+                        **row,
+                        "cache_path": member.relative_to(path).as_posix(),
+                        "key_digest": metrics["key_digest"],
+                        "derived_best": row["config_id"] == metrics["derived_best_config_id"],
+                    }
+                )
+        observed += result.rows_observed
+        caches += 1
+        limitations = list(result.limitations)
+    if not caches:
+        raise ProviderFailure("UNSUPPORTED_FORMAT", "No native Triton autotune caches were emitted")
+    return ProviderAnalysis(
+        provider_id="triton-autotune-cache",
+        provider_version="configs-timings",
+        blocks=[
+            {"type": "metrics", "values": {"cache_count": caches, "candidate_count": observed}},
+            {"type": "table", "rows": rows},
+        ],
+        rows_observed=observed,
+        complete=observed <= len(rows),
+        limitations=[
+            *limitations,
+            "The native bundle includes compilation artifacts; "
+            "only autotune caches contribute analysis rows. Capture starts with "
+            "a fresh cache, so its wall time includes compilation and tuning.",
+        ],
+    )
+
+
+def _triton_cache(path: Path, *, max_rows: int) -> ProviderAnalysis:
+    if path.stat().st_size > _MAX_LINE_BYTES:
+        raise ProviderFailure("LIMIT_EXCEEDED", "Triton cache exceeds 64 KiB")
+    try:
+        document = _object(json.loads(path.read_bytes()), "Triton cache")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ProviderFailure("DECODE_FAILURE", "Triton cache is unreadable") from error
+    key = document.get("key")
+    entries = document.get("configs_timings")
+    if not isinstance(key, list) or not key:
+        raise ProviderFailure("DECODE_FAILURE", "Triton cache key is missing")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= _MAX_TRITON_CANDIDATES:
+        raise ProviderFailure("DECODE_FAILURE", "Triton cache candidates are invalid")
+    try:
+        key_digest = content_id(canonical_bytes(key))
+    except (ValueError, TypeError) as error:
+        raise ProviderFailure("DECODE_FAILURE", "Triton cache key is invalid") from error
+    rows: list[dict[str, Any]] = []
+    ranks: list[list[int | float]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, list) or len(entry) != 2:
+            raise ProviderFailure("DECODE_FAILURE", "Triton cache candidate is invalid")
+        config = _json_object(entry[0], "Triton cache config")
+        values = entry[1] if isinstance(entry[1], list) else [entry[1]]
+        if not 1 <= len(values) <= 32:
+            raise ProviderFailure("DECODE_FAILURE", "Triton cache timing shape is invalid")
+        timings: list[int | float] = []
+        for value in values:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or (isinstance(value, float) and math.isnan(value))
+                or value < 0
+            ):
+                raise ProviderFailure("DECODE_FAILURE", "Triton cache timing must be nonnegative")
+            timings.append(value)
+        ranks.append(timings)
+        rows.append(
+            {
+                "candidate_index": index,
+                "config": config,
+                "config_id": content_id(canonical_bytes(config)),
+                "timing_values": [
+                    "positive_infinity" if isinstance(value, float) and math.isinf(value) else value
+                    for value in timings
+                ],
+            }
+        )
+    best = min(range(len(rows)), key=lambda index: ranks[index])
+    return ProviderAnalysis(
+        provider_id="triton-autotune-cache",
+        provider_version="configs-timings",
+        blocks=[
+            {
+                "type": "metrics",
+                "values": {
+                    "candidate_count": len(rows),
+                    "key_digest": key_digest,
+                    "derived_best_config_id": rows[best]["config_id"],
+                },
+            },
+            {"type": "table", "rows": rows[:max_rows]},
+        ],
+        rows_observed=len(rows),
+        complete=len(rows) <= max_rows,
+        limitations=[
+            "Native cache records do not identify the function, device, tuning duration, "
+            "or whether a later execution used a cache hit.",
+            "Best configuration is derived using Triton's lexicographic timing comparison. "
+            "It is not an independently observed execution or semantic validation.",
+            "Timing values are preserved in producer order, not averaged as repetitions. "
+            "Triton's default benchmark emits millisecond quantiles (0.5, 0.2, 0.8), "
+            "but custom benchmark callbacks can change their meaning and units.",
+        ],
+    )
 
 
 def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:

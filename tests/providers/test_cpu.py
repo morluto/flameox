@@ -122,6 +122,69 @@ def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
     assert result["blocks"][1]["rows"][0]["self_weight"] == 2
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (
+            {},
+            [(0, "work", "work", 3.0, 2), (0, "main", "work", 2.0, 1), (1, "main", "work", 0.5, 1)],
+        ),
+        (
+            {"function": "main", "direction": "callees"},
+            [(0, "main", "work", 2.0, 1), (1, "main", "work", 0.5, 1)],
+        ),
+        ({"function": "main", "direction": "callers"}, []),
+        ({"function": "absent"}, []),
+    ],
+)
+def test_sampled_callers_preserve_weights_recursion_and_profile_identity(
+    tmp_path: Path, arguments: dict[str, str], expected: list[tuple[int, str, str, float, int]]
+) -> None:
+    profile = tmp_path / "callers.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "main"}, {"name": "work"}]},
+                "profiles": [
+                    {
+                        "type": "sampled",
+                        "unit": "seconds",
+                        "samples": [[0, 1, 1, 1], [1, 1]],
+                        "weights": [2, 1],
+                    },
+                    {
+                        "type": "sampled",
+                        "unit": "milliseconds",
+                        "samples": [[0, 1]],
+                        "weights": [500],
+                    },
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "cpu.callers", [PathSource(path=str(profile), format="py-spy")], arguments
+        )
+    finally:
+        runtime.close()
+    rows = result["blocks"][1]["rows"]
+    assert [
+        (
+            row["profile_index"],
+            row["caller_function"],
+            row["callee_function"],
+            row["weight"],
+            row["sample_count"],
+        )
+        for row in rows
+    ] == expected
+    assert all(row["unit"] == "seconds" for row in rows)
+    assert result["blocks"][0]["values"]["edge_count"] == len(expected)
+    assert any("not function invocation counts" in item for item in result["limitations"])
+
+
 def test_speedscope_profiles_with_different_units_are_not_pooled(tmp_path: Path) -> None:
     profile = tmp_path / "mixed-units.speedscope.json"
     profile.write_text(

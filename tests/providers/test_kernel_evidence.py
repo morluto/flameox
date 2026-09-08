@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from flameox.runtime_contracts import PathSource, RuntimeFailure
+from flameox.runtime_contracts import PathSource, RequestLimits, RuntimeFailure
 from flameox.stateless import AnalysisRuntime
 
 
@@ -167,3 +167,122 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> No
     row = result["blocks"][1]["rows"][0]
     assert row["function_name"] == "workload.kernel"
     assert row["winner_config_id"] in {item["config_id"] for item in row["candidates"]}
+
+
+def test_native_triton_cache_preserves_quantiles_and_derives_lexicographic_winner(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "scatter.autotune.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "key": [256, "torch.bfloat16"],
+                "configs_timings": [
+                    [{"kwargs": {"BLOCK_D": 128}}, [1, 0.9, 9]],
+                    [{"kwargs": {"BLOCK_D": 256}}, [2, 0.1, 2]],
+                    [{"kwargs": {"BLOCK_D": 512}}, [float("inf")] * 3],
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
+    try:
+        result = runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+    finally:
+        runtime.close()
+    rows = result["blocks"][1]["rows"]
+    assert result["provider"]["id"] == "triton-autotune-cache"
+    assert result["blocks"][0]["values"]["derived_best_config_id"] == rows[0]["config_id"]
+    assert rows[0]["timing_values"] == [1, 0.9, 9]
+    assert rows[2]["timing_values"] == ["positive_infinity"] * 3
+    assert "mean_ms" not in rows[0]
+    assert result["coverage"] == {"rows_observed": 3, "rows_returned": 3, "complete": True}
+
+
+@pytest.mark.parametrize("timing", [-1, float("nan"), True, []])
+def test_native_triton_cache_rejects_invalid_timings(tmp_path: Path, timing: object) -> None:
+    artifact = tmp_path / "invalid.autotune.json"
+    artifact.write_text(json.dumps({"key": [1], "configs_timings": [[{"kwargs": {}}, timing]]}))
+    runtime = AnalysisRuntime()
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("smaller", [2**53, 10**400])
+def test_native_triton_cache_preserves_integer_selection_order(
+    tmp_path: Path, smaller: int
+) -> None:
+    artifact = tmp_path / "integer.autotune.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "key": [1],
+                "configs_timings": [
+                    [{"kwargs": {"BLOCK": 128}}, smaller + 1],
+                    [{"kwargs": {"BLOCK": 256}}, smaller],
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime()
+    try:
+        result = runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+    finally:
+        runtime.close()
+    rows = result["blocks"][1]["rows"]
+    assert rows[0]["timing_values"] == [str(smaller + 1)]
+    assert rows[1]["timing_values"] == [str(smaller)]
+    assert result["blocks"][0]["values"]["derived_best_config_id"] == rows[1]["config_id"]
+
+
+@pytest.mark.parametrize("max_rows", [1, 10])
+def test_triton_cache_bundle_keeps_distinct_native_paths_and_global_counts(
+    tmp_path: Path, max_rows: int
+) -> None:
+    bundle = tmp_path / "cache"
+    bundle.mkdir()
+    for name in ("first", "second"):
+        member = bundle / name
+        member.mkdir()
+        (member / "scatter.autotune.json").write_text(
+            json.dumps(
+                {"key": [128], "configs_timings": [[{"kwargs": {"BLOCK": 128}}, [1, 0.5, 2]]]}
+            )
+        )
+    (bundle / "compiled.cubin").write_bytes(b"not an analysis record")
+    runtime = AnalysisRuntime()
+    try:
+        result = runtime.analyze(
+            "triton.autotune",
+            [PathSource(path=str(bundle), format="triton-cache")],
+            {},
+            limits=RequestLimits(max_rows=max_rows),
+        )
+    finally:
+        runtime.close()
+    assert result["blocks"][0]["values"] == {"cache_count": 2, "candidate_count": 2}
+    rows = result["blocks"][1]["rows"]
+    assert rows[0]["cache_path"] == "first/scatter.autotune.json"
+    assert rows[0]["derived_best"] is True
+    assert result["coverage"]["rows_observed"] == 2
+    assert result["coverage"]["complete"] == (max_rows >= 2)
+    if max_rows >= 2:
+        assert rows[1]["cache_path"] == "second/scatter.autotune.json"
+
+
+def test_triton_compilation_without_autotuning_is_not_complete_negative_evidence(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compiled.cubin").write_bytes(b"compiled")
+    runtime = AnalysisRuntime()
+    try:
+        with pytest.raises(RuntimeFailure, match="No native Triton autotune caches"):
+            runtime.analyze(
+                "triton.autotune", [PathSource(path=str(tmp_path), format="triton-cache")], {}
+            )
+    finally:
+        runtime.close()

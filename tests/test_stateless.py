@@ -45,6 +45,7 @@ from flameox.runtime_contracts import (
     PathSource,
     RequestLimits,
     RuntimeFailure,
+    WorkloadBudget,
     compatible_capture_providers,
 )
 from flameox.runtime_errors import DomainError, ErrorCode
@@ -1665,8 +1666,6 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
             assert list(runtime.scratch.glob("capture-*")) == []
             manifest = runtime.read_evidence(preserved["evidence_id"])
             assert {item["role"] for item in manifest["body"]["artifacts"]} == {
-                "capture-0001/stdout",
-                "capture-0001/stderr",
                 "capture-0001/benchmark",
             }
         finally:
@@ -1739,7 +1738,7 @@ def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> 
 
 
 @pytest.mark.process
-def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: Path) -> None:
+def test_failed_provider_capture_returns_preservable_diagnostics(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(
             evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
@@ -1766,14 +1765,16 @@ def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: P
             )
             assert result["capture"]["requested_capability_id"] == "benchmark.summary"
             assert result["capture"]["executions"][0]["status"] == "failed"
-            assert result["capability_id"] == "artifact.preview"
-            assert result["blocks"][1]["rows"]
+            assert result["capability_id"] == "benchmark.summary"
+            assert result["analysis_failure"] is not None
+            assert result["blocks"][1]["rows"] == []
+            diagnostics = result["capture"]["executions"][0]["console_diagnostics"]
+            assert diagnostics["stderr_observed_bytes"] > 0
             preserved = runtime.preserve_evidence(result["analysis_id"])
             manifest = runtime.read_evidence(preserved["evidence_id"])
-            assert {item["role"] for item in manifest["body"]["artifacts"]} == {
-                "capture-0001/stdout",
-                "capture-0001/stderr",
-            }
+            assert manifest["body"]["artifacts"] == []
+            stored = manifest["body"]["capture_request"]["executions"][0]
+            assert stored["console_diagnostics"] == diagnostics
         finally:
             runtime.close()
 
@@ -1781,26 +1782,29 @@ def test_failed_provider_capture_returns_preservable_stream_evidence(tmp_path: P
 
 
 @pytest.mark.process
-def test_unpreserved_capture_analysis_failure_removes_request_scratch(tmp_path: Path) -> None:
+def test_unpreserved_capture_analysis_failure_can_be_preserved_later(tmp_path: Path) -> None:
     code = "import os,pathlib; pathlib.Path(os.environ['FLAMEOX_BENCHMARK_OUTPUT']).write_text('{')"
 
     async def exercise() -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
-            for _attempt in range(2):
-                with pytest.raises(RuntimeFailure) as failure:
-                    await runtime.capture_and_analyze(
-                        CaptureTarget(
-                            argv=[sys.executable, "-c", code],
-                            cwd=str(tmp_path),
-                            provider_id="benchmark-samples",
-                        ),
-                        "benchmark.summary",
-                        preserve=False,
-                    )
-                assert failure.value.code == "DECODE_FAILURE"
-                assert list(runtime.scratch.glob("capture-*")) == []
-                assert runtime.analyses == {}
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", code],
+                    cwd=str(tmp_path),
+                    provider_id="benchmark-samples",
+                ),
+                "benchmark.summary",
+                preserve=False,
+            )
+            assert result["analysis_failure"]["code"] == "DECODE_FAILURE"
+            assert result["capture"]["outcome"]["status"] == "succeeded"
+            assert list(runtime.scratch.glob("capture-*"))
+            assert not (tmp_path / ".flameox").exists()
+            preserved = runtime.preserve_evidence(result["analysis_id"])
+            manifest = runtime.read_evidence(preserved["evidence_id"])
+            assert manifest["body"]["analysis_request"]["failure"]["code"] == "DECODE_FAILURE"
+            assert list(runtime.scratch.glob("capture-*")) == []
         finally:
             runtime.close()
 
@@ -2241,6 +2245,52 @@ def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> 
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("workers", [0, 2])
+def test_pytest_capture_uses_its_plugin_without_importing_workload_flameox(
+    tmp_path: Path, workers: int
+) -> None:
+    shadow = tmp_path / "flameox"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("raise ImportError('workload Flameox is incompatible')\n")
+    test_file = tmp_path / "test_workload.py"
+    test_file.write_text(
+        "import pytest\n"
+        "@pytest.fixture(scope='session')\n"
+        "def resource():\n"
+        "    return 7\n"
+        "@pytest.mark.parametrize('case', range(4))\n"
+        "def test_case(resource, case):\n"
+        "    assert resource == 7\n"
+    )
+
+    async def exercise() -> dict[str, Any]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
+        try:
+            return await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(test_file)]
+                    + (["-n", str(workers)] if workers else []),
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "pytest.fixtures",
+            )
+        finally:
+            runtime.close()
+
+    result = anyio.run(exercise)
+    assert result["capture"]["outcome"]["status"] == "succeeded"
+    assert result["analysis_failure"] is None
+    invocations = [
+        row
+        for row in result["blocks"][1]["rows"]
+        if row["row_kind"] == "fixture_invocation" and row["fixture"] == "resource"
+    ]
+    assert len(invocations) == max(1, workers)
+    assert all(row["complete"] for row in invocations)
+
+
+@pytest.mark.process
 def test_pytest_fixture_capture_attributes_session_work_per_xdist_worker(
     tmp_path: Path,
 ) -> None:
@@ -2650,8 +2700,6 @@ def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(
         assert execution["capture_argv"][1:4] == ["-m", "memray", "run"]
         assert result["provider"]["id"] == "memray"
         assert {item["role"] for item in manifest["body"]["artifacts"]} == {
-            "capture-0001/stdout",
-            "capture-0001/stderr",
             "capture-0001/memory",
         }
 
@@ -3231,7 +3279,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 47
+        assert len(tools.tools) == 49
         assert "preview_artifact" in [tool.name for tool in tools.tools]
         assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)
@@ -3500,9 +3548,9 @@ def test_timed_out_capture_returns_preservable_partial_evidence(tmp_path: Path) 
                     ],
                     cwd=str(tmp_path),
                     provider_id="direct",
+                    budget=WorkloadBudget(timeout_seconds=0.2),
                 ),
                 "artifact.preview",
-                limits=RequestLimits(timeout_seconds=0.2),
             )
             execution = result["capture"]["executions"][0]
             assert execution["status"] == "failed"

@@ -3,6 +3,42 @@
 Storage is optional. Analysis and unpreserved capture must not create user data, project files,
 `.diagnostics`, SQLite files, or persistent DuckDB files.
 
+## Console retention and disk backing
+
+The default is bounded, memory-backed console diagnostics, not a full-output
+file for every execution. Report observed, retained, and omitted byte counts for
+each stream, together with whether collection completed without interruption.
+Interrupted collection is conservatively incomplete even if cleanup closes the
+pipes. After interruption,
+the eventual stream length may be unknown; omission counts cover only observed bytes.
+
+Keep native profiles, traces, and other artifacts when the investigation needs
+them. Retain full console output only when it is itself the evidence, a semantic
+oracle needs it, or the caller explicitly requests it. Use request-owned disk
+backing for that full-output case; disk backing is not a universal requirement
+for console diagnostics. Native tools may independently require files.
+
+Retention and preservation are separate choices. Preservation makes the selected
+evidence durable; it does not enable full console collection or recover discarded
+bytes. A preserved bounded excerpt must remain labeled as an excerpt, not a
+complete native stream.
+
+`target.console_output` defaults to `diagnostics`; `full` explicitly selects full
+retention. Process-output capture and semantic-oracle inputs select full retention
+automatically. An oracle's own console output remains diagnostic unless the caller
+selects `full`. CLI capture exposes the same choice as `--console-output`.
+
+Diagnostics retain at most 4,096 bytes per stream, lowered further to fit the
+request's provenance budget. Text uses UTF-8 replacement decoding; byte counts
+describe the original stream, not the encoded size of the decoded excerpt.
+Full streams have `output_streams` metadata; excerpts have `console_diagnostics`.
+The ordinary evidence resource exposes counts and completeness, not excerpt text.
+Failed captures with no native artifacts can still preserve their diagnostics,
+execution outcome, and analysis failure without creating placeholder log files.
+
+See [workload resources and evidence bounds](workload-resource-policy.md) for the
+remaining native-artifact budget and storage-admission work.
+
 ## Repository layout
 
 The first explicit preservation creates exactly:

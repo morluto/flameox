@@ -26,6 +26,7 @@ WORKLOAD_PYTHON_REQUIREMENTS = {
     "coverage": ("coverage", "coverage", ">=7.14,<8"),
     "memray": ("memray", "memray", ">=1.17"),
     "torch-profiler": ("torch", "torch", ">=2.7"),
+    "triton": ("triton", "triton", ">=3.7,<3.8"),
 }
 
 WORKLOAD_PROVIDER_GUIDANCE = {

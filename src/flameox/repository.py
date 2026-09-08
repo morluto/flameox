@@ -403,6 +403,11 @@ class EvidenceRepository:
                 "mode": capture.mode,
                 "target": {
                     "provider_id": capture.target.provider_id,
+                    **(
+                        {"budget": capture.target.budget.model_dump(mode="json")}
+                        if "budget" in capture.target.model_fields_set
+                        else {}
+                    ),
                     "argument_count": len(capture.target.argv),
                     "environment_override_count": len(capture.target.environment),
                 },
@@ -463,6 +468,16 @@ class EvidenceRepository:
 
     @staticmethod
     def _safe_execution_projection(execution: CaptureExecution) -> dict[str, Any]:
+        diagnostic_counts = {
+            "stdout_observed_bytes",
+            "stderr_observed_bytes",
+            "stdout_retained_bytes",
+            "stderr_retained_bytes",
+            "stdout_omitted_bytes",
+            "stderr_omitted_bytes",
+            "stdout_complete",
+            "stderr_complete",
+        }
         return execution.model_dump(
             mode="json",
             include={
@@ -474,9 +489,19 @@ class EvidenceRepository:
                 "status": True,
                 "failure_code": True,
                 "missing_artifact_roles": True,
+                "artifact_rejections": True,
                 "wall_time_ns": True,
                 "containment": True,
-                "semantic_oracle": {"returncode", "status", "failure_code"},
+                "output_streams": True,
+                "console_diagnostics": diagnostic_counts,
+                "semantic_oracle": {
+                    "returncode": True,
+                    "status": True,
+                    "failure_code": True,
+                    "limit": True,
+                    "output_streams": True,
+                    "console_diagnostics": diagnostic_counts,
+                },
             },
         )
 

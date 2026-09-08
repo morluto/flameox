@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import shutil
 import signal
@@ -11,12 +12,14 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import anyio
 import psutil
 import pytest
 
+from flameox import execution as execution_module
 from flameox.command_binding import ExecutableResolver
 from flameox.execution import (
     ExecutionRequest,
@@ -25,7 +28,7 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
-from flameox.process_models import ExitedProcessTermination
+from flameox.process_models import ExitedProcessTermination, ProcessCancellationCause
 from flameox.runtime_errors import DomainError, ErrorCode
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
@@ -53,6 +56,144 @@ def _process_is_alive(pid: int) -> bool:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["before_start", "protocol_setup", "transport_handshake"])
+async def test_startup_cancellation_retains_receipt_and_settles_acquired_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    pids: list[int] = []
+    receipts: list[ProcessCancelledError] = []
+    cleanup: list[bool] = []
+    scope = anyio.CancelScope()
+    original = asyncio.subprocess.SubprocessStreamProtocol.connection_made
+    original_init = asyncio.subprocess.SubprocessStreamProtocol.__init__
+
+    def initialize(
+        protocol: asyncio.subprocess.SubprocessStreamProtocol,
+        limit: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        original_init(protocol, limit, loop)
+        if phase == "protocol_setup":
+            scope.cancel()
+
+    def connected(
+        protocol: asyncio.subprocess.SubprocessStreamProtocol, transport: asyncio.BaseTransport
+    ) -> None:
+        original(protocol, transport)
+        pids.append(cast(asyncio.SubprocessTransport, transport).get_pid())
+        if phase == "transport_handshake":
+            scope.cancel()
+
+    async def cleaned(complete: bool) -> None:
+        await anyio.sleep(0)
+        cleanup.append(complete)
+
+    monkeypatch.setattr(asyncio.subprocess.SubprocessStreamProtocol, "connection_made", connected)
+    monkeypatch.setattr(asyncio.subprocess.SubprocessStreamProtocol, "__init__", initialize)
+    try:
+        with anyio.fail_after(5), scope:
+            if phase == "before_start":
+                scope.cancel()
+            try:
+                await SubprocessBroker().run(
+                    request(tmp_path, "-c", "import time; time.sleep(30)"), on_cleanup=cleaned
+                )
+            except ProcessCancelledError as error:
+                receipts.append(error)
+                raise
+        assert len(receipts) == 1
+        assert cleanup == [True]
+        assert receipts[0].process.cleanup_complete is True
+        assert receipts[0].process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED
+        assert len(pids) == (0 if phase == "before_start" else 1)
+        assert all(not _process_is_alive(pid) for pid in pids)
+    finally:
+        for pid in pids:
+            if _process_is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        await anyio.sleep(0.1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("observation", [None, "child_peak_rss"])
+async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt(
+    tmp_path: Path, observation: str | None
+) -> None:
+    pid_path = tmp_path / "bridge.pid"
+    receipts: list[ProcessCancelledError] = []
+    execution = request(
+        tmp_path,
+        "-c",
+        "import os, pathlib, time; print('before cancellation', flush=True); "
+        "pathlib.Path('bridge.pid').write_text(str(os.getpid())); time.sleep(30)",
+        observation=observation,
+        timeout_seconds=3,
+    )
+
+    def execute() -> None:
+        try:
+            SubprocessBroker().run_sync(execution)
+        except ProcessCancelledError as error:
+            receipts.append(error)
+            raise
+
+    with anyio.fail_after(6), anyio.CancelScope() as scope:
+
+        async def cancel_started_child() -> None:
+            while not pid_path.exists():
+                await anyio.sleep(0.01)
+            scope.cancel()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(cancel_started_child)
+            await anyio.to_thread.run_sync(execute)
+
+    assert len(receipts) == 1
+    assert receipts[0].stdout == b"before cancellation\n"
+    assert receipts[0].process.cleanup_complete
+    assert receipts[0].process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED
+    assert not _process_is_alive(int(pid_path.read_text()))
+
+
+@pytest.mark.anyio
+async def test_sync_worker_bridge_callbacks_run_on_owning_loop(tmp_path: Path) -> None:
+    owning_loop = asyncio.get_running_loop()
+    callback_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def on_started(pid: int) -> None:
+        assert _process_is_alive(pid)
+        callback_loops.append(asyncio.get_running_loop())
+
+    def execute() -> bytes:
+        outcome = SubprocessBroker().run_sync(
+            request(tmp_path, "-c", "print('bridge output')"), on_started=on_started
+        )
+        return outcome.stdout
+
+    assert await anyio.to_thread.run_sync(execute) == b"bridge output\n"
+    assert callback_loops == [owning_loop]
+
+
+@pytest.mark.anyio
+async def test_sync_worker_bridge_does_not_retry_callback_failure(tmp_path: Path) -> None:
+    started_pids: list[int] = []
+
+    async def on_started(pid: int) -> None:
+        started_pids.append(pid)
+        raise RuntimeError("callback failure")
+
+    def execute() -> None:
+        SubprocessBroker().run_sync(
+            request(tmp_path, "-c", "import time; time.sleep(30)"), on_started=on_started
+        )
+
+    with pytest.raises(RuntimeError, match="callback failure"):
+        await anyio.to_thread.run_sync(execute)
+    assert len(started_pids) == 1
+    assert not _process_is_alive(started_pids[0])
 
 
 @pytest.mark.anyio
@@ -686,6 +827,279 @@ async def test_output_budget_is_shared_between_stdout_and_stderr(
 
 
 @pytest.mark.anyio
+async def test_async_output_sink_retains_exact_bounded_streams(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'o' * 1200); sys.stderr.buffer.write(b'e' * 700)",
+            max_output_bytes=4_000,
+            output_directory=sink,
+            output_root=tmp_path,
+        )
+    )
+
+    assert outcome.output_sink is not None
+    assert outcome.output_sink.complete is True
+    assert outcome.output_sink.stdout_bytes == 1_200
+    assert outcome.output_sink.stderr_bytes == 700
+    assert outcome.output_sink.stdout_path.read_bytes() == b"o" * 1_200
+    assert outcome.output_sink.stderr_path.read_bytes() == b"e" * 700
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_keeps_large_stream_out_of_preview_memory(
+    tmp_path: Path,
+) -> None:
+    sink = tmp_path / "sink"
+    size = 17 * 1024 * 1024
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import os, threading; "
+            f"a=threading.Thread(target=lambda: os.write(1, b'o' * {size})); "
+            f"a.start(); os.write(2, b'e' * {size}); a.join()",
+            max_output_bytes=2 * size + 1,
+            timeout_seconds=15,
+            output_directory=sink,
+            output_root=tmp_path,
+        )
+    )
+
+    assert outcome.output_sink is not None
+    assert outcome.output_sink.stdout_bytes == size
+    assert outcome.output_sink.complete is True
+    assert len(outcome.stdout) == 64 * 1024
+    assert outcome.output_sink.stdout_path.stat().st_size == size
+    assert outcome.output_sink.stderr_bytes == size
+    assert len(outcome.stderr) == 64 * 1024
+    for path, expected in (
+        (outcome.output_sink.stdout_path, b"o"),
+        (outcome.output_sink.stderr_path, b"e"),
+    ):
+        with path.open("rb") as stream:
+            while chunk := stream.read(64 * 1024):
+                assert chunk == expected * len(chunk)
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_marks_partial_prefix_on_limit(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    with pytest.raises(ProcessExecutionError) as failure:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'o' * 1000); "
+                "sys.stderr.buffer.write(b'e' * 1000)",
+                max_output_bytes=1_000,
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+
+    assert failure.value.output_sink is not None
+    assert failure.value.output_sink.complete is False
+    assert failure.value.output_sink.stdout_bytes + failure.value.output_sink.stderr_bytes == 1_000
+    assert failure.value.output_sink.stdout_path.read_bytes() == failure.value.stdout
+    assert failure.value.output_sink.stderr_path.read_bytes() == failure.value.stderr
+    assert failure.value.details["output_sink"]["complete"] is False
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_settles_inherited_writer_on_cancellation(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "sys.stdout.write('before cancel'); sys.stdout.flush(); time.sleep(60)"
+    )
+    task = asyncio.create_task(
+        SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                str(child_pid_path),
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+    )
+    for _ in range(100):
+        if child_pid_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    child_pid = int(child_pid_path.read_text())
+    task.cancel()
+    with pytest.raises(ProcessCancelledError) as cancelled:
+        await asyncio.wait_for(task, timeout=3)
+    assert cancelled.value.output_sink is not None
+    assert cancelled.value.output_sink.complete is False
+    assert cancelled.value.output_sink.stdout_path.read_bytes() == b"before cancel"
+    assert not _process_is_alive(child_pid)
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_does_not_clobber_existing_hardlink(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    sink.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"protected")
+    os.link(victim, sink / "stdout")
+
+    with pytest.raises(FileExistsError):
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "print('must not launch')",
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+    assert victim.read_bytes() == b"protected"
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_does_not_overwrite_existing_regular_file(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    sink.mkdir()
+    existing = sink / "stdout"
+    existing.write_bytes(b"protected")
+
+    with pytest.raises(FileExistsError):
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "print('must not launch')",
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+    assert existing.read_bytes() == b"protected"
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_cancellation_waits_for_blocked_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink = tmp_path / "sink"
+    entered = threading.Event()
+    release = threading.Event()
+    original = execution_module._AsyncOutputSink.write
+
+    def blocked_write(
+        output_sink: execution_module._AsyncOutputSink,
+        stream: Literal["stdout", "stderr"],
+        content: bytes,
+    ) -> None:
+        entered.set()
+        release.wait(2)
+        original(output_sink, stream, content)
+
+    monkeypatch.setattr(execution_module._AsyncOutputSink, "write", blocked_write)
+    task = asyncio.create_task(
+        SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import sys, time; print('blocked', flush=True); time.sleep(30)",
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+    )
+    for _ in range(100):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set()
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    release.set()
+    with pytest.raises(ProcessCancelledError):
+        await asyncio.wait_for(task, timeout=3)
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_close_failure_retains_typed_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class CloseFailure(io.FileIO):
+        def close(self) -> None:
+            super().close()
+            raise OSError("injected close failure")
+
+    def open_with_close_failure(descriptor: int, mode: str, buffering: int) -> io.FileIO:
+        return CloseFailure(descriptor, mode=mode)
+
+    monkeypatch.setattr(os, "fdopen", open_with_close_failure)
+    with pytest.raises(ProcessExecutionError) as failure:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "print('retained', flush=True)",
+                output_directory=tmp_path / "sink",
+                output_root=tmp_path,
+            )
+        )
+    assert failure.value.process.cancellation_cause is ProcessCancellationCause.IO_FAILURE
+    sink = failure.value.output_sink
+    assert sink is not None
+    assert sink.io_error and not sink.complete
+    assert sink.stdout_path.read_bytes() == b"retained\n"
+
+
+@pytest.mark.anyio
+async def test_async_output_sink_write_failure_is_typed_and_preserves_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink = tmp_path / "sink"
+
+    def failing_write(output_sink: object, stream: str, content: bytes) -> None:
+        raise OSError("injected sink failure")
+
+    monkeypatch.setattr(execution_module._AsyncOutputSink, "write", failing_write)
+    with pytest.raises(ProcessExecutionError) as failure:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "print('retained?', flush=True)",
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+
+    assert failure.value.code is ErrorCode.EXECUTION_FAILURE
+    assert failure.value.output_sink is not None
+    assert failure.value.output_sink.complete is False
+    assert failure.value.details["output_sink"]["io_error"] is True
+
+
+def test_observed_output_sink_is_rejected_before_launch(tmp_path: Path) -> None:
+    sink = tmp_path / "sink"
+    with pytest.raises(ValueError, match="unsupported"):
+        request(
+            tmp_path,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'o' * 1200); sys.stderr.buffer.write(b'e' * 700)",
+            max_output_bytes=4_000,
+            output_directory=sink,
+            output_root=tmp_path,
+            observation="child_peak_rss",
+        )
+
+
+@pytest.mark.anyio
 async def test_cancellation_performs_cleanup_before_propagating(
     tmp_path: Path,
 ) -> None:
@@ -810,6 +1224,115 @@ async def test_resource_policy_terminates_process_tree_above_memory_limit(
     process = error.value.details["process"]
     assert process["cancellation_cause"] == "memory_limit_exceeded"
     assert process["resources"]["policy_termination"] == "memory_limit_exceeded"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("exit_before_observation", [False, True])
+async def test_writable_growth_baseline_precedes_subprocess_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_before_observation: bool
+) -> None:
+    output = tmp_path / "early-output"
+    output.mkdir()
+    (output / "existing.bin").write_bytes(b"x" * 200)
+    completed_write = tmp_path / "write-complete"
+    original = asyncio.create_subprocess_exec
+
+    async def return_after_write(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await original(*args, **kwargs)
+        while not completed_write.exists():
+            await anyio.sleep(0.01)
+        if exit_before_observation:
+            await process.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", return_after_write)
+    with pytest.raises(ProcessExecutionError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import pathlib,time; "
+                "pathlib.Path('early-output/new.bin').write_bytes(b'x' * 1024); "
+                "pathlib.Path('write-complete').touch(); "
+                + ("pass" if exit_before_observation else "time.sleep(30)"),
+                timeout_seconds=2,
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    writable_roots=(output,),
+                    minimum_free_bytes=0,
+                    maximum_writable_growth_bytes=64,
+                    sampling_interval_ms=25,
+                ),
+            )
+        )
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
+    assert error.value.process.cleanup_complete is True
+    assert error.value.process.resources is not None
+    assert error.value.process.resources.writable_root_growth_bytes == {str(output): 1024}
+
+
+@pytest.mark.anyio
+async def test_final_resource_sample_retains_observed_rss_availability(tmp_path: Path) -> None:
+    outcome = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import time; time.sleep(0.2)",
+            resource_policy=ResourcePolicy(
+                filesystem_path=tmp_path,
+                minimum_free_bytes=0,
+                sampling_interval_ms=25,
+            ),
+        )
+    )
+    assert outcome.process.resources is not None
+    assert outcome.process.resources.peak_rss_bytes is not None
+    assert outcome.process.resources.peak_rss_bytes > 0
+    assert "peak_rss_bytes" not in outcome.process.resources.unavailable_metrics
+
+
+@pytest.mark.anyio
+async def test_writable_growth_is_checked_after_exit_between_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "late-output"
+    output.mkdir()
+    sampled = anyio.Event()
+    original = shutil.disk_usage
+
+    def sample_disk(path: Any) -> Any:
+        result = original(path)
+        sampled.set()
+        return result
+
+    async def release_writer(_pid: int) -> None:
+        await sampled.wait()
+        (tmp_path / "write-now").touch()
+
+    monkeypatch.setattr(shutil, "disk_usage", sample_disk)
+    with pytest.raises(ProcessExecutionError) as error:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                "import pathlib,time\n"
+                "while not pathlib.Path('write-now').exists(): time.sleep(0.01)\n"
+                "pathlib.Path('late-output/new.bin').write_bytes(b'x' * 1024)\n",
+                timeout_seconds=1,
+                resource_policy=ResourcePolicy(
+                    filesystem_path=tmp_path,
+                    writable_roots=(output,),
+                    minimum_free_bytes=0,
+                    maximum_writable_growth_bytes=64,
+                    sampling_interval_ms=3000,
+                ),
+            ),
+            on_started=release_writer,
+        )
+    assert error.value.code is ErrorCode.LIMIT_EXCEEDED
+    assert error.value.process.resources is not None
+    assert error.value.process.resources.writable_root_growth_bytes == {str(output): 1024}
+    assert error.value.process.cleanup_complete is True
 
 
 @pytest.mark.anyio

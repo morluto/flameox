@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -270,11 +271,16 @@ def _success(value: dict[str, Any], *, resource: ResourceLink | None = None) -> 
     return CallToolResult(content=content, structured_content=value)
 
 
-def _failure(error: RuntimeFailure) -> CallToolResult:
+def _failure(error: RuntimeFailure, *, resource: ResourceLink | None = None) -> CallToolResult:
     detail = {"code": error.code, "message": error.message, "details": error.details}
+    content: list[ContentBlock] = [
+        TextContent(type="text", text=json.dumps(detail, sort_keys=True))
+    ]
+    if resource is not None:
+        content.append(resource)
     return CallToolResult(
         is_error=True,
-        content=[TextContent(type="text", text=json.dumps(detail, sort_keys=True))],
+        content=content,
         structured_content=detail,
     )
 
@@ -417,12 +423,15 @@ def create_server(
                 options = capability.model.model_validate({})
             try:
                 return _success(
-                    runtime(ctx).analyze(
-                        capability.id,
-                        sources,
-                        options.model_dump(),
-                        limits=limits,
-                        continuation=continuation,
+                    await runtime(ctx).run_in_request(
+                        partial(
+                            runtime(ctx).analyze,
+                            capability.id,
+                            sources,
+                            options.model_dump(),
+                            limits=limits,
+                            continuation=continuation,
+                        )
                     )
                 )
             except RuntimeFailure as error:
@@ -518,15 +527,6 @@ def create_server(
                 failed = [
                     item for item in value["capture"]["executions"] if item["status"] != "succeeded"
                 ]
-                if value["capture"]["outcome"]["status"] != "succeeded":
-                    return _failure(
-                        RuntimeFailure(
-                            "EXECUTION_FAILURE",
-                            "One or more capture executions failed; consult exit attribution "
-                            "and preserved diagnostics before inferring workload failure.",
-                            details={"partial_evidence": value, "failed_executions": failed},
-                        )
-                    )
                 preserved = value.get("preserved")
                 link = None
                 if isinstance(preserved, dict):
@@ -535,6 +535,30 @@ def create_server(
                         uri=preserved["uri"],
                         name=f"Evidence {preserved['evidence_id']}",
                         mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
+                    )
+                if value["capture"]["outcome"]["status"] != "succeeded":
+                    return _failure(
+                        RuntimeFailure(
+                            "EXECUTION_FAILURE",
+                            "One or more capture executions failed; consult exit attribution "
+                            "and preserved diagnostics before inferring workload failure.",
+                            details={"partial_evidence": value, "failed_executions": failed},
+                        ),
+                        resource=link,
+                    )
+                analysis_failure = value.get("analysis_failure")
+                if isinstance(analysis_failure, dict):
+                    return _failure(
+                        RuntimeFailure(
+                            str(analysis_failure["code"]),
+                            "Capture completed, but requested analysis failed. "
+                            "Preserve the returned analysis_id if not already preserved, then "
+                            "read the evidence resource and retry "
+                            f"{analysis_tool_name(capability)} with its analysis_sources "
+                            "after addressing analysis_failure; do not rerun the target.",
+                            details={"partial_evidence": value},
+                        ),
+                        resource=link,
                     )
                 return _success(value, resource=link)
             except RuntimeFailure as error:
@@ -632,7 +656,9 @@ def create_server(
     ) -> Annotated[CallToolResult, PreservationOutcome]:
         """Idempotently preserve one session analysis and its native artifacts."""
         try:
-            value = runtime(ctx).preserve_evidence(analysis_id)
+            value = await runtime(ctx).run_in_request(
+                partial(runtime(ctx).preserve_evidence, analysis_id)
+            )
             link = ResourceLink(
                 type="resource_link",
                 uri=value["uri"],
@@ -680,15 +706,18 @@ def create_server(
         """Search an immutable, request-pinned manifest inventory in deterministic order."""
         try:
             return _success(
-                runtime(ctx).query_evidence(
-                    evidence_kind=evidence_kind,
-                    capability_id=capability_id,
-                    provider_id=provider_id,
-                    input_sha256=input_sha256,
-                    created_after=created_after,
-                    created_before=created_before,
-                    limit=limit,
-                    cursor=cursor,
+                await runtime(ctx).run_in_request(
+                    partial(
+                        runtime(ctx).query_evidence,
+                        evidence_kind=evidence_kind,
+                        capability_id=capability_id,
+                        provider_id=provider_id,
+                        input_sha256=input_sha256,
+                        created_after=created_after,
+                        created_before=created_before,
+                        limit=limit,
+                        cursor=cursor,
+                    )
                 )
             )
         except RuntimeFailure as error:
@@ -702,7 +731,9 @@ def create_server(
     )
     async def evidence_manifest(evidence_id: str, ctx: Context) -> str:
         try:
-            manifest = runtime(ctx).read_evidence_agent_projection(evidence_id)
+            manifest = await runtime(ctx).run_in_request(
+                partial(runtime(ctx).read_evidence_agent_projection, evidence_id)
+            )
         except RuntimeFailure as error:
             # Resource handlers raise so missing resources are protocol errors, not content.
             raise FileNotFoundError(f"{error.code}: {error.message}") from error
