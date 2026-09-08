@@ -96,6 +96,67 @@ def test_memray_aggregation_uses_one_bounded_database_thread(tmp_path: Path) -> 
     assert threads == ("1",)
 
 
+def test_memray_large_allocation_totals_survive_aggregation(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    records = (
+        _AllocationRecord(
+            size=2**31,
+            n_allocations=2**63,
+            stack=(("allocate", "work.py", 2), ("caller", "work.py", 1)),
+        ),
+        _AllocationRecord(
+            size=2**31,
+            n_allocations=1,
+            stack=(("allocate", "work.py", 2), ("caller", "work.py", 1)),
+        ),
+    )
+    try:
+        total, coverage = memray_worker._aggregate(records, metric="memory.allocated", state=state)
+        projection = state.finalize()
+    finally:
+        state.close()
+    assert total == 2**32
+    assert coverage.complete
+    assert {row[3] for row in projection.aggregates} == {2**32}
+    assert {row[4] for row in projection.aggregates} == {2**63 + 1}
+    assert projection.edge_rows[0]["weight_value"] == 2**32
+    assert projection.edge_rows[0]["sample_count"] == 2**63 + 1
+    assert projection.stack_rows[0]["weight_value"] == 2**32
+
+
+def test_memray_repeated_recursive_stacks_remain_exact_across_batches(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    records = tuple(
+        _AllocationRecord(
+            size=7,
+            n_allocations=2,
+            stack=(
+                ("leaf", f"{index % 2}.py", 3),
+                ("recursive", "work.py", 2),
+                ("recursive", "work.py", 2),
+                ("root", "work.py", 1),
+            ),
+        )
+        for index in range(1100)
+    )
+    try:
+        total, coverage = memray_worker._aggregate(
+            records, metric="memory.high_watermark", state=state
+        )
+        projection = state.finalize()
+    finally:
+        state.close()
+    assert total == 7700
+    assert coverage.complete
+    functions = {row["frame_id"]: row["function"] for row in projection.frame_rows}
+    aggregates = {functions[row[1]]: row[2:] for row in projection.aggregates}
+    assert aggregates["recursive"] == (0, 15400, 4400)
+    assert aggregates["root"] == (0, 7700, 2200)
+    assert len(projection.stack_rows) == 2
+    assert {row["weight_value"] for row in projection.stack_rows} == {3850}
+    assert sum(row["weight_value"] for row in projection.edge_rows) == 23100
+
+
 def test_memray_aggregation_reports_record_frame_and_depth_coverage(tmp_path: Path) -> None:
     state = _state(
         tmp_path,

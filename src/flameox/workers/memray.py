@@ -71,8 +71,10 @@ class _AggregationState:
         self.run_id = run_id
         self.artifact_id = artifact_id
         self.frame_cache: dict[tuple[str, str, int], str] = {}
-        self.contributions = 0
-        self.pending_stack: tuple[str, tuple[str, ...], int, int] | None = None
+        self.frame_batch: dict[str, dict[str, Any]] = {}
+        self.aggregate_batch: list[dict[str, Any]] = []
+        self.stack_batch: list[dict[str, Any]] = []
+        self.stack_batch_frames = 0
         self.connection = duckdb.connect(
             ":memory:",
             config={
@@ -94,18 +96,18 @@ class _AggregationState:
             CREATE TABLE aggregates (
                 metric TEXT NOT NULL,
                 frame_id TEXT NOT NULL,
-                self_value INTEGER NOT NULL,
-                inclusive_value INTEGER NOT NULL,
-                samples INTEGER NOT NULL,
-                occurrences INTEGER NOT NULL,
+                self_value BIGINT NOT NULL,
+                inclusive_value BIGINT NOT NULL,
+                samples UBIGINT NOT NULL,
+                occurrences BIGINT NOT NULL,
                 PRIMARY KEY (metric, frame_id)
             );
             CREATE TABLE edges (
                 metric TEXT NOT NULL,
                 parent_frame_id TEXT NOT NULL,
                 child_frame_id TEXT NOT NULL,
-                weight_value INTEGER NOT NULL,
-                samples INTEGER NOT NULL,
+                weight_value BIGINT NOT NULL,
+                samples UBIGINT NOT NULL,
                 PRIMARY KEY (metric, parent_frame_id, child_frame_id)
             );
             CREATE TABLE stacks (
@@ -113,8 +115,8 @@ class _AggregationState:
                 metric TEXT NOT NULL,
                 frame_ids_json TEXT NOT NULL,
                 leaf_frame_id TEXT NOT NULL,
-                weight_value INTEGER NOT NULL,
-                samples INTEGER NOT NULL
+                weight_value BIGINT NOT NULL,
+                samples UBIGINT NOT NULL
             );
             CREATE TABLE stack_frames (
                 stack_id TEXT NOT NULL,
@@ -145,40 +147,66 @@ class _AggregationState:
                     "line": raw_frame[2],
                 }
             )
-            self.connection.execute(
-                "INSERT OR IGNORE INTO frames VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    frame_id,
-                    raw_frame[0],
-                    normalized,
-                    raw_frame[2],
-                    frame_source_state_id,
-                    symbolization,
-                ),
-            )
+            self.frame_batch[frame_id] = {
+                "frame_id": frame_id,
+                "function": raw_frame[0],
+                "file": normalized,
+                "line": raw_frame[2],
+                "source_state_id": frame_source_state_id,
+                "symbolization": symbolization,
+            }
             if len(self.frame_cache) < self.limits.max_frames:
                 self.frame_cache[raw_frame] = frame_id
-        self.connection.execute(
+        self.aggregate_batch.append(
+            {
+                "metric": metric,
+                "frame_id": frame_id,
+                "self_value": contribution_bytes if is_leaf else 0,
+                "inclusive_value": contribution_bytes,
+                "samples": allocations,
+            }
+        )
+        if len(self.aggregate_batch) >= 1_024:
+            self._flush_aggregates()
+        return frame_id
+
+    def _execute_batch(self, rows: list[dict[str, Any]], query: str) -> None:
+        if not rows:
+            return
+        batch = pa.table(
+            {
+                name: pa.array(
+                    [row[name] for row in rows], type=pa.uint64() if name == "samples" else None
+                )
+                for name in rows[0]
+            }
+        )
+        self.connection.register("memray_batch", batch)
+        try:
+            self.connection.execute(query)
+        finally:
+            self.connection.unregister("memray_batch")
+
+    def _flush_aggregates(self) -> None:
+        self._execute_batch(
+            list(self.frame_batch.values()),
+            "INSERT OR IGNORE INTO frames SELECT * FROM memray_batch",
+        )
+        self.frame_batch.clear()
+        self._execute_batch(
+            self.aggregate_batch,
             """
-            INSERT INTO aggregates VALUES (?, ?, ?, ?, ?, 1)
+            INSERT INTO aggregates
+            SELECT metric, frame_id, sum(self_value), sum(inclusive_value), sum(samples), count(*)
+            FROM memray_batch GROUP BY metric, frame_id
             ON CONFLICT(metric, frame_id) DO UPDATE SET
                 self_value = self_value + excluded.self_value,
                 inclusive_value = inclusive_value + excluded.inclusive_value,
                 samples = samples + excluded.samples,
-                occurrences = occurrences + 1
+                occurrences = occurrences + excluded.occurrences
             """,
-            (
-                metric,
-                frame_id,
-                contribution_bytes if is_leaf else 0,
-                contribution_bytes,
-                allocations,
-            ),
         )
-        self.contributions += 1
-        if self.contributions % 1_024 == 0:
-            self._check_budget()
-        return frame_id
+        self.aggregate_batch.clear()
 
     def add_stack(
         self,
@@ -190,33 +218,6 @@ class _AggregationState:
     ) -> None:
         if not frame_ids:
             return
-        pending = self.pending_stack
-        if pending is not None and pending[:2] == (metric, frame_ids):
-            self.pending_stack = (
-                metric,
-                frame_ids,
-                pending[2] + weight_value,
-                pending[3] + samples,
-            )
-            return
-        self._flush_stack()
-        self.pending_stack = (metric, frame_ids, weight_value, samples)
-
-    def _flush_stack(self) -> None:
-        if self.pending_stack is None:
-            return
-        metric, frame_ids, weight_value, samples = self.pending_stack
-        self.pending_stack = None
-        for parent_frame_id, child_frame_id in pairwise(frame_ids):
-            self.connection.execute(
-                """
-                INSERT INTO edges VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(metric, parent_frame_id, child_frame_id) DO UPDATE SET
-                    weight_value = weight_value + excluded.weight_value,
-                    samples = samples + excluded.samples
-                """,
-                (metric, parent_frame_id, child_frame_id, weight_value, samples),
-            )
         stack_id = digest_model(
             {
                 "artifact_id": self.artifact_id,
@@ -224,31 +225,82 @@ class _AggregationState:
                 "frame_ids": frame_ids,
             }
         )
-        self.connection.execute(
+        self.stack_batch.append(
+            {
+                "stack_id": stack_id,
+                "metric": metric,
+                "frame_ids": frame_ids,
+                "weight_value": weight_value,
+                "samples": samples,
+            }
+        )
+        self.stack_batch_frames += len(frame_ids)
+        if self.stack_batch_frames >= 1_024:
+            self._flush_navigation()
+
+    def _flush_navigation(self) -> None:
+        edges: list[dict[str, Any]] = []
+        stacks: list[dict[str, Any]] = []
+        members: list[dict[str, Any]] = []
+        for stack in self.stack_batch:
+            frame_ids = stack["frame_ids"]
+            for parent, child in pairwise(frame_ids):
+                edges.append(
+                    {
+                        "metric": stack["metric"],
+                        "parent_frame_id": parent,
+                        "child_frame_id": child,
+                        "weight_value": stack["weight_value"],
+                        "samples": stack["samples"],
+                    }
+                )
+            stacks.append(
+                {
+                    "stack_id": stack["stack_id"],
+                    "metric": stack["metric"],
+                    "frame_ids_json": json.dumps(frame_ids, separators=(",", ":")),
+                    "leaf_frame_id": frame_ids[-1],
+                    "weight_value": stack["weight_value"],
+                    "samples": stack["samples"],
+                }
+            )
+            members.extend(
+                {"stack_id": stack["stack_id"], "position": position, "frame_id": frame_id}
+                for position, frame_id in enumerate(frame_ids)
+            )
+        self._execute_batch(
+            edges,
             """
-            INSERT INTO stacks VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO edges
+            SELECT metric, parent_frame_id, child_frame_id, sum(weight_value), sum(samples)
+            FROM memray_batch GROUP BY metric, parent_frame_id, child_frame_id
+            ON CONFLICT(metric, parent_frame_id, child_frame_id) DO UPDATE SET
+                weight_value = weight_value + excluded.weight_value,
+                samples = samples + excluded.samples
+            """,
+        )
+        self._execute_batch(
+            stacks,
+            """
+            INSERT INTO stacks
+            SELECT stack_id, metric, frame_ids_json, leaf_frame_id, sum(weight_value), sum(samples)
+            FROM memray_batch GROUP BY stack_id, metric, frame_ids_json, leaf_frame_id
             ON CONFLICT(stack_id) DO UPDATE SET
                 weight_value = weight_value + excluded.weight_value,
                 samples = samples + excluded.samples
             """,
-            (
-                stack_id,
-                metric,
-                json.dumps(frame_ids, separators=(",", ":")),
-                frame_ids[-1],
-                weight_value,
-                samples,
-            ),
         )
-        self.connection.executemany(
-            "INSERT OR IGNORE INTO stack_frames VALUES (?, ?, ?)",
-            ((stack_id, position, frame_id) for position, frame_id in enumerate(frame_ids)),
+        self._execute_batch(
+            members,
+            "INSERT OR IGNORE INTO stack_frames SELECT DISTINCT * FROM memray_batch",
         )
+        self.stack_batch.clear()
+        self.stack_batch_frames = 0
 
     def finalize(self) -> _AggregationProjection:
-        self._flush_stack()
+        self._flush_aggregates()
+        self._flush_navigation()
         self.connection.commit()
-        self._check_budget()
         self.connection.execute(
             """
             CREATE TEMP TABLE selected_frames (frame_id TEXT PRIMARY KEY);
@@ -481,12 +533,6 @@ class _AggregationState:
 
     def close(self) -> None:
         self.connection.close()
-
-    def _check_budget(self) -> None:
-        # The isolated worker's address-space limit bounds this in-memory database.
-        # Committing here would turn every 1,024 contributions into a separate
-        # DuckDB transaction and dominate high-cardinality captures.
-        return
 
 
 def _aggregate(

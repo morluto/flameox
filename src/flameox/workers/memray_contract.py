@@ -7,9 +7,6 @@ from pydantic import Field, TypeAdapter, model_validator
 from flameox.models import ContractModel
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId, WorkerOutputFile
 
-MEMRAY_EXTRACTOR_NAME = "memray"
-MEMRAY_EXTRACTOR_VERSION = "7"
-
 
 class MemrayExtractionLimits(ContractModel):
     max_input_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
@@ -136,6 +133,6 @@ MEMRAY_WORKER = WorkerDefinition(
     request=TypeAdapter(MemrayWorkerRequest),
     response=TypeAdapter(MemrayWorkerResult),
     name="Memray",
-    implementation=f"flameox.workers.memray/v{MEMRAY_EXTRACTOR_VERSION}",
+    implementation="flameox.workers.memray",
     timeout_seconds=300,
 )
