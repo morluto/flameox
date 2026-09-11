@@ -14,8 +14,14 @@ from flameox.source_files import bundle_digest
 type Digest = Annotated[str, Field(pattern=LOWERCASE_SHA256_PATTERN)]
 type Nonempty = Annotated[str, Field(min_length=1)]
 type Count = Annotated[int, Field(ge=0)]
-type Argument = Annotated[str, Field(min_length=1, pattern=r"^[^\x00]+$")]
+type Argument = Annotated[str, Field(max_length=16_384, pattern=r"^[^\x00]*$")]
 type Argv = Annotated[list[Argument], Field(min_length=1)]
+
+
+def _valid_argv(value: list[str]) -> list[str]:
+    if not value[0]:
+        raise ValueError("argv[0] must identify an executable")
+    return value
 
 
 class EvidenceModel(BaseModel):
@@ -149,6 +155,11 @@ class OracleOutcome(EvidenceModel):
     console_diagnostics: ConsoleDiagnostics | None = None
     limit: ExecutionLimit | None = None
 
+    @field_validator("argv")
+    @classmethod
+    def valid_argv(cls, value: list[str]) -> list[str]:
+        return _valid_argv(value)
+
 
 class ArtifactRejection(EvidenceModel):
     role: Nonempty
@@ -175,7 +186,14 @@ class CaptureExecution(EvidenceModel):
     returncode_scope: Literal["workload", "collector"]
     workload_returncode: int | None
     executable_sha256: Digest
+    collector_executable_sha256: Digest
+    workload_executable_sha256: Digest
     artifact_rejections: list[ArtifactRejection] = Field(default_factory=list)
+
+    @field_validator("argv", "capture_argv")
+    @classmethod
+    def valid_argv(cls, value: list[str]) -> list[str]:
+        return _valid_argv(value)
 
     @field_validator("cwd")
     @classmethod
@@ -221,6 +239,7 @@ class AnalysisRequest(EvidenceModel):
     failure: AnalysisFailure | None = None
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
     limits: dict[str, JsonValue] = Field(default_factory=dict)
+    projection_implementation: dict[str, Nonempty] = Field(default_factory=dict)
 
 
 class LogicalSource(InputIdentity):

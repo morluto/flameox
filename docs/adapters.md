@@ -152,6 +152,12 @@ descriptor-bound reads. Workers receive only declared inputs and budgets.
 Conversions are cached for the server session by input digest and provider
 version.
 
+Perf conversion accepts output only after `perf script` exits successfully. Its callchain parser
+preserves complete demangled symbol text and explicit unknown frames, so unresolved leaves do not
+transfer samples to callers. Failed or ambiguous decoder output is never installed in the session
+conversion cache. A nonzero decoder exit reports at most 4 KiB of replacement-decoded stderr with
+retained and omitted byte counts, plus its typed exit or signal termination.
+
 Nsight Systems prefers `parquetdir` export. Flameox does not read or create a
 Nsight SQLite export. Memray aggregation streams bounded records or uses
 session-local in-memory DuckDB; it does not create a temporary SQLite database.

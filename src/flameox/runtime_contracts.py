@@ -20,6 +20,7 @@ from flameox.environment_policy import blocked_environment_override
 MAX_INPUTS = 32
 MAX_ROWS = 1_000
 MAX_RESULT_BYTES = 256 * 1024
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 LOWERCASE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 SEMANTIC_ORACLE_STDOUT_ENV = "FLAMEOX_CAPTURE_STDOUT"
 SEMANTIC_ORACLE_STDERR_ENV = "FLAMEOX_CAPTURE_STDERR"
@@ -316,8 +317,24 @@ class RequestLimits(StrictModel):
         effective = startup.model_dump()
         for name in self.model_fields_set:
             requested = getattr(self, name)
-            if requested > getattr(startup, name):
-                raise RuntimeFailure("LIMIT_EXCEEDED", f"{name} cannot raise the server limit")
+            ceiling = getattr(startup, name)
+            if requested > ceiling:
+                raise RuntimeFailure(
+                    "LIMIT_EXCEEDED",
+                    f"{name} cannot raise the server limit",
+                    details={
+                        "field": name,
+                        "requested": requested,
+                        "effective_ceiling": ceiling,
+                        "scope": "request_limit",
+                        "mutability": "lower_only",
+                        "safe_retry": {name: ceiling},
+                        "recovery": {
+                            "action": "restart_reconnect",
+                            "startup_setting": name,
+                        },
+                    },
+                )
             effective[name] = requested
         return RequestLimits.model_validate(effective)
 
@@ -815,7 +832,9 @@ class ExperimentDesign(StrictModel):
         le=100,
     )
     seed: int = Field(
-        description="Seed for reproducible case ordering and confidence-interval resampling."
+        description="Seed for reproducible case ordering and confidence-interval resampling.",
+        ge=-MAX_SAFE_JSON_INTEGER,
+        le=MAX_SAFE_JSON_INTEGER,
     )
     metric: Literal["wall_time_ns"] = Field(
         description="Per-execution metric used for paired differences."
@@ -856,8 +875,10 @@ class ExperimentDesign(StrictModel):
 
 
 def _valid_argv(value: list[str]) -> list[str]:
-    if any(not item or "\x00" in item or len(item) > 16_384 for item in value):
-        raise ValueError("argv entries must be non-empty, bounded, and contain no NUL")
+    if not value[0]:
+        raise ValueError("argv[0] must identify an executable")
+    if any("\x00" in item or len(item) > 16_384 for item in value):
+        raise ValueError("argv entries must be bounded and contain no NUL")
     return value
 
 

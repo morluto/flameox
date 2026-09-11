@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,6 +33,7 @@ from flameox.mcp.capability_tools import (
     analysis_tool_name,
     capture_tool_name,
 )
+from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime_contracts import (
@@ -50,6 +52,7 @@ from flameox.runtime_contracts import (
 )
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
+from flameox.source_files import NativeSource, sha256_file
 from flameox.stateless import AnalysisRuntime
 from flameox.workers.v8_profiles_contract import V8_PROFILE_WORKER, V8ProfileRequest
 
@@ -108,6 +111,26 @@ def test_experiment_commands_use_the_same_strict_validation_as_capture_targets(
 ) -> None:
     with pytest.raises(ValidationError):
         factory()
+
+
+@pytest.mark.unit
+def test_experiment_seed_rejects_values_outside_canonical_json_domain() -> None:
+    def design(seed: int) -> ExperimentDesign:
+        return ExperimentDesign(
+            cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
+            blocks=1,
+            seed=seed,
+            metric="wall_time_ns",
+            estimand="mean_difference",
+            practical_threshold=0,
+        )
+
+    design(2**53 - 1)
+    design(-(2**53) + 1)
+    with pytest.raises(ValidationError, match="less than or equal to"):
+        design(2**53)
+    with pytest.raises(ValidationError, match="greater than or equal to"):
+        design(-(2**53))
 
 
 @pytest.mark.unit
@@ -574,6 +597,18 @@ def test_request_limits_can_only_lower_explicit_startup_bounds() -> None:
     with pytest.raises(RuntimeFailure) as failure:
         RequestLimits(timeout_seconds=11).lowered_against(startup)
     assert failure.value.code == "LIMIT_EXCEEDED"
+    assert failure.value.details == {
+        "field": "timeout_seconds",
+        "requested": 11,
+        "effective_ceiling": 10,
+        "scope": "request_limit",
+        "mutability": "lower_only",
+        "safe_retry": {"timeout_seconds": 10},
+        "recovery": {
+            "action": "restart_reconnect",
+            "startup_setting": "timeout_seconds",
+        },
+    }
     with pytest.raises(RuntimeFailure) as failure:
         RequestLimits(max_memory_bytes=1024**3).lowered_against(startup)
     assert failure.value.code == "LIMIT_EXCEEDED"
@@ -763,9 +798,124 @@ def test_provider_pages_use_one_stable_projection_limit(tmp_path: Path) -> None:
     finally:
         runtime.close()
 
-    assert limits_seen == [1001, 1001]
+    assert limits_seen == [1001]
     assert first["blocks"][1]["rows"] == [{"index": 0}, {"index": 1}, {"index": 2}]
     assert second["blocks"][1]["rows"] == [{"index": 3}, {"index": 4}, {"index": 5}]
+
+
+@pytest.mark.unit
+def test_projection_cache_binds_implementation_identity(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    calls = 0
+    implementation = {"version": "one"}
+
+    def analyze(*_args: Any, max_rows: int, **_kwargs: Any) -> ProviderAnalysis:
+        nonlocal calls
+        calls += 1
+        return ProviderAnalysis(
+            provider_id="test",
+            provider_version=implementation["version"],
+            blocks=[
+                {"type": "metrics", "values": {}},
+                {"type": "table", "rows": [{"index": index} for index in range(max_rows)]},
+            ],
+            rows_observed=max_rows + 1,
+            complete=False,
+            limitations=[],
+        )
+
+    runtime.benchmarks.analyze = analyze  # type: ignore[method-assign]
+    runtime._projection_runtime_identity = (  # type: ignore[method-assign]
+        lambda *_args: {"test": implementation["version"]}
+    )
+    try:
+        first = runtime.analyze(
+            "benchmark.summary",
+            [PathSource(path=str(artifact), format="samples")],
+            {},
+            limits=RequestLimits(max_rows=2),
+        )
+        runtime.analyses.clear()
+        runtime.analyze(
+            "benchmark.summary",
+            [PathSource(path=str(artifact), format="samples")],
+            {},
+            limits=RequestLimits(max_rows=2),
+        )
+        assert calls == 1
+
+        implementation["version"] = "two"
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "benchmark.summary",
+                [PathSource(path=str(artifact), format="samples")],
+                {},
+                limits=RequestLimits(max_rows=2),
+                continuation=first["continuation"],
+            )
+        assert failure.value.code == "INVALID_INPUT"
+        runtime.analyze(
+            "benchmark.summary",
+            [PathSource(path=str(artifact), format="samples")],
+            {},
+            limits=RequestLimits(max_rows=2),
+        )
+        assert calls == 2
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_projection_cache_is_bounded_and_returns_defensive_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    projection = ProviderAnalysis(
+        provider_id="test",
+        provider_version="1",
+        blocks=[{"type": "metrics", "values": {}}, {"type": "table", "rows": [{"x": 1}]}],
+        rows_observed=1,
+        complete=True,
+        limitations=[],
+    )
+    serialized_size = len(
+        canonical_bytes(
+            {
+                "provider_id": projection.provider_id,
+                "provider_version": projection.provider_version,
+                "blocks": projection.blocks,
+                "rows_observed": projection.rows_observed,
+                "complete": projection.complete,
+                "limitations": projection.limitations,
+            }
+        )
+    )
+    try:
+        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTIONS", 2)
+        runtime._cache_projection("one", projection)
+        runtime._cache_projection("two", projection)
+        runtime._cache_projection("three", projection)
+        assert list(runtime.projections) == ["two", "three"]
+
+        returned = runtime._cached_projection("three")
+        assert returned is not None
+        returned.blocks[-1]["rows"][0]["x"] = 9
+        restored = runtime._cached_projection("three")
+        assert restored is not None
+        assert restored.blocks[-1]["rows"][0]["x"] == 1
+
+        runtime.projections.clear()
+        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTIONS", 16)
+        monkeypatch.setattr(
+            "flameox.stateless.MAX_SESSION_PROJECTION_BYTES", serialized_size + 1
+        )
+        runtime._cache_projection("one", projection)
+        runtime._cache_projection("two", projection)
+        assert list(runtime.projections) == ["two"]
+    finally:
+        runtime.close()
 
 
 @pytest.mark.process
@@ -1588,6 +1738,43 @@ def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_value
     assert any("numeric 'elements'" in item for item in result["limitations"])
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("inputs", "measurements", "reason"),
+    [
+        (
+            (1_000_000_000_000_000, 1_000_000_000_000_001),
+            (1_000.0, 2_000.0),
+            "insufficient log-space input separation",
+        ),
+        ((1_024, 1_025), (2_000.0, 1_000.0), "finite numeric range"),
+    ],
+)
+def test_benchmark_scaling_reports_numerical_limits_without_crashing(
+    inputs: tuple[int, int], measurements: tuple[float, float], reason: str
+) -> None:
+    result = scaling_projection(
+        [
+            {
+                "benchmark": "operation",
+                "unit": "ns",
+                "dimensions": {"elements": str(input_value)},
+                "value_float": measurement,
+            }
+            for input_value, measurement in zip(inputs, measurements, strict=True)
+        ],
+        {"input_dimension": "elements"},
+        provider_id="test",
+        provider_version="1",
+        max_rows=10,
+    )
+
+    row = result.blocks[1]["rows"][0]
+    assert row["status"] == "inconclusive"
+    assert row["exponent"] is None
+    assert reason in row["reason"]
+
+
 @pytest.mark.process
 def test_benchmark_scaling_keeps_non_axis_dimensions_as_distinct_series(tmp_path: Path) -> None:
     artifact = tmp_path / "variants.samples.json"
@@ -1934,6 +2121,103 @@ def test_native_nsight_report_uses_cached_parquetdir_export(
     assert second["blocks"][1]["rows"] == first["blocks"][1]["rows"]
     assert counter.read_text().splitlines() == ["1"]
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.process
+def test_perf_conversion_preserves_demangled_and_unknown_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "print('app 1 [000] 1.000: cycles:')\n"
+        "print('        7f01 void alpha<int>(int, int)+0x10/0x40 (/opt/app)')\n"
+        "print()\n"
+        "print('app 1 [000] 1.001: cycles:')\n"
+        "print('        7f02 [unknown] ([unknown])')\n"
+        "print('        7f03 parent function()+0x20 (/opt/app)')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        collapsed, _ = runtime._perf_collapsed(source, RequestLimits())
+        lines = collapsed.read_text().splitlines()
+    finally:
+        runtime.close()
+
+    assert "void alpha<int>(int, int) 1" in lines
+    assert "parent function();[unknown] 1" in lines
+
+
+@pytest.mark.process
+def test_perf_conversion_rejects_and_does_not_cache_failed_decoder_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('app 1 [000] 1.000: cycles:')\n"
+        "print('        7f01 leaf+0x10 (/opt/app)')\n"
+        "print('decoder failed', file=sys.stderr)\n"
+        "raise SystemExit(7)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime._perf_collapsed(source, RequestLimits())
+        assert failure.value.code == "DECODE_FAILURE"
+        assert failure.value.details["decoder_exit_code"] == 7
+        assert failure.value.details["decoder_stderr"] == "decoder failed\n"
+        assert failure.value.details["decoder_stderr_retained_bytes"] == 15
+        assert failure.value.details["decoder_stderr_omitted_bytes"] == 0
+        assert not list((runtime.scratch / "conversions").glob("*.folded"))
+        assert runtime.scratch_artifacts == {}
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+def test_perf_conversion_reports_signalled_decoder_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, signal\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime._perf_collapsed(source, RequestLimits())
+        assert failure.value.details["decoder_exit_code"] is None
+        assert failure.value.details["decoder_termination"] == {
+            "kind": "signalled",
+            "signal": signal.SIGTERM,
+        }
+    finally:
+        runtime.close()
 
 
 def _write_otlp_trace(path: Path, *, include_event: bool = False) -> None:
@@ -2860,10 +3144,24 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
             expected.append(analysis_tool_name(capability))
             if compatible_capture_providers(capability):
                 expected.append(capture_tool_name(capability))
-        expected.extend(["preserve_evidence", "query_evidence"])
+        expected.extend(["preserve_evidence", "rescue_evidence", "query_evidence"])
         assert {tool.name for tool in tools} == set(expected)
         assert all(tool.output_schema is not None for tool in tools)
         by_name = {tool.name: tool for tool in tools}
+        rescue_output = by_name["rescue_evidence"].output_schema
+        assert rescue_output is not None
+        assert set(rescue_output["$defs"]["RescueEnvelope"]["properties"]) >= {
+            "evidence_id",
+            "uri",
+            "artifact_count",
+            "rescue_destination",
+            "next_action",
+        }
+        rescue_action = rescue_output["$defs"]["RescueActionEnvelope"]["properties"]
+        assert rescue_action["kind"]["const"] == "restart_reconnect"
+        assert rescue_action["environment"]["$ref"].endswith(
+            "/RescueEnvironmentEnvelope"
+        )
         multi_source_capabilities = {
             "artifact.preview": (1, 32),
             "benchmark.summary": (1, 32),
@@ -3279,7 +3577,7 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             await session.validate_tool_result("capture_process_output", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 49
+        assert len(tools.tools) == 50
         assert "preview_artifact" in [tool.name for tool in tools.tools]
         assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)
@@ -3349,6 +3647,44 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
                 await restarted.read_resource(f"flameox://evidence/{'0' * 64}")
 
     anyio.run(exercise)
+
+
+@pytest.mark.integration
+def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path) -> None:
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    (configured / "unexpected").write_text("corrupt")
+    rescue = tmp_path / "rescue"
+    artifact = tmp_path / "input.json"
+    artifact.write_text('[{"value": 1}]')
+
+    async def exercise() -> str:
+        async with Client(
+            create_server(evidence_directory=configured), raise_exceptions=True
+        ) as client:
+            analyzed = await client.call_tool(
+                "preview_artifact", {"sources": [{"kind": "path", "path": str(artifact)}]}
+            )
+            rescued = await client.call_tool(
+                "rescue_evidence",
+                {
+                    "analysis_id": analyzed.structured_content["analysis_id"],
+                    "destination": str(rescue),
+                },
+            )
+            assert rescued.is_error is False
+            assert not any(block.type == "resource_link" for block in rescued.content)
+            assert rescued.structured_content["next_action"]["environment"] == {
+                "FLAMEOX_DATA_DIR": str(rescue)
+            }
+            return str(rescued.structured_content["evidence_id"])
+
+    evidence_id = anyio.run(exercise)
+    reopened = AnalysisRuntime(evidence_directory=rescue)
+    try:
+        assert reopened.read_evidence(evidence_id)["evidence_id"] == evidence_id
+    finally:
+        reopened.close()
 
 
 @pytest.mark.integration
@@ -3528,6 +3864,32 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
             )
             durable = json.loads((bundle / "data" / "analysis.json").read_text())
             assert durable["provider"]["id"] == provider_id
+            execution = manifest["body"]["capture_request"]["executions"][0]
+            assert execution["collector_executable_sha256"] == execution["executable_sha256"]
+            assert execution["workload_executable_sha256"] == execution["executable_sha256"]
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+def test_direct_capture_executes_and_preserves_empty_nonprogram_argument(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-c", "import sys; print(repr(sys.argv[1]))", ""],
+                    cwd=str(tmp_path),
+                    provider_id="direct",
+                ),
+                "artifact.preview",
+            )
+            assert result["blocks"][1]["rows"][0]["text"] == "''"
+            ref = runtime.preserve_evidence(result["analysis_id"])
+            manifest = runtime.read_evidence(ref["evidence_id"])
+            assert manifest["body"]["capture_request"]["executions"][0]["argv"][-1] == ""
         finally:
             runtime.close()
 

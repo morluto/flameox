@@ -134,8 +134,10 @@ class ExecutionRequest(ContractModel):
     def validate_argv(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
             raise ValueError("argv must include an executable")
-        if any(not item or "\x00" in item for item in value):
-            raise ValueError("argv entries must be non-empty and cannot contain NUL")
+        if not value[0]:
+            raise ValueError("argv[0] must identify an executable")
+        if any("\x00" in item for item in value):
+            raise ValueError("argv entries cannot contain NUL")
         return value
 
     @model_validator(mode="after")

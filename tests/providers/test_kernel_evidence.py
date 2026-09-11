@@ -102,8 +102,8 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path)
 def test_kernel_compare_requires_complete_semantic_identity(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
-    baseline.write_text(json.dumps(_kernel_document(1.0)))
-    changed = _kernel_document(2.0)
+    baseline.write_text(json.dumps(_kernel_document(0.0001)))
+    changed = _kernel_document(0.0002)
     changed_output = changed["cases"][0]["outputs"][0]  # type: ignore[index]
     changed_output["shape"] = [1_024]
     changed_output["dtype"] = "int8"
@@ -124,9 +124,12 @@ def test_kernel_compare_requires_complete_semantic_identity(tmp_path: Path) -> N
 
     assert result["blocks"][1]["rows"] == []
     assert result["blocks"][0]["values"] == {
+        "status": "consistent",
         "input_count": 2,
         "compatible_metric_count": 0,
         "unmatched_identity_count": 2,
+        "consistency_failure_count": 0,
+        "consistency_failures": [],
     }
 
 
@@ -147,6 +150,119 @@ def test_kernel_validation_rejects_an_unknown_native_schema(tmp_path: Path) -> N
         runtime.close()
 
     assert failure.value.code == "UNSUPPORTED_FORMAT"
+
+
+def test_kernel_validation_rejects_coerced_coverage_and_duplicate_metrics(
+    tmp_path: Path,
+) -> None:
+    coverage = _kernel_document(0.0)
+    coverage["coverage_complete"] = "false"
+    duplicate = _kernel_document(0.0)
+    duplicate_case = duplicate["cases"][0]  # type: ignore[index]
+    duplicate_output = duplicate_case["outputs"][0]
+    duplicate_output["metrics"].append(dict(duplicate_output["metrics"][0]))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        for name, document in (("coverage", coverage), ("duplicate", duplicate)):
+            artifact = tmp_path / f"{name}.json"
+            artifact.write_text(json.dumps(document))
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "kernel.validation",
+                    [PathSource(path=str(artifact), format="kernel-validation")],
+                    {},
+                )
+            assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+def test_kernel_validation_preserves_outputless_cases(tmp_path: Path) -> None:
+    artifact = tmp_path / "outputless.json"
+    document = _kernel_document(0.0, status="fail")
+    case = document["cases"][0]  # type: ignore[index]
+    case["status"] = "unsupported"
+    case["outputs"] = []
+    artifact.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "kernel.validation",
+            [PathSource(path=str(artifact), format="kernel-validation")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["coverage"] == {"rows_returned": 1, "rows_observed": 1, "complete": True}
+    assert result["blocks"][1]["rows"] == [
+        {
+            "evidence_kind": "case",
+            "case_id": "square-fp32-128",
+            "case_status": "unsupported",
+            "dimensions": {"size": 128},
+            "seed": 42,
+            "device": "cuda:0-sm86",
+        }
+    ]
+
+
+def test_kernel_validation_defaults_omitted_coverage_to_incomplete(tmp_path: Path) -> None:
+    artifact = tmp_path / "validation.json"
+    document = _kernel_document(0.0)
+    del document["coverage_complete"]
+    artifact.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "kernel.validation",
+            [PathSource(path=str(artifact), format="kernel-validation")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["blocks"][0]["values"]["coverage_complete"] is False
+
+
+def test_kernel_validation_marks_producer_contradictions_inconclusive(tmp_path: Path) -> None:
+    artifact = tmp_path / "contradictory.json"
+    document = _kernel_document(10.0)
+    artifact.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "kernel.validation",
+            [PathSource(path=str(artifact), format="kernel-validation")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    metrics = result["blocks"][0]["values"]
+    assert metrics["status"] == "inconclusive"
+    assert metrics["producer_status"] == "pass"
+    assert metrics["consistency_failure_count"] == 1
+    assert metrics["consistency_failures"][0]["rule"] == "numeric_comparator"
+
+    comparison = AnalysisRuntime(evidence_directory=tmp_path / "comparison-store")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(_kernel_document(0.0)))
+    try:
+        compared = comparison.analyze(
+            "kernel.compare",
+            [
+                PathSource(path=str(baseline), format="kernel-validation"),
+                PathSource(path=str(artifact), format="kernel-validation"),
+            ],
+            {},
+        )
+    finally:
+        comparison.close()
+    compared_metrics = compared["blocks"][0]["values"]
+    assert compared_metrics["status"] == "inconclusive"
+    assert compared_metrics["consistency_failure_count"] == 1
+    assert compared_metrics["consistency_failures"][0]["input_index"] == 1
 
 
 def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> None:

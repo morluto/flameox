@@ -158,6 +158,23 @@ class PreservationEnvelope(_Envelope):
     artifact_count: int = Field(description="Native artifacts preserved with the manifest.")
 
 
+class RescueEnvironmentEnvelope(_Envelope):
+    FLAMEOX_DATA_DIR: str = Field(
+        description="Evidence directory to configure when restarting or reconnecting Flameox."
+    )
+
+
+class RescueActionEnvelope(_Envelope):
+    kind: Literal["restart_reconnect"]
+    environment: RescueEnvironmentEnvelope
+    message: str = Field(description="Bounded operator guidance for reopening rescued evidence.")
+
+
+class RescueEnvelope(PreservationEnvelope):
+    rescue_destination: str = Field(description="Absolute directory containing rescued evidence.")
+    next_action: RescueActionEnvelope
+
+
 class QueryEnvelope(_Envelope):
     evidence: list[dict[str, JsonValue]] = Field(
         description="Matching immutable evidence summaries."
@@ -192,6 +209,10 @@ class PreservationOutcome(_ObjectOutcome):
     root: PreservationEnvelope | ToolFailureEnvelope
 
 
+class RescueOutcome(_ObjectOutcome):
+    root: RescueEnvelope | ToolFailureEnvelope
+
+
 class QueryOutcome(_ObjectOutcome):
     root: QueryEnvelope | ToolFailureEnvelope
 
@@ -223,6 +244,13 @@ def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) ->
         )
     evidence_id = value.get("evidence_id")
     if isinstance(evidence_id, str):
+        if value.get("rescue_destination") is not None:
+            return (
+                f"Evidence {evidence_id} rescued with "
+                f"{value.get('artifact_count', 0)} artifact(s); "
+                "next: restart or reconnect with the returned FLAMEOX_DATA_DIR. "
+                "Full details are in structuredContent."
+            )
         return (
             f"Evidence {evidence_id} preserved with {value.get('artifact_count', 0)} artifact(s); "
             "next: follow the returned evidence resource. Full details are in structuredContent."
@@ -666,6 +694,34 @@ def create_server(
                 mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
             )
             return _success(value, resource=link)
+        except RuntimeFailure as error:
+            return _failure(error)
+
+    @server.tool(annotations=PRESERVE, structured_output=True)
+    async def rescue_evidence(
+        analysis_id: Annotated[
+            str,
+            Field(description="Live session analysis handle to rescue before reconnecting."),
+        ],
+        destination: Annotated[
+            str,
+            Field(
+                description=(
+                    "Explicit absolute path to a distinct empty evidence directory. The active "
+                    "configured repository is not changed."
+                ),
+                min_length=1,
+                max_length=4096,
+            ),
+        ],
+        ctx: Context[AnalysisRuntime],
+    ) -> Annotated[CallToolResult, RescueOutcome]:
+        """Rescue one live session analysis to a distinct empty store before restart."""
+        try:
+            value = await runtime(ctx).run_in_request(
+                partial(runtime(ctx).rescue_evidence, analysis_id, destination)
+            )
+            return _success(value)
         except RuntimeFailure as error:
             return _failure(error)
 

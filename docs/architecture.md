@@ -57,7 +57,8 @@ mutations. Capture subprocesses run outside the lock. Dependency preparation onl
 joins the state boundary when publishing a verified collector binding.
 
 `analysis_id` is a session handle. It is intentionally meaningless after
-restart and can only be passed to `preserve_evidence`. `evidence_id` is a
+restart and can be passed to `preserve_evidence` or the bounded
+`rescue_evidence` recovery operation. `evidence_id` is a
 durable SHA-256 identity derived from the canonical manifest body.
 
 ## Package boundaries
@@ -106,6 +107,7 @@ the caller's original mapping after admission.
 
 Direct capture is trusted local execution, not containment. Typed argv prevents
 shell interpretation, while the broker provides process-group cleanup, bounded
-output, timeouts, resource observation, and exact executable identity. Those bounds do not provide
+output, timeouts, resource observation, and exact collector and workload executable identities.
+Those bounds do not provide
 a network sandbox or neutralize the target program's own external side effects. MCP effect
 annotations are discovery and confirmation hints, not authorization controls.

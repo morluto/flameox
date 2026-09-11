@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 from flameox.canonical import canonical_bytes
+from flameox.repository import EvidenceRepository, RepositoryError
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
@@ -30,6 +31,124 @@ def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
         result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
         ref = runtime.preserve_evidence(result["analysis_id"])
         return runtime.read_evidence_agent_projection(ref["evidence_id"])
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text('[{"value": 1}]')
+    configured = tmp_path / "configured-store"
+    configured.mkdir()
+    (configured / "unexpected").write_text("corrupt")
+    rescue = tmp_path / "rescue-store"
+    runtime = AnalysisRuntime(evidence_directory=configured)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preserve_evidence(result["analysis_id"])
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(rescue))
+        assert rescued["next_action"]["environment"] == {"FLAMEOX_DATA_DIR": str(rescue)}
+        assert result["analysis_id"] in runtime.analyses
+        assert (configured / "unexpected").read_text() == "corrupt"
+        rescued["next_action"]["environment"]["FLAMEOX_DATA_DIR"] = "mutated"
+        runtime.rescues.clear()
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(rescue))
+        assert rescued["next_action"]["environment"] == {"FLAMEOX_DATA_DIR": str(rescue)}
+        runtime.analyses.pop(result["analysis_id"])
+        assert runtime.rescue_evidence(result["analysis_id"], str(rescue)) == rescued
+    finally:
+        runtime.close()
+
+    reopened = AnalysisRuntime(evidence_directory=rescue)
+    try:
+        manifest = reopened.read_evidence(rescued["evidence_id"])
+        assert manifest["body"]["capability_id"] == "artifact.preview"
+    finally:
+        reopened.close()
+
+
+@pytest.mark.unit
+def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    configured = tmp_path / "store"
+    nonempty = tmp_path / "other"
+    nonempty.mkdir()
+    (nonempty / "file").write_text("owned")
+    runtime = AnalysisRuntime(evidence_directory=configured)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        for destination in (configured, nonempty):
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.rescue_evidence(result["analysis_id"], str(destination))
+            assert failure.value.code == "INVALID_INPUT"
+            assert result["analysis_id"] in runtime.analyses
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_repository_failures_identify_the_alternate_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    configured = tmp_path / "store"
+    rescue = tmp_path / "rescue"
+    runtime = AnalysisRuntime(evidence_directory=configured)
+    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+
+    def fail(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise RepositoryError("REPOSITORY_CORRUPTION", "alternate is corrupt")
+
+    monkeypatch.setattr(EvidenceRepository, "preserve", fail)
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.rescue_evidence(result["analysis_id"], str(rescue))
+        assert failure.value.details["configuration_source"] == "rescue_destination"
+        assert "local_diagnostic" not in failure.value.details
+        assert failure.value.details["store_identifier"] == hashlib.sha256(
+            str(rescue.absolute()).encode()
+        ).hexdigest()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    moved_parent = tmp_path / "moved-parent"
+    replacement_destination = parent / "rescue"
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+    original_preserve = EvidenceRepository.preserve
+
+    def replace_parent(repository: EvidenceRepository, **kwargs: Any) -> dict[str, Any]:
+        parent.rename(moved_parent)
+        parent.mkdir()
+        replacement_destination.mkdir()
+        return original_preserve(repository, **kwargs)
+
+    monkeypatch.setattr(EvidenceRepository, "preserve", replace_parent)
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.rescue_evidence(result["analysis_id"], str(replacement_destination))
+        assert failure.value.code == "REPOSITORY_IO_FAILURE"
+        assert list(replacement_destination.iterdir()) == []
+        assert (moved_parent / "rescue" / "repository.json").is_file()
     finally:
         runtime.close()
 

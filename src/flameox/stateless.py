@@ -8,8 +8,10 @@ import hashlib
 import json
 import os
 import random
+import re
 import secrets
 import shutil
+import stat
 import statistics
 import sys
 import tempfile
@@ -116,6 +118,9 @@ from flameox.source_files import (
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
 
 MAX_SESSION_ANALYSES = 64
+MAX_SESSION_PROJECTIONS = 16
+MAX_SESSION_PROJECTION_BYTES = 16 * 1024 * 1024
+MAX_SESSION_RESCUES = 64
 MAX_SESSION_SCRATCH_BYTES = 1024**3
 MAX_SESSION_SCRATCH_FILES = 8192
 
@@ -146,7 +151,8 @@ class BoundCapture:
     environment: dict[str, str]
     directory: Path
     invocation: CaptureInvocation
-    binding: ResolvedExecutable
+    collector_binding: ResolvedExecutable
+    workload_binding: ResolvedExecutable
 
 
 class AnalysisRuntime:
@@ -199,6 +205,8 @@ class AnalysisRuntime:
             else "platform_default"
         )
         self.analyses: OrderedDict[str, CachedAnalysis] = OrderedDict()
+        self.projections: OrderedDict[str, tuple[ProviderAnalysis, int]] = OrderedDict()
+        self.rescues: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
         self.scratch_artifacts: OrderedDict[tuple[str, str], Path] = OrderedDict()
         self._protected_sources: set[Path] = set()
         self._capture_reservations: dict[Path, tuple[int, int]] = {}
@@ -233,6 +241,53 @@ class AnalysisRuntime:
         self.analyses.move_to_end(analysis_id)
         while len(self.analyses) > MAX_SESSION_ANALYSES:
             self._evict_oldest_analysis()
+
+    def _cached_projection(self, key: str) -> ProviderAnalysis | None:
+        projections = getattr(self, "projections", None)
+        if projections is None:
+            projections = self.projections = OrderedDict()
+        cached = projections.get(key)
+        if cached is None:
+            return None
+        projections.move_to_end(key)
+        return self._copy_provider_analysis(cached[0])
+
+    def _cache_projection(self, key: str, analysis: ProviderAnalysis) -> None:
+        projections = getattr(self, "projections", None)
+        if projections is None:
+            projections = self.projections = OrderedDict()
+        copied = self._copy_provider_analysis(analysis)
+        size = len(
+            canonical_bytes(
+                {
+                    "provider_id": copied.provider_id,
+                    "provider_version": copied.provider_version,
+                    "blocks": copied.blocks,
+                    "rows_observed": copied.rows_observed,
+                    "complete": copied.complete,
+                    "limitations": copied.limitations,
+                }
+            )
+        )
+        if size > MAX_SESSION_PROJECTION_BYTES:
+            return
+        projections[key] = (copied, size)
+        projections.move_to_end(key)
+        while len(projections) > MAX_SESSION_PROJECTIONS or sum(
+            item[1] for item in projections.values()
+        ) > MAX_SESSION_PROJECTION_BYTES:
+            projections.popitem(last=False)
+
+    @staticmethod
+    def _copy_provider_analysis(analysis: ProviderAnalysis) -> ProviderAnalysis:
+        return ProviderAnalysis(
+            provider_id=analysis.provider_id,
+            provider_version=analysis.provider_version,
+            blocks=cast(list[dict[str, Any]], json.loads(json.dumps(analysis.blocks))),
+            rows_observed=analysis.rows_observed,
+            complete=analysis.complete,
+            limitations=list(analysis.limitations),
+        )
 
     def _evict_oldest_analysis(self, *, protected_roots: Sequence[Path] = ()) -> bool:
         selected = next(
@@ -424,6 +479,9 @@ class AnalysisRuntime:
             ],
             "arguments": validated.model_dump(mode="json"),
             "limits": selected_limits.model_dump(mode="json"),
+            "projection_implementation": self._projection_runtime_identity(
+                capability_id, resolved
+            ),
         }
         default_offset = validated.offset if isinstance(validated, PreviewArguments) else 0
         offset = self._decode_continuation(continuation, identity, default_offset)
@@ -434,16 +492,12 @@ class AnalysisRuntime:
         if cached := self.analyses.get(analysis_id):
             self.analyses.move_to_end(analysis_id)
             return self._copy_result(cached.result)
-        provider_analysis = canonical_provider_projection(
-            self._provider_analysis(
-                capability_id,
-                resolved,
-                validated.model_dump(mode="json"),
-                # Projection providers must see the same bounded prefix on every page.
-                # Asking for offset + page size changes aggregates and mixed metric quotas.
-                max_rows=MAX_ROWS + 1,
-                limits=selected_limits,
-            )
+        provider_analysis = self._provider_projection(
+            identity,
+            capability_id=capability_id,
+            sources=resolved,
+            arguments=validated.model_dump(mode="json"),
+            limits=selected_limits,
         )
         if provider_analysis is None and capability.id != "artifact.preview":
             raise RuntimeFailure(
@@ -562,6 +616,62 @@ class AnalysisRuntime:
         )
         return self._copy_result(validated_result)
 
+    def _provider_projection(
+        self,
+        identity: Mapping[str, Any],
+        *,
+        capability_id: str,
+        sources: list[NativeSource],
+        arguments: Mapping[str, Any],
+        limits: RequestLimits,
+    ) -> ProviderAnalysis | None:
+        projection_key = hashlib.sha256(canonical_bytes(identity)).hexdigest()
+        cached = self._cached_projection(projection_key)
+        if cached is not None:
+            return cached
+        projected = canonical_provider_projection(
+            self._provider_analysis(
+                capability_id,
+                sources,
+                arguments,
+                # Every page slices the same bounded provider population.
+                max_rows=MAX_ROWS + 1,
+                limits=limits,
+            )
+        )
+        if projected is not None:
+            self._cache_projection(projection_key, projected)
+        return projected
+
+    def _projection_runtime_identity(
+        self, capability_id: str, sources: Sequence[NativeSource]
+    ) -> dict[str, str]:
+        identity = {"flameox": __version__}
+        required_tools: list[tuple[str, NativeSource]] = []
+        for source in sources:
+            if source.format == "perf-data" and capability_id in {
+                "cpu.hotspots",
+                "cpu.callers",
+            }:
+                required_tools.append(("perf", source))
+            elif source.format == "nsys-rep" and capability_id in {
+                "trace.summary",
+                "trace.operations",
+                "trace.lifecycle",
+                "gpu.launches",
+            }:
+                required_tools.append(("nsys", source))
+            elif source.format == "xctrace" and capability_id == "trace.summary":
+                required_tools.append(("xcrun", source))
+        for executable, source in required_tools:
+            binding = self._require_host_tool(
+                executable,
+                cwd=source.path.parent,
+                environment=dict(os.environ),
+            )
+            identity[executable] = binding.identity.sha256
+        return identity
+
     def _validate_capture_request(
         self,
         target: CaptureTarget,
@@ -671,9 +781,13 @@ class AnalysisRuntime:
                             "merged capture environment must contain at most 32 entries",
                         )
                     directory = request_scratch / f"case-{sequence_number:04d}"
+                    workload_binding = self._require_host_tool(
+                        argv[0], cwd=cwd, environment={**os.environ, **environment}
+                    )
+                    pinned_argv = [str(workload_binding.invocation_path), *argv[1:]]
                     invocation = build_capture_invocation(
                         target.provider_id,
-                        argv,
+                        pinned_argv,
                         environment,
                         capture_arguments,
                         directory,
@@ -685,7 +799,7 @@ class AnalysisRuntime:
                             target.provider_id, argv, environment, cwd=cwd
                         )
                         probed_workloads.add(workload_key)
-                    binding = self._require_host_tool(
+                    collector_binding = self._require_host_tool(
                         invocation.argv[0],
                         cwd=cwd,
                         environment={**os.environ, **invocation.environment},
@@ -693,7 +807,10 @@ class AnalysisRuntime:
                     )
                     if (
                         target.provider_id == "nsight-compute"
-                        and self.nsight_compute.resolve_interface(binding.invocation_path) is None
+                        and self.nsight_compute.resolve_interface(
+                            collector_binding.invocation_path
+                        )
+                        is None
                     ):
                         raise RuntimeFailure(
                             "UNAVAILABLE_CAPABILITY",
@@ -705,7 +822,7 @@ class AnalysisRuntime:
                                 ],
                             },
                         )
-                    self.dependencies.verify_capture_binding(target.provider_id, binding)
+                    self.dependencies.verify_capture_binding(target.provider_id, collector_binding)
                     if experiment is not None and experiment.semantic_oracle is not None:
                         self._require_host_tool(
                             experiment.semantic_oracle[0],
@@ -721,13 +838,22 @@ class AnalysisRuntime:
                             environment,
                             directory,
                             invocation,
-                            binding,
+                            collector_binding,
+                            workload_binding,
                         )
                     )
                     pending_executions.append(
                         self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
                         | {
-                            "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                            "executable_sha256": collector_binding.identity.sha256.removeprefix(
+                                "sha256:"
+                            ),
+                            "collector_executable_sha256": (
+                                collector_binding.identity.sha256.removeprefix("sha256:")
+                            ),
+                            "workload_executable_sha256": (
+                                workload_binding.identity.sha256.removeprefix("sha256:")
+                            ),
                             "returncode_scope": invocation.returncode_scope,
                             "workload_returncode": None,
                         }
@@ -775,7 +901,9 @@ class AnalysisRuntime:
                 if progress:
                     await progress(sequence_number - 1, total, f"capture {case.name} block {block}")
                 argv, environment, directory = item.argv, item.environment, item.directory
-                invocation, binding = item.invocation, item.binding
+                invocation = item.invocation
+                binding = item.collector_binding
+                self._revalidate_executable(item.workload_binding)
                 request = ExecutionRequest(
                     argv=invocation.argv,
                     executable_binding=binding,
@@ -981,6 +1109,12 @@ class AnalysisRuntime:
                         "cwd": str(cwd),
                         "returncode": exit_code,
                         "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
+                        "collector_executable_sha256": (
+                            binding.identity.sha256.removeprefix("sha256:")
+                        ),
+                        "workload_executable_sha256": (
+                            item.workload_binding.identity.sha256.removeprefix("sha256:")
+                        ),
                         "returncode_scope": invocation.returncode_scope,
                         "workload_returncode": exit_code
                         if invocation.returncode_scope == "workload"
@@ -1360,6 +1494,13 @@ class AnalysisRuntime:
             raise RuntimeFailure(code, error.message, details=details) from error
 
     @staticmethod
+    def _revalidate_executable(binding: ResolvedExecutable) -> None:
+        try:
+            ExecutableResolver().revalidate(binding)
+        except DomainError as error:
+            raise RuntimeFailure(error.code.value, error.message, details=error.details) from error
+
+    @staticmethod
     def _managed_executable(name: str) -> str | None:
         candidate = Path(sys.executable).with_name(name)
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -1555,6 +1696,217 @@ class AnalysisRuntime:
         self.analyses.move_to_end(analysis_id)
         return dict(cached.preserved)
 
+    def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
+        supplied = Path(destination).expanduser()
+        if not supplied.is_absolute():
+            raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an absolute path")
+        selected = Path(os.path.abspath(supplied))
+        configured = self.repository.root
+        if (
+            selected == configured
+            or selected.is_relative_to(configured)
+            or configured.is_relative_to(selected)
+        ):
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be outside the configured repository"
+            )
+        rescue_key = (analysis_id, str(selected))
+        rescues = getattr(self, "rescues", None)
+        if rescues is None:
+            rescues = self.rescues = OrderedDict()
+        previous = rescues.get(rescue_key)
+        cached = self.analyses.get(analysis_id)
+        if cached is None and previous is None:
+            raise RuntimeFailure(
+                "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
+            )
+        parent_descriptor = self._open_rescue_parent(selected.parent)
+        try:
+            result = self._rescue_to_open_parent(
+                parent_descriptor,
+                selected=selected,
+                cached=cached,
+                previous=previous,
+            )
+        except RepositoryError as exc:
+            raise self._repository_failure(
+                exc,
+                repository=EvidenceRepository(selected, f"{self.session_id}-rescue"),
+                configuration_source="rescue_destination",
+            ) from exc
+        except OSError as exc:
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "Session evidence could not be rescued."
+            ) from exc
+        finally:
+            os.close(parent_descriptor)
+        if cached is not None:
+            self.analyses.move_to_end(analysis_id)
+        rescues[rescue_key] = result
+        rescues.move_to_end(rescue_key)
+        while len(rescues) > MAX_SESSION_RESCUES:
+            rescues.popitem(last=False)
+        return self._copy_result(result)
+
+    def _rescue_to_open_parent(
+        self,
+        parent_descriptor: int,
+        *,
+        selected: Path,
+        cached: CachedAnalysis | None,
+        previous: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        anchored_parent = self._descriptor_path(parent_descriptor)
+        anchored_destination = anchored_parent / selected.name
+        alternate = EvidenceRepository(anchored_destination, f"{self.session_id}-rescue")
+        durable = self._durable_analysis(cached.result) if cached is not None else None
+        if cached is not None and durable is not None:
+            expected_id = alternate.expected_evidence_id(
+                manifest_body=cached.manifest_body,
+                sources=cached.sources,
+                analysis=durable,
+            )
+        elif previous is not None:
+            expected_id = str(previous["evidence_id"])
+        else:  # Guarded by rescue_evidence.
+            raise RuntimeFailure(
+                "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
+            )
+        try:
+            destination_status = os.stat(
+                selected.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            destination_status = None
+        if destination_status is not None and not stat.S_ISDIR(destination_status.st_mode):
+            raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an empty directory")
+        if destination_status is not None and any(anchored_destination.iterdir()):
+            try:
+                manifest = alternate.read(expected_id)
+            except RepositoryError as exc:
+                if previous is None and not (anchored_destination / "repository.json").exists():
+                    raise RuntimeFailure(
+                        "INVALID_INPUT", "Rescue destination must be an empty directory"
+                    ) from exc
+                raise
+            result = self._rescue_result(
+                expected_id, len(manifest["body"]["artifacts"]), selected
+            )
+        else:
+            result = self._publish_rescue_stage(
+                parent_descriptor,
+                anchored_parent=anchored_parent,
+                anchored_destination=anchored_destination,
+                selected=selected,
+                destination_exists=destination_status is not None,
+                cached=cached,
+                durable=durable,
+            )
+        anchored_status = os.fstat(parent_descriptor)
+        selected_status = os.stat(selected.parent)
+        if (anchored_status.st_dev, anchored_status.st_ino) != (
+            selected_status.st_dev,
+            selected_status.st_ino,
+        ):
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
+            )
+        return result
+
+    def _publish_rescue_stage(
+        self,
+        parent_descriptor: int,
+        *,
+        anchored_parent: Path,
+        anchored_destination: Path,
+        selected: Path,
+        destination_exists: bool,
+        cached: CachedAnalysis | None,
+        durable: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if cached is None or durable is None:
+            raise RuntimeFailure(
+                "EXPIRED_SESSION_ANALYSIS",
+                "The session analysis is missing and the rescued evidence is unavailable",
+            )
+        stage_name = f".flameox-rescue-{secrets.token_hex(12)}"
+        os.mkdir(stage_name, mode=0o700, dir_fd=parent_descriptor)
+        try:
+            rescued = EvidenceRepository(
+                anchored_parent / stage_name, f"{self.session_id}-rescue"
+            ).preserve(
+                manifest_body=cached.manifest_body,
+                sources=cached.sources,
+                analysis=durable,
+            )
+            if destination_exists:
+                os.rmdir(selected.name, dir_fd=parent_descriptor)
+            os.rename(
+                stage_name,
+                selected.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            stage_name = ""
+            os.fsync(parent_descriptor)
+            EvidenceRepository(anchored_destination, f"{self.session_id}-rescue").read(
+                str(rescued["evidence_id"])
+            )
+            return self._rescue_result(
+                str(rescued["evidence_id"]), int(rescued["artifact_count"]), selected
+            )
+        finally:
+            if stage_name:
+                shutil.rmtree(anchored_parent / stage_name, ignore_errors=True)
+
+    @staticmethod
+    def _rescue_result(evidence_id: str, artifact_count: int, destination: Path) -> dict[str, Any]:
+        return {
+            "evidence_id": evidence_id,
+            "uri": f"flameox://evidence/{evidence_id}",
+            "artifact_count": artifact_count,
+            "rescue_destination": str(destination),
+            "next_action": {
+                "kind": "restart_reconnect",
+                "environment": {"FLAMEOX_DATA_DIR": str(destination)},
+                "message": (
+                    "Restart or reconnect Flameox with FLAMEOX_DATA_DIR set to the rescue "
+                    "destination, then read the returned evidence_id."
+                ),
+            },
+        }
+
+    @staticmethod
+    def _open_rescue_parent(path: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path.anchor, flags)
+        try:
+            for part in path.parts[1:]:
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+        except OSError as exc:
+            os.close(descriptor)
+            raise RuntimeFailure(
+                "INVALID_INPUT",
+                "Rescue destination parent must exist and contain no symbolic links",
+            ) from exc
+        return descriptor
+
+    @staticmethod
+    def _descriptor_path(descriptor: int) -> Path:
+        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
+            candidate = root / str(descriptor)
+            try:
+                if os.path.samestat(candidate.stat(), os.fstat(descriptor)):
+                    return candidate
+            except OSError:
+                continue
+        raise RuntimeFailure(
+            "UNAVAILABLE_CAPABILITY",
+            "Secure rescue publication requires descriptor-backed directory paths",
+        )
+
     @staticmethod
     def _terminated_limit(
         process: ProcessResult, limits: RequestLimits, budget: WorkloadBudget
@@ -1669,13 +2021,22 @@ class AnalysisRuntime:
                 "REPOSITORY_IO_FAILURE", "The requested evidence projection could not be read."
             ) from exc
 
-    def _repository_failure(self, error: RepositoryError) -> RuntimeFailure:
+    def _repository_failure(
+        self,
+        error: RepositoryError,
+        *,
+        repository: EvidenceRepository | None = None,
+        configuration_source: str | None = None,
+    ) -> RuntimeFailure:
+        selected_repository = repository or self.repository
         details: dict[str, Any] = {}
         if error.code in {"REPOSITORY_CORRUPTION", "UNSUPPORTED_REPOSITORY_FORMAT"}:
             details = {
-                "configuration_source": self._repository_configuration,
+                "configuration_source": configuration_source or self._repository_configuration,
                 "configuration_variable": "FLAMEOX_DATA_DIR",
-                "store_identifier": hashlib.sha256(str(self.repository.root).encode()).hexdigest(),
+                "store_identifier": hashlib.sha256(
+                    str(selected_repository.root).encode()
+                ).hexdigest(),
                 "recovery": [
                     (
                         "Inspect or export this store with a Flameox release that supports its "
@@ -1688,7 +2049,11 @@ class AnalysisRuntime:
                     "restart or reconnect Flameox. Switching stores does not recover old evidence; "
                     "preserve any recoverable session evidence before ending the session.",
                 ],
-                "local_diagnostic": "flameox evidence location",
+                **(
+                    {"local_diagnostic": "flameox evidence location"}
+                    if configuration_source != "rescue_destination"
+                    else {}
+                ),
             }
         return RuntimeFailure(error.code, error.message, details=details)
 
@@ -2165,7 +2530,29 @@ class AnalysisRuntime:
             ),
         )
         outcome = self.broker.run_sync(request)
-        self._write_collapsed_perf_script(outcome.stdout, output)
+        exit_code = process_exit_code(outcome.process.termination)
+        if exit_code != 0:
+            retained_stderr = outcome.stderr[:4096]
+            raise RuntimeFailure(
+                "DECODE_FAILURE",
+                "perf script failed before producing trustworthy stack evidence",
+                details={
+                    "decoder_exit_code": exit_code,
+                    "decoder_termination": outcome.process.termination.model_dump(mode="json"),
+                    "stdout_bytes": len(outcome.stdout),
+                    "stderr_bytes": len(outcome.stderr),
+                    "stdout_complete": True,
+                    "stderr_complete": True,
+                    "decoder_stderr": retained_stderr.decode("utf-8", errors="replace"),
+                    "decoder_stderr_retained_bytes": len(retained_stderr),
+                    "decoder_stderr_omitted_bytes": len(outcome.stderr) - len(retained_stderr),
+                },
+            )
+        try:
+            self._write_collapsed_perf_script(outcome.stdout, output)
+        except BaseException:
+            output.unlink(missing_ok=True)
+            raise
         self._cache_scratch_artifact(key, output)
         return output, "perf"
 
@@ -2188,11 +2575,22 @@ class AnalysisRuntime:
                 if not raw_line[0].isspace():
                     finish()
                     continue
-                fields = raw_line.strip().split()
-                if len(fields) >= 2:
-                    symbol = fields[1].split("+0x", 1)[0]
-                    if symbol and symbol != "[unknown]":
-                        frames.append(symbol.replace(";", ":"))
+                frame = raw_line.strip()
+                address_and_symbol, separator, dso = frame.rpartition(" (")
+                address, separator_after_address, symbol = address_and_symbol.partition(" ")
+                if (
+                    not separator
+                    or not dso.endswith(")")
+                    or not separator_after_address
+                    or re.fullmatch(r"(?:0x)?[0-9a-fA-F]+", address) is None
+                ):
+                    raise RuntimeFailure(
+                        "DECODE_FAILURE", "perf script returned an unsupported callchain frame"
+                    )
+                symbol = re.sub(r"\+0x[0-9a-fA-F]+(?:/0x[0-9a-fA-F]+)?$", "", symbol)
+                if not symbol or symbol == "[unknown]":
+                    symbol = "[unknown]"
+                frames.append(symbol.replace(";", ":"))
         except UnicodeDecodeError as error:
             raise RuntimeFailure("DECODE_FAILURE", "perf script output is not UTF-8") from error
         finish()
@@ -2406,6 +2804,8 @@ class AnalysisRuntime:
                 "block": item["block"],
                 "returncode": item["returncode"],
                 "executable_sha256": item.get("executable_sha256"),
+                "collector_executable_sha256": item.get("collector_executable_sha256"),
+                "workload_executable_sha256": item.get("workload_executable_sha256"),
                 "returncode_scope": item.get("returncode_scope", "unknown"),
                 "workload_returncode": item.get("workload_returncode"),
                 "status": item["status"],

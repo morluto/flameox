@@ -115,21 +115,68 @@ def scaling_projection(
         log_measurements = [math.log(point[1]) for point in points]
         mean_input = fmean(log_inputs)
         mean_measurement = fmean(log_measurements)
-        input_variance = sum((value - mean_input) ** 2 for value in log_inputs)
+        input_variance = math.fsum((value - mean_input) ** 2 for value in log_inputs)
+        separation_floor = math.ulp(mean_input) ** 2 * len(log_inputs)
+        if not math.isfinite(input_variance) or input_variance <= separation_floor:
+            output.append(
+                {
+                    "benchmark": benchmark,
+                    "unit": unit,
+                    "dimensions": dimensions,
+                    "status": "inconclusive",
+                    "input_dimension": input_dimension,
+                    "point_count": len(points),
+                    "exponent": None,
+                    "coefficient": None,
+                    "r_squared": None,
+                    "input_min": points[0][0],
+                    "input_max": points[-1][0],
+                    "reason": "insufficient log-space input separation",
+                }
+            )
+            continue
         exponent = (
-            sum(
+            math.fsum(
                 (input_value - mean_input) * (measurement - mean_measurement)
                 for input_value, measurement in zip(log_inputs, log_measurements, strict=True)
             )
             / input_variance
         )
         intercept = mean_measurement - exponent * mean_input
-        residual_sum = sum(
+        residual_sum = math.fsum(
             (measurement - (intercept + exponent * input_value)) ** 2
             for input_value, measurement in zip(log_inputs, log_measurements, strict=True)
         )
-        total_sum = sum((measurement - mean_measurement) ** 2 for measurement in log_measurements)
+        total_sum = math.fsum(
+            (measurement - mean_measurement) ** 2 for measurement in log_measurements
+        )
         r_squared = 1.0 if total_sum == 0 else max(0.0, 1.0 - residual_sum / total_sum)
+        try:
+            coefficient = math.exp(intercept)
+        except OverflowError:
+            coefficient = None
+        if not all(math.isfinite(value) for value in (exponent, intercept, r_squared)) or (
+            coefficient is not None and (not math.isfinite(coefficient) or coefficient <= 0)
+        ):
+            coefficient = None
+        if coefficient is None:
+            output.append(
+                {
+                    "benchmark": benchmark,
+                    "unit": unit,
+                    "dimensions": dimensions,
+                    "status": "inconclusive",
+                    "input_dimension": input_dimension,
+                    "point_count": len(points),
+                    "exponent": None,
+                    "coefficient": None,
+                    "r_squared": None,
+                    "input_min": points[0][0],
+                    "input_max": points[-1][0],
+                    "reason": "power-law coefficients exceed finite numeric range",
+                }
+            )
+            continue
         output.append(
             {
                 "benchmark": benchmark,
@@ -139,7 +186,7 @@ def scaling_projection(
                 "input_dimension": input_dimension,
                 "point_count": len(points),
                 "exponent": exponent,
-                "coefficient": math.exp(intercept),
+                "coefficient": coefficient,
                 "r_squared": r_squared,
                 "input_min": points[0][0],
                 "input_max": points[-1][0],
