@@ -131,8 +131,10 @@ result reports their setup guidance.
 
 Comparison is intentionally a two-stage workflow. Flameox captures representative baseline and
 candidate summaries separately, optionally preserves them, and then passes both artifacts to an
-`analyze_*_compare` tool. There are no `capture_*_compare` tools: experiment capture measures cases
-and reports an effect, but it is not a substitute for comparing explicit native artifacts.
+`analyze` call with the matching comparison `request.capability_id`: `benchmark.compare`,
+`inference.compare`, or `kernel.compare`. Those variants are intentionally absent from
+`capture_and_analyze`: experiment capture measures cases and reports an effect, but it is not a
+substitute for comparing explicit native artifacts.
 
 ## Evidence quality
 

@@ -3132,6 +3132,8 @@ def test_mcp_tools_consolidate_typed_capabilities_without_losing_contracts() -> 
         tools = await server.list_tools()
         templates = await server.list_resource_templates()
 
+        assert "request.execution.kind=experiment" in server.instructions
+
         assert {tool.name for tool in tools} == {
             "prepare_providers",
             "analyze",
