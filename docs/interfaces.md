@@ -18,13 +18,29 @@ There are exactly 50 tools:
 | Capture and immediate analysis | 20 | `capture_cpu_hotspots`, `capture_cpu_callers`, `capture_triton_autotune`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 4 | `prepare_providers`, `preserve_evidence`, `rescue_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
+For CLI-side discovery, `flameox mcp inspect --summary` returns compact records containing each
+tool's name, description, required top-level inputs, and effect class. After selecting a tool,
+`flameox mcp inspect --tool TOOL_NAME` returns its complete input and output schemas. The unfiltered
+command remains the exact complete catalog. Unknown capability, capture-provider, and tool names
+return the requested value, bounded valid choices, and the exact discovery command to run next.
+An unsupported artifact format similarly returns the detected or declared format, the capability's
+accepted formats, and its exact analysis-tool name before provider decoding begins.
+
 `rescue_evidence` accepts one live session analysis and an explicit absolute path below an existing,
-symlink-free parent to a distinct empty directory. It anchors publication to an open parent
+symlink-free parent to a distinct new directory. It anchors publication to an open parent
 directory, publishes the normal immutable evidence format there, and returns the
 `FLAMEOX_DATA_DIR` restart/reconnect handoff. It does not repair or modify the configured repository,
 change the active runtime store, release the session handle, or expose the alternate store through
 the active server's resource template. Repeating the same rescue request during the live session
-validates the published evidence and returns the original handoff.
+validates the published evidence and returns the original handoff. Secure descriptor-anchored
+rescue publication currently requires a POSIX host with `/proc/self/fd` or `/dev/fd`; Windows
+returns `UNAVAILABLE_CAPABILITY` before analysis or workload execution.
+
+The one-shot CLI mirrors this lifecycle with `analyze --rescue-to ABSOLUTE_PATH` and
+`capture --rescue-to ABSOLUTE_PATH`. It requires a destination that does not exist and preflights
+its parent before decoding or executing the workload, then returns the same rescue handoff in
+`rescued`. The `--preserve` and `--rescue-to` options are mutually exclusive so the publication
+destination is unambiguous.
 
 The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
 registration API. The SDK derives each top-level input schema directly from the registered callable.
@@ -46,6 +62,12 @@ short compatibility summary with the capability, completion or truncation state,
 and next action; it does not serialize the evidence tables a second time. Content-only clients can
 still identify the outcome and recovery path, while structured clients retain the authoritative
 bounded evidence. Preserved results also return a resource link.
+
+For a paginated MCP capture result, `continuation_sources` contains ready-to-submit ordered path
+sources while session scratch remains live, or evidence sources when the capture was preserved.
+The summary names the matching analysis tool and directs the caller to reuse those sources, the
+original options and limits, and the returned continuation without rerunning the workload. This
+handoff keeps continuation work read-only and preserves the captured workload identity.
 
 Each capability declaration also owns its accepted source cardinality. MCP encodes that range in
 the generated `sources` schema, and the runtime checks the same range before resolving paths or
@@ -137,11 +159,15 @@ EvidenceSource {kind: "evidence", evidence_id, artifact_role? OR artifact_select
 Continuations are opaque integrity cursors bound to the request and exact input
 digests. They contain no authority, credentials, or artifact data and are not
 an authentication boundary: a caller already authorized to submit the analysis
-can choose which of its rows to request. They can cross process boundaries, so
-a CLI invocation can resume a previous page. Tokens bind ordered content digests, formats,
+can choose which of its rows to request. They can cross process boundaries when their immutable
+inputs remain available, so an analysis of explicit paths can resume in a later CLI invocation.
+`flameox analyze --evidence EVIDENCE_ID` loads a preserved record's ordered analysis sources
+directly. Tokens bind ordered content digests, formats,
 producer identities, arguments, and limits, independently of storage paths and publication roles.
-After preserving a capture, repeat the original options and limits with the evidence resource's
-ordered `analysis_sources` and the returned continuation. Scratch can be released immediately.
+After preserving a CLI capture, use its structured `continuation_handoff` with `--evidence` and
+repeat the original options, limits, and returned continuation. An unpreserved one-shot CLI capture
+sets continuation to null and reports the exact preservation or rescue rerun because its scratch is
+released at exit. Scratch can be released immediately after preserved evidence is available.
 A changed input cannot reuse a continuation. Tokens issued by older path-bound implementations
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.

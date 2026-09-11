@@ -3586,6 +3586,84 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
 
 
 @pytest.mark.integration
+def test_mcp_continuation_summary_names_safe_analysis_handoff(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            captured = await client.call_tool(
+                "capture_process_output",
+                {
+                    "target": {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            "[print(index) for index in range(4)]",
+                        ],
+                        "cwd": str(tmp_path),
+                        "console_output": "full",
+                    },
+                    "provider": {"kind": "direct"},
+                    "execution": {"kind": "single"},
+                    "limits": {"max_rows": 2},
+                },
+            )
+            preserved = await client.call_tool(
+                "capture_process_output",
+                {
+                    "target": {
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            "[print(index) for index in range(4)]",
+                        ],
+                        "cwd": str(tmp_path),
+                        "console_output": "full",
+                    },
+                    "provider": {"kind": "direct"},
+                    "execution": {"kind": "single"},
+                    "limits": {"max_rows": 2},
+                    "preserve": True,
+                },
+            )
+            captured_second = await client.call_tool(
+                "preview_artifact",
+                {
+                    "sources": captured.structured_content["continuation_sources"],
+                    "options": {},
+                    "limits": {"max_rows": 2},
+                    "continuation": captured.structured_content["continuation"],
+                },
+            )
+            preserved_second = await client.call_tool(
+                "preview_artifact",
+                {
+                    "sources": preserved.structured_content["continuation_sources"],
+                    "options": {},
+                    "limits": {"max_rows": 2},
+                    "continuation": preserved.structured_content["continuation"],
+                },
+            )
+
+        assert isinstance(captured.content[0], TextContent)
+        assert "call preview_artifact with continuation_sources" in captured.content[0].text
+        assert "do not rerun capture" in captured.content[0].text
+        assert [row["text"] for row in captured_second.structured_content["blocks"][1]["rows"]] == [
+            "2",
+            "3",
+        ]
+        assert isinstance(preserved.content[0], TextContent)
+        assert "call preview_artifact with continuation_sources" in preserved.content[0].text
+        assert "do not rerun capture" in preserved.content[0].text
+        assert preserved.structured_content["continuation_sources"][0]["kind"] == "evidence"
+        assert [
+            row["text"] for row in preserved_second.structured_content["blocks"][1]["rows"]
+        ] == ["2", "3"]
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
 def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1},{"value":2}]')

@@ -139,8 +139,7 @@ def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
 
     def replace_parent(repository: EvidenceRepository, **kwargs: Any) -> dict[str, Any]:
         parent.rename(moved_parent)
-        parent.mkdir()
-        replacement_destination.mkdir()
+        parent.symlink_to(moved_parent, target_is_directory=True)
         return original_preserve(repository, **kwargs)
 
     monkeypatch.setattr(EvidenceRepository, "preserve", replace_parent)
@@ -148,8 +147,38 @@ def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
         with pytest.raises(RuntimeFailure) as failure:
             runtime.rescue_evidence(result["analysis_id"], str(replacement_destination))
         assert failure.value.code == "REPOSITORY_IO_FAILURE"
-        assert list(replacement_destination.iterdir()) == []
+        assert parent.is_symlink()
         assert (moved_parent / "rescue" / "repository.json").is_file()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_preflight_requires_a_new_destination(tmp_path: Path) -> None:
+    rescue = tmp_path / "rescue"
+    rescue.mkdir()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preflight_rescue_destination(str(rescue))
+        assert failure.value.code == "INVALID_INPUT"
+        assert "new path" in failure.value.message
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_rejects_a_physical_alias_of_the_configured_store(tmp_path: Path) -> None:
+    physical_store = tmp_path / "physical-store"
+    physical_store.mkdir()
+    configured_alias = tmp_path / "configured-alias"
+    configured_alias.symlink_to(physical_store, target_is_directory=True)
+    runtime = AnalysisRuntime(evidence_directory=configured_alias)
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preflight_rescue_destination(str(physical_store / "rescue"))
+        assert failure.value.code == "INVALID_INPUT"
+        assert not (physical_store / "rescue").exists()
     finally:
         runtime.close()
 

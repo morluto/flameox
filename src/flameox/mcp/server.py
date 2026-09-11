@@ -99,6 +99,13 @@ class AnalysisEnvelope(_Envelope):
     continuation: str | None = Field(
         description="Opaque next-page token; null means no further page is retrievable."
     )
+    continuation_sources: list[dict[str, JsonValue]] | None = Field(
+        default=None,
+        description=(
+            "Ready-to-submit ordered sources for the matching analysis tool when continuation "
+            "is non-null."
+        ),
+    )
 
 
 class ExternalRequirementEnvelope(BaseModel):
@@ -229,15 +236,27 @@ def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) ->
         provider_limited = (
             isinstance(truncation, dict) and truncation.get("reason") == "provider_limit"
         )
-        next_action = (
-            "follow the returned evidence resource"
-            if resource is not None or isinstance(preserved, dict)
-            else "request the continuation page"
-            if isinstance(continuation, str)
-            else "narrow the semantic query or recapture; no continuation is available"
-            if provider_limited
-            else "preserve the session analysis if durable evidence is needed"
-        )
+        if isinstance(continuation, str):
+            capability = next((item for item in CAPABILITIES if item.id == capability_id), None)
+            analysis_tool = analysis_tool_name(capability) if capability is not None else None
+            if analysis_tool is None:
+                next_action = "request the continuation page with the same analysis request"
+            elif value.get("capture") is not None:
+                next_action = (
+                    f"call {analysis_tool} with continuation_sources, the original options and "
+                    "limits, and the returned continuation; do not rerun capture"
+                )
+            else:
+                next_action = (
+                    f"call {analysis_tool} again with the same sources, options, limits, and the "
+                    "returned continuation"
+                )
+        elif resource is not None or isinstance(preserved, dict):
+            next_action = "follow the returned evidence resource"
+        elif provider_limited:
+            next_action = "narrow the semantic query or recapture; no continuation is available"
+        else:
+            next_action = "preserve the session analysis if durable evidence is needed"
         return (
             f"{capability_id}: analysis {state}; analysis_id={value.get('analysis_id')}; "
             f"next: {next_action}. Full bounded evidence is in structuredContent."
@@ -311,6 +330,26 @@ def _failure(error: RuntimeFailure, *, resource: ResourceLink | None = None) -> 
         content=content,
         structured_content=detail,
     )
+
+
+def _attach_continuation_sources(active_runtime: AnalysisRuntime, value: dict[str, Any]) -> None:
+    if not isinstance(value.get("continuation"), str):
+        return
+    preserved = value.get("preserved")
+    if isinstance(preserved, dict):
+        projection = active_runtime.read_evidence_agent_projection(str(preserved["evidence_id"]))
+        value["continuation_sources"] = projection["analysis_sources"]
+        return
+    value["continuation_sources"] = [
+        {
+            "kind": "path",
+            "path": item["path"],
+            "format": item["format"],
+            "producer": item.get("producer"),
+            "expected_sha256": item["sha256"],
+        }
+        for item in value["inputs"]
+    ]
 
 
 def create_server(
@@ -588,6 +627,7 @@ def create_server(
                         ),
                         resource=link,
                     )
+                _attach_continuation_sources(runtime(ctx), value)
                 return _success(value, resource=link)
             except RuntimeFailure as error:
                 return _failure(error)

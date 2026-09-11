@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from flameox import __version__
 from flameox.cli import app
+from flameox.repository import EvidenceRepository
 from flameox.runtime_contracts import RequestLimits
 from flameox.setup import CliVersionAdvisory, ExternalRequirement, ProviderPreparation, SetupClient
 
@@ -35,6 +36,49 @@ def test_help_exposes_current_command_families() -> None:
             "evidence",
         )
     )
+
+
+def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> None:
+    runner = CliRunner()
+    summary_result = runner.invoke(app, ["mcp", "inspect", "--summary"])
+    exact_result = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_cpu_hotspots"])
+
+    assert summary_result.exit_code == 0, summary_result.output
+    summary = json.loads(summary_result.output)
+    assert summary["tool_count"] == 50
+    assert len(summary_result.output) < 30_000
+    hotspot = next(tool for tool in summary["tools"] if tool["name"] == "capture_cpu_hotspots")
+    assert hotspot["effect"] == "destructive"
+    assert hotspot["required_inputs"] == ["target", "provider", "execution"]
+    assert "input_schema" not in hotspot
+
+    assert exact_result.exit_code == 0, exact_result.output
+    exact = json.loads(exact_result.output)
+    assert [tool["name"] for tool in exact["tools"]] == ["capture_cpu_hotspots"]
+    assert exact["tools"][0]["input_schema"]["properties"]["provider"]
+
+
+def test_mcp_inspect_unknown_tool_returns_bounded_recovery() -> None:
+    result = CliRunner().invoke(app, ["mcp", "inspect", "--tool", "missing_tool"])
+
+    assert result.exit_code == 1
+    failure = json.loads(result.stderr)
+    assert failure["code"] == "UNKNOWN_CAPABILITY"
+    assert failure["details"]["requested_tool"] == "missing_tool"
+    assert "capture_cpu_hotspots" in failure["details"]["available_tools"]
+    assert failure["details"]["recovery"] == (
+        "Run `flameox mcp inspect --summary` to select a tool."
+    )
+
+
+def test_mcp_inspect_rejects_conflicting_detail_modes() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["mcp", "inspect", "--tool", "capture_cpu_hotspots", "--summary"],
+    )
+
+    assert result.exit_code == 1
+    assert "either --tool" in result.stderr
 
 
 def test_mcp_startup_limits_reach_the_shared_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,6 +168,64 @@ def test_analyze_consumes_continuation_from_a_previous_cli_invocation(tmp_path: 
     assert [row["value"] for row in second_payload["blocks"][1]["rows"]] == list(range(100, 104))
 
 
+def test_analyze_reads_ordered_sources_from_preserved_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text('[{"value": 1}, {"value": 2}]')
+    runner = CliRunner()
+    first = runner.invoke(
+        app,
+        [
+            "analyze",
+            "artifact.preview",
+            str(artifact),
+            "--limits",
+            '{"max_rows":1}',
+            "--preserve",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    first_payload = json.loads(first.output)
+
+    second = runner.invoke(
+        app,
+        [
+            "analyze",
+            "artifact.preview",
+            "--evidence",
+            first_payload["preserved"]["evidence_id"],
+            "--limits",
+            '{"max_rows":1}',
+            "--continuation",
+            first_payload["continuation"],
+        ],
+    )
+
+    assert second.exit_code == 0, second.output
+    assert json.loads(second.output)["blocks"][1]["rows"][0]["value"] == 2
+
+
+def test_analyze_requires_exactly_one_source_mode(tmp_path: Path) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+    runner = CliRunner()
+    missing = runner.invoke(app, ["analyze", "artifact.preview"])
+    conflicting = runner.invoke(
+        app,
+        [
+            "analyze",
+            "artifact.preview",
+            str(artifact),
+            "--evidence",
+            "a" * 64,
+        ],
+    )
+
+    assert missing.exit_code == 1
+    assert "Provide artifact paths or --evidence" in missing.stderr
+    assert conflicting.exit_code == 1
+    assert "either artifact paths or --evidence" in conflicting.stderr
+
+
 def test_analyze_rejects_a_malformed_continuation_without_a_traceback(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -167,6 +269,78 @@ def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["blocks"][1]["rows"][0]["text"] == "cli-capture"
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.process
+def test_capture_does_not_offer_an_unusable_scratch_continuation(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--limits",
+            '{"max_rows":1}',
+            "--",
+            sys.executable,
+            "-c",
+            "print('first'); print('second')",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["coverage"]["complete"] is False
+    assert payload["continuation"] is None
+    assert any("--preserve or --rescue-to" in item for item in payload["limitations"])
+
+
+@pytest.mark.process
+def test_preserved_capture_returns_a_cross_process_continuation_handoff(tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--limits",
+            '{"max_rows":1}',
+            "--preserve",
+            "--",
+            sys.executable,
+            "-c",
+            "print('first'); print('second')",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    first_payload = json.loads(first.output)
+    handoff = first_payload["continuation_handoff"]
+    assert handoff["command"] == "flameox analyze"
+    assert handoff["evidence_id"] == first_payload["preserved"]["evidence_id"]
+
+    second = runner.invoke(
+        app,
+        [
+            "analyze",
+            handoff["capability_id"],
+            "--evidence",
+            handoff["evidence_id"],
+            "--limits",
+            json.dumps(handoff["limits"]),
+            "--arguments",
+            json.dumps(handoff["arguments"]),
+            "--continuation",
+            handoff["continuation"],
+        ],
+    )
+
+    assert second.exit_code == 0, second.output
+    assert json.loads(second.output)["blocks"][1]["rows"][0]["text"] == "second"
 
 
 @pytest.mark.process
@@ -383,7 +557,139 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
 
     assert result.exit_code == 1
     assert '"code": "UNKNOWN_CAPABILITY"' in result.stderr
+    failure = json.loads(result.stderr)
+    assert failure["details"]["requested_capability"] == "unknown.capability"
+    assert "cpu.hotspots" in failure["details"]["available_capabilities"]
+    assert "mcp inspect --summary" in failure["details"]["recovery"]
     assert "Traceback" not in result.output
+
+
+def test_capture_unknown_provider_returns_choices_before_execution(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "missing-provider",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+
+    assert result.exit_code == 1
+    failure = json.loads(result.stderr)
+    assert failure["details"]["requested_provider"] == "missing-provider"
+    assert "direct" in failure["details"]["available_capture_providers"]
+    assert failure["details"]["recovery"].endswith(
+        "`flameox mcp inspect --tool capture_process_output`."
+    )
+    assert not marker.exists()
+
+
+def test_analyze_unsupported_format_returns_accepted_formats(tmp_path: Path) -> None:
+    artifact = tmp_path / "profile.json"
+    artifact.write_text("{}")
+    result = CliRunner().invoke(
+        app,
+        ["analyze", "cpu.hotspots", str(artifact), "--format", "json"],
+    )
+
+    assert result.exit_code == 1
+    failure = json.loads(result.stderr)
+    assert failure["code"] == "UNSUPPORTED_FORMAT"
+    assert failure["details"]["received_format"] == "json"
+    assert failure["details"]["accepted_formats"] == [
+        "cpuprofile",
+        "pstats",
+        "py-spy",
+        "perf",
+        "perf-data",
+    ]
+    assert failure["details"]["recovery"].endswith(
+        "`flameox mcp inspect --tool analyze_cpu_hotspots`."
+    )
+
+
+def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: Path) -> None:
+    configured = tmp_path / "flameox-data"
+    configured.mkdir()
+    (configured / "unexpected").write_text("owned")
+    artifact = tmp_path / "rows.json"
+    artifact.write_text('[{"value": 1}]')
+    rescue = tmp_path / "rescue"
+
+    result = CliRunner().invoke(
+        app,
+        ["analyze", "artifact.preview", str(artifact), "--rescue-to", str(rescue)],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    rescued = payload["rescued"]
+    assert rescued["rescue_destination"] == str(rescue)
+    assert rescued["next_action"]["environment"] == {"FLAMEOX_DATA_DIR": str(rescue)}
+    assert (configured / "unexpected").read_text() == "owned"
+    manifest = EvidenceRepository(rescue, "cli-test").read(rescued["evidence_id"])
+    assert manifest["body"]["capability_id"] == "artifact.preview"
+
+
+def test_capture_rejects_invalid_rescue_destination_before_workload(tmp_path: Path) -> None:
+    destination = tmp_path / "nonempty"
+    destination.mkdir()
+    (destination / "owned").write_text("keep")
+    marker = tmp_path / "executed"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--rescue-to",
+            str(destination),
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["message"] == (
+        "Rescue destination must be a new path that does not exist"
+    )
+    assert not marker.exists()
+    assert (destination / "owned").read_text() == "keep"
+
+
+def test_capture_rejects_conflicting_evidence_destinations_before_workload(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "executed"
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--preserve",
+            "--rescue-to",
+            str(tmp_path / "rescue"),
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["message"] == (
+        "Use either --preserve or --rescue-to, not both."
+    )
+    assert not marker.exists()
 
 
 def test_evidence_query_rejects_a_malformed_input_digest() -> None:
