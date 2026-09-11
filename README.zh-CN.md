@@ -23,10 +23,10 @@ Python 扩展安装到持久的 uv 工具环境；NVIDIA 等系统或厂商工�
 平台默认位置。原生字节和证据清单按 SHA-256 寻址，并通过同一文件系统上的暂存、
 校验、fsync 和原子重命名发布。Flameox 不修改项目的 Git 配置。
 
-MCP 公开面向任务的类型化分析和采集工具，例如 `analyze_cpu_hotspots`、
-`capture_gpu_launches` 和 `analyze_benchmark_compare`，以及
-`prepare_providers`、`preserve_evidence` 和 `query_evidence`。工具搜索由 MCP
-客户端负责。唯一资源模板是
+MCP 公开 `analyze` 与 `capture_and_analyze` 两个类型化操作；它们通过带判别字段的
+能力请求保留每种分析选项、来源数量和兼容采集器的精确验证。证据生命周期由
+`prepare_providers`、`preserve_evidence`、`rescue_evidence` 和 `query_evidence`
+管理。工具搜索由 MCP 客户端负责。唯一资源模板是
 `flameox://evidence/{evidence_id}`，只返回不可变规范清单，不公开原生载荷。
 
 `analysis_id` 仅在当前服务进程内有效；重启后过期。`evidence_id` 是持久的内容

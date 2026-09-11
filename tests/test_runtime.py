@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -29,13 +30,10 @@ from flameox import __version__
 from flameox.canonical import canonical_bytes
 from flameox.evidence_models import CaptureRequest
 from flameox.mcp import create_server
-from flameox.mcp.capability_tools import (
-    analysis_tool_name,
-    capture_tool_name,
-)
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITIES,
     MAX_ROWS,
@@ -53,7 +51,6 @@ from flameox.runtime_contracts import (
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 from flameox.source_files import NativeSource, sha256_file
-from flameox.stateless import AnalysisRuntime
 from flameox.workers.v8_profiles_contract import V8_PROFILE_WORKER, V8ProfileRequest
 
 
@@ -893,7 +890,7 @@ def test_projection_cache_is_bounded_and_returns_defensive_copies(
         )
     )
     try:
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTIONS", 2)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_PROJECTIONS", 2)
         runtime._cache_projection("one", projection)
         runtime._cache_projection("two", projection)
         runtime._cache_projection("three", projection)
@@ -907,8 +904,8 @@ def test_projection_cache_is_bounded_and_returns_defensive_copies(
         assert restored.blocks[-1]["rows"][0]["x"] == 1
 
         runtime.projections.clear()
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTIONS", 16)
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTION_BYTES", serialized_size + 1)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_PROJECTIONS", 16)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_PROJECTION_BYTES", serialized_size + 1)
         runtime._cache_projection("one", projection)
         runtime._cache_projection("two", projection)
         assert list(runtime.projections) == ["two"]
@@ -3092,7 +3089,7 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
         "    json.dump(document, stream)\n"
     )
     managed_pyspy.chmod(0o755)
-    monkeypatch.setattr("flameox.stateless.sys.executable", str(managed_python))
+    monkeypatch.setattr("flameox.runtime.sys.executable", str(managed_python))
 
     async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -3129,190 +3126,181 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
 
 
 @pytest.mark.unit
-def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
+def test_mcp_tools_consolidate_typed_capabilities_without_losing_contracts() -> None:
     async def inspect() -> None:
         server = create_server()
         tools = await server.list_tools()
         templates = await server.list_resource_templates()
 
-        expected = ["prepare_providers"]
-        for capability in CAPABILITIES:
-            expected.append(analysis_tool_name(capability))
-            if compatible_capture_providers(capability):
-                expected.append(capture_tool_name(capability))
-        expected.extend(["preserve_evidence", "rescue_evidence", "query_evidence"])
-        assert {tool.name for tool in tools} == set(expected)
+        assert {tool.name for tool in tools} == {
+            "prepare_providers",
+            "analyze",
+            "capture_and_analyze",
+            "preserve_evidence",
+            "rescue_evidence",
+            "query_evidence",
+        }
         assert all(tool.output_schema is not None for tool in tools)
         by_name = {tool.name: tool for tool in tools}
-        rescue_output = by_name["rescue_evidence"].output_schema
-        assert rescue_output is not None
-        assert set(rescue_output["$defs"]["RescueEnvelope"]["properties"]) >= {
-            "evidence_id",
-            "uri",
-            "artifact_count",
-            "rescue_destination",
-            "next_action",
+        analysis_schema = by_name["analyze"].input_schema
+        capture_schema = by_name["capture_and_analyze"].input_schema
+        analysis_request = analysis_schema["properties"]["request"]
+        capture_request = capture_schema["properties"]["request"]
+        assert analysis_schema["required"] == ["request"]
+        assert capture_schema["required"] == ["request"]
+        assert analysis_request["discriminator"]["propertyName"] == "capability_id"
+        assert capture_request["discriminator"]["propertyName"] == "capability_id"
+        analysis_mapping = analysis_request["discriminator"]["mapping"]
+        capture_mapping = capture_request["discriminator"]["mapping"]
+        assert set(analysis_mapping) == {capability.id for capability in CAPABILITIES}
+        assert set(capture_mapping) == {
+            capability.id for capability in CAPABILITIES if compatible_capture_providers(capability)
         }
-        rescue_action = rescue_output["$defs"]["RescueActionEnvelope"]["properties"]
-        assert rescue_action["kind"]["const"] == "restart_reconnect"
-        assert rescue_action["environment"]["$ref"].endswith("/RescueEnvironmentEnvelope")
-        multi_source_capabilities = {
-            "artifact.preview": (1, 32),
-            "benchmark.summary": (1, 32),
-            "benchmark.scaling": (1, 32),
-            "benchmark.compare": (2, 32),
-            "inference.compare": (2, 32),
-            "kernel.compare": (2, 32),
-        }
+
         for capability in CAPABILITIES:
-            source_schema = by_name[analysis_tool_name(capability)].input_schema["properties"][
-                "sources"
+            analysis_definition = analysis_schema["$defs"][
+                analysis_mapping[capability.id].rsplit("/", 1)[-1]
             ]
-            expected_minimum, expected_maximum = multi_source_capabilities.get(
-                capability.id, (1, 1)
+            sources = analysis_definition["properties"]["sources"]
+            assert sources["minItems"] == capability.minimum_sources
+            assert sources["maxItems"] == capability.maximum_sources
+            assert analysis_definition["additionalProperties"] is False
+            assert capability.summary in analysis_definition["description"]
+            assert analysis_definition["properties"]["options"]["$ref"].endswith(
+                f"/{capability.model.__name__}"
             )
-            assert source_schema["minItems"] == expected_minimum
-            assert source_schema["maxItems"] == expected_maximum
-            if compatible_capture_providers(capability):
-                execution_schema = by_name[capture_tool_name(capability)].input_schema[
-                    "properties"
-                ]["execution"]
-                if expected_maximum == 1:
-                    assert execution_schema["$ref"].endswith("/SingleExecution")
-                else:
-                    assert execution_schema["discriminator"]["propertyName"] == "kind"
-        analysis_schema = by_name["analyze_cpu_hotspots"].input_schema
+            if capability.id not in capture_mapping:
+                continue
+            capture_definition = capture_schema["$defs"][
+                capture_mapping[capability.id].rsplit("/", 1)[-1]
+            ]
+            expected_providers = {
+                provider.id for provider in compatible_capture_providers(capability)
+            }
+            provider_schema = capture_definition["properties"]["provider"]
+            if len(expected_providers) == 1:
+                provider_name = provider_schema["$ref"].rsplit("/", 1)[-1]
+                assert capture_schema["$defs"][provider_name]["properties"]["kind"]["const"] in (
+                    expected_providers
+                )
+            else:
+                assert set(provider_schema["discriminator"]["mapping"]) == expected_providers
+            execution_schema = capture_definition["properties"]["execution"]
+            if capability.maximum_sources == 1:
+                assert execution_schema["$ref"].endswith("/SingleExecution")
+            else:
+                assert execution_schema["discriminator"]["propertyName"] == "kind"
+
+        preview = analysis_schema["$defs"]["AnalyzeArtifactPreviewRequest"]
+        comparison = analysis_schema["$defs"]["AnalyzeBenchmarkCompareRequest"]
+        trace_window = analysis_schema["$defs"]["AnalyzeTraceWindowRequest"]
+        assert preview["properties"]["sources"]["maxItems"] == 32
+        assert comparison["properties"]["sources"]["minItems"] == 2
+        assert preview["required"] == ["capability_id", "sources"]
+        assert trace_window["required"] == ["capability_id", "sources", "options"]
         cpu_options = analysis_schema["$defs"]["CpuHotspotArguments"]["properties"]
-        assert set(cpu_options) == {"metric"}
         assert cpu_options["metric"]["anyOf"][0]["enum"] == [
             "self_time_seconds",
             "cumulative_time_seconds",
             "total_calls",
             "primitive_calls",
         ]
-        failures_schema = by_name["analyze_failures_summary"].input_schema
-        assert failures_schema["$defs"]["EmptyArguments"]["properties"] == {}
-        assert failures_schema["properties"]["options"]["$ref"].endswith("/EmptyArguments")
-        assert set(analysis_schema["properties"]) == {
-            "sources",
-            "options",
-            "limits",
-            "continuation",
-        }
-        assert analysis_schema["required"] == ["sources"]
-        assert by_name["analyze_trace_window"].input_schema["required"] == [
-            "sources",
-            "options",
-        ]
-        scaling_schema = by_name["analyze_benchmark_scaling"].input_schema
-        assert scaling_schema["required"] == ["sources", "options"]
-        assert set(scaling_schema["$defs"]["ScalingArguments"]["properties"]) == {
-            "input_dimension",
-            "metric",
-        }
-        capture_schema = by_name["capture_cpu_hotspots"].input_schema
-        assert set(capture_schema["properties"]) == {
-            "target",
-            "provider",
-            "options",
-            "execution",
-            "limits",
-            "preserve",
-        }
-        assert capture_schema["properties"]["provider"]["discriminator"]["mapping"] == {
+
+        cpu_capture = capture_schema["$defs"]["CaptureCpuHotspotsRequest"]
+        provider = cpu_capture["properties"]["provider"]
+        assert provider["discriminator"]["mapping"] == {
             "node-cpu-profile": "#/$defs/NodeCpuProfileProvider",
             "perf": "#/$defs/PerfProvider",
             "py-spy": "#/$defs/PySpyProvider",
         }
-        memory_capture_schema = by_name["capture_memory_hotspots"].input_schema
-        assert memory_capture_schema["properties"]["provider"]["discriminator"]["mapping"] == {
-            "memray": "#/$defs/MemrayProvider",
-            "node-heap-profile": "#/$defs/NodeHeapProfileProvider",
-        }
-        assert capture_schema["required"] == ["target", "provider", "execution"]
-        assert by_name["capture_trace_window"].input_schema["required"] == [
+        assert cpu_capture["required"] == [
+            "capability_id",
             "target",
             "provider",
             "execution",
-            "options",
         ]
-        target_schema = capture_schema["$defs"]["DirectTarget"]["properties"]
-        assert "without a shell" in target_schema["argv"]["description"]
-        assert "existing absolute directory" in target_schema["cwd"]["description"].lower()
-        assert "minimal allowlisted environment" in target_schema["environment"]["description"]
-        benchmark_capture = by_name["capture_benchmark_summary"].input_schema
-        experiment_schema = benchmark_capture["$defs"]["ExperimentDesign"]["properties"]
-        assert "first case is the baseline" in experiment_schema["cases"]["description"]
-        assert "nanoseconds" in experiment_schema["practical_threshold"]["description"]
-        assert (
-            "after each successful capture" in experiment_schema["semantic_oracle"]["description"]
+        assert cpu_capture["properties"]["execution"]["$ref"].endswith("/SingleExecution")
+        benchmark = capture_schema["$defs"]["CaptureBenchmarkSummaryRequest"]
+        assert benchmark["properties"]["execution"]["discriminator"]["propertyName"] == "kind"
+        target_properties = capture_schema["$defs"]["DirectTarget"]["properties"]
+        assert "without a shell" in target_properties["argv"]["description"]
+        assert "existing absolute directory" in target_properties["cwd"]["description"].lower()
+        assert "minimal allowlisted environment" in target_properties["environment"]["description"]
+        assert "limits" not in preview["properties"]
+        assert analysis_schema["properties"]["page_size"] == {
+            "default": 100,
+            "description": "Maximum evidence rows returned on this page.",
+            "maximum": MAX_ROWS,
+            "minimum": 1,
+            "title": "Page Size",
+            "type": "integer",
+        }
+
+        analysis_output = by_name["analyze"].output_schema
+        assert analysis_output is not None
+        output_properties = analysis_output["$defs"]["AnalysisEnvelope"]["properties"]
+        assert set(output_properties) >= {
+            "analysis_id",
+            "capability_id",
+            "inputs",
+            "blocks",
+            "coverage",
+            "truncation",
+            "limitations",
+            "continuation",
+            "next_page",
+        }
+        next_arguments = analysis_output["$defs"]["AnalyzeArgumentsEnvelope"]
+        assert next_arguments["additionalProperties"] is False
+        assert set(next_arguments["required"]) == {"request", "page_size"}
+        next_request_schema = next_arguments["properties"]["request"]
+        assert next_request_schema["discriminator"]["propertyName"] == "capability_id"
+        assert set(next_request_schema["discriminator"]["mapping"]) == {
+            capability.id for capability in CAPABILITIES
+        }
+        rescue_output = by_name["rescue_evidence"].output_schema
+        assert rescue_output is not None
+        rescue_properties = rescue_output["$defs"]["RescueEnvelope"]["properties"]
+        assert set(rescue_properties) >= {
+            "evidence_id",
+            "uri",
+            "artifact_count",
+            "rescue_destination",
+            "next_action",
+            "next_page",
+        }
+        assert "alternate evidence store" in (
+            rescue_output["$defs"]["RescueEnvironmentEnvelope"]["properties"]["FLAMEOX_DATA_DIR"][
+                "description"
+            ].lower()
         )
-        assert "FLAMEOX_CAPTURE_STDOUT" in experiment_schema["semantic_oracle"]["description"]
-        analysis_properties = analysis_schema["properties"]
-        assert (
-            "same sources, options, and limits"
-            in analysis_properties["continuation"]["description"]
-        )
-        limits_schema = analysis_schema["$defs"]["RequestLimits"]["properties"]
-        assert "lower the server" in analysis_properties["limits"]["description"]
-        assert "structured result" in limits_schema["max_result_bytes"]["description"]
-        provider_schema = capture_schema["$defs"]["PySpyProvider"]["properties"]
-        assert "py-spy Speedscope profile" in provider_schema["options"]["description"]
-        assert "session analysis" in capture_schema["properties"]["preserve"]["description"]
-        assert (
-            by_name["analyze_benchmark_compare"].input_schema["properties"]["sources"]["minItems"]
-            == 2
-        )
-        assert (
-            by_name["analyze_memory_hotspots"].input_schema["properties"]["sources"]["maxItems"]
-            == 1
-        )
-        assert by_name["preview_artifact"].input_schema["properties"]["sources"]["maxItems"] == 32
-        assert (
-            by_name["analyze_benchmark_summary"].input_schema["properties"]["sources"]["maxItems"]
-            == 32
-        )
-        assert capture_schema["properties"]["execution"]["$ref"].endswith("/SingleExecution")
-        assert (
-            benchmark_capture["properties"]["execution"]["discriminator"]["propertyName"] == "kind"
-        )
-        assert "capture_benchmark_compare" not in by_name
-        analysis_annotations = by_name["analyze_cpu_hotspots"].annotations
-        capture_annotations = by_name["capture_cpu_hotspots"].annotations
-        assert analysis_annotations and analysis_annotations.read_only_hint is True
-        assert capture_annotations and capture_annotations.destructive_hint is True
-        assert capture_annotations.open_world_hint is True
-        assert "external side effects" in (by_name["capture_cpu_hotspots"].description or "")
-        assert "randomized paired blocks" in (
-            by_name["capture_benchmark_summary"].description or ""
-        )
-        assert "numeric input axis" in (by_name["analyze_benchmark_scaling"].description or "")
-        assert "already captured separately" in (
-            by_name["analyze_benchmark_compare"].description or ""
-        )
-        prepare = next(tool for tool in tools if tool.name == "prepare_providers")
-        assert prepare.annotations and prepare.annotations.open_world_hint is True
+        query_output = by_name["query_evidence"].output_schema
+        assert query_output is not None
+        query_properties = query_output["$defs"]["QueryEnvelope"]["properties"]
+        assert "continuation" not in query_properties
+        assert "Exact query_evidence call" in query_properties["next_page"]["description"]
+
+        assert by_name["analyze"].annotations is not None
+        assert by_name["analyze"].annotations.read_only_hint is True
+        assert by_name["capture_and_analyze"].annotations is not None
+        assert by_name["capture_and_analyze"].annotations.destructive_hint is True
+        assert by_name["capture_and_analyze"].annotations.open_world_hint is True
+        prepare = by_name["prepare_providers"]
+        assert prepare.annotations is not None
+        assert prepare.annotations.open_world_hint is True
         assert prepare.annotations.read_only_hint is False
         assert prepare.annotations.destructive_hint is False
-        capture_names = {
-            capture_tool_name(capability)
-            for capability in CAPABILITIES
-            if compatible_capture_providers(capability)
-        }
-        assert all(
-            tool.annotations and tool.annotations.open_world_hint is (tool.name in capture_names)
-            for tool in tools
-            if tool.name != "prepare_providers"
-        )
+
         query = by_name["query_evidence"]
-        assert query.input_schema["properties"]["limit"]["minimum"] == 1
-        assert query.input_schema["properties"]["limit"]["maximum"] == 200
-        assert query.output_schema is not None
-        query_output = query.output_schema["$defs"]["QueryEnvelope"]["properties"]
-        assert "inventory snapshot" in query_output["continuation"]["description"]
+        assert query.input_schema["properties"]["page_size"]["minimum"] == 1
+        assert query.input_schema["properties"]["page_size"]["maximum"] == 200
         assert await server.list_resources() == []
         assert [item.uri_template for item in templates] == ["flameox://evidence/{evidence_id}"]
         assert templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
+        serialized_catalog = json.dumps(
+            [tool.model_dump(mode="json") for tool in tools], separators=(",", ":")
+        )
+        assert len(serialized_catalog) < 350_000
 
     anyio.run(inspect)
 
@@ -3333,8 +3321,13 @@ def test_mcp_analysis_does_not_expose_unexpected_exception_details(
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             result = await client.call_tool(
-                "preview_artifact",
-                {"sources": [{"kind": "path", "path": str(tmp_path / "input.json")}]},
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
+                    }
+                },
             )
 
         assert result.is_error is True
@@ -3359,8 +3352,13 @@ def test_mcp_analysis_wraps_unexpected_provider_failures(
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             result = await client.call_tool(
-                "preview_artifact",
-                {"sources": [{"kind": "path", "path": str(tmp_path / "input.json")}]},
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
+                    }
+                },
             )
 
         assert result.is_error is True
@@ -3384,20 +3382,26 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
         async with Client(
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
-            continuation: str | None = None
+            arguments: dict[str, Any] = {
+                "request": {
+                    "capability_id": "coverage.summary",
+                    "sources": [
+                        {
+                            "kind": "path",
+                            "path": str(artifact),
+                            "format": "coverage",
+                        }
+                    ],
+                },
+                "page_size": 100,
+            }
             terminal = None
             for _ in range(12):
-                terminal = await client.call_tool(
-                    "analyze_coverage_summary",
-                    {
-                        "sources": [{"kind": "path", "path": str(artifact), "format": "coverage"}],
-                        "limits": {"max_rows": 100},
-                        "continuation": continuation,
-                    },
-                )
-                continuation = terminal.structured_content["continuation"]
-                if continuation is None:
+                terminal = await client.call_tool("analyze", arguments)
+                next_page = terminal.structured_content.get("next_page")
+                if next_page is None:
                     break
+                arguments = next_page["arguments"]
 
         assert terminal is not None
         assert terminal.structured_content["truncation"]["reason"] == "provider_limit"
@@ -3530,7 +3534,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
 
 @pytest.mark.process
 @pytest.mark.serial
-def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path: Path) -> None:
+def test_real_stdio_initialize_and_catalog_match_the_runtime_contract(tmp_path: Path) -> None:
     async def exercise() -> None:
         parameters = StdioServerParameters(
             command=sys.executable,
@@ -3550,30 +3554,46 @@ def test_real_stdio_initialize_and_catalog_match_the_stateless_contract(tmp_path
             artifact = tmp_path / "sample.json"
             artifact.write_text('[{"value":1}]')
             inspected = await session.call_tool(
-                "preview_artifact",
-                {"sources": [{"kind": "path", "path": str(artifact)}]},
-            )
-            invalid = await session.call_tool(
-                "preview_artifact", {"sources": [], "options": {}, "unexpected": True}
-            )
-            captured = await session.call_tool(
-                "capture_process_output",
+                "analyze",
                 {
-                    "target": {
-                        "argv": [sys.executable, "-c", "print('stdio capture')"],
-                        "cwd": str(tmp_path),
-                    },
-                    "provider": {"kind": "direct"},
-                    "execution": {"kind": "single"},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(artifact)}],
+                    }
                 },
             )
-            await session.validate_tool_result("preview_artifact", inspected)
-            await session.validate_tool_result("capture_process_output", captured)
+            invalid = await session.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [],
+                        "options": {},
+                        "unexpected": True,
+                    }
+                },
+            )
+            captured = await session.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('stdio capture')"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                    }
+                },
+            )
+            await session.validate_tool_result("analyze", inspected)
+            await session.validate_tool_result("capture_and_analyze", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 50
-        assert "preview_artifact" in [tool.name for tool in tools.tools]
-        assert "capture_gpu_kernel_metrics" in [tool.name for tool in tools.tools]
+        assert len(tools.tools) == 6
+        assert "analyze" in [tool.name for tool in tools.tools]
+        assert "capture_and_analyze" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)
         assert invalid.is_error is True
         assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
@@ -3592,73 +3612,328 @@ def test_mcp_continuation_summary_names_safe_analysis_handoff(tmp_path: Path) ->
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             captured = await client.call_tool(
-                "capture_process_output",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [
-                            sys.executable,
-                            "-c",
-                            "[print(index) for index in range(4)]",
-                        ],
-                        "cwd": str(tmp_path),
-                        "console_output": "full",
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "[print(index) for index in range(4)]",
+                            ],
+                            "cwd": str(tmp_path),
+                            "console_output": "full",
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
                     },
-                    "provider": {"kind": "direct"},
-                    "execution": {"kind": "single"},
-                    "limits": {"max_rows": 2},
+                    "page_size": 2,
                 },
             )
             preserved = await client.call_tool(
-                "capture_process_output",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [
-                            sys.executable,
-                            "-c",
-                            "[print(index) for index in range(4)]",
-                        ],
-                        "cwd": str(tmp_path),
-                        "console_output": "full",
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "[print(index) for index in range(4)]",
+                            ],
+                            "cwd": str(tmp_path),
+                            "console_output": "full",
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                        "preserve": True,
                     },
-                    "provider": {"kind": "direct"},
-                    "execution": {"kind": "single"},
-                    "limits": {"max_rows": 2},
-                    "preserve": True,
+                    "page_size": 2,
                 },
             )
+            captured_next = captured.structured_content["next_page"]
             captured_second = await client.call_tool(
-                "preview_artifact",
-                {
-                    "sources": captured.structured_content["continuation_sources"],
-                    "options": {},
-                    "limits": {"max_rows": 2},
-                    "continuation": captured.structured_content["continuation"],
-                },
+                captured_next["tool"], captured_next["arguments"]
             )
+            preserved_next = preserved.structured_content["next_page"]
             preserved_second = await client.call_tool(
-                "preview_artifact",
-                {
-                    "sources": preserved.structured_content["continuation_sources"],
-                    "options": {},
-                    "limits": {"max_rows": 2},
-                    "continuation": preserved.structured_content["continuation"],
-                },
+                preserved_next["tool"], preserved_next["arguments"]
             )
 
         assert isinstance(captured.content[0], TextContent)
-        assert "call preview_artifact with continuation_sources" in captured.content[0].text
+        assert "call analyze with the exact next_page arguments" in captured.content[0].text
         assert "do not rerun capture" in captured.content[0].text
         assert [row["text"] for row in captured_second.structured_content["blocks"][1]["rows"]] == [
             "2",
             "3",
         ]
         assert isinstance(preserved.content[0], TextContent)
-        assert "call preview_artifact with continuation_sources" in preserved.content[0].text
+        assert "call analyze with the exact next_page arguments" in preserved.content[0].text
         assert "do not rerun capture" in preserved.content[0].text
-        assert preserved.structured_content["continuation_sources"][0]["kind"] == "evidence"
+        assert preserved_next["arguments"]["request"]["sources"][0]["kind"] == "evidence"
         assert [
             row["text"] for row in preserved_second.structured_content["blocks"][1]["rows"]
         ] == ["2", "3"]
+
+    anyio.run(exercise)
+
+
+def test_mcp_handoff_never_exceeds_the_server_result_bound(tmp_path: Path) -> None:
+    artifact = tmp_path / "candidates.sarif"
+    artifact.write_text(
+        json.dumps(
+            {
+                "version": "2.1.0",
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "scanner"}},
+                        "results": [
+                            {
+                                "ruleId": f"candidate-{index}",
+                                "message": {"text": "candidate"},
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": f"src/work-{index}.py"}
+                                        }
+                                    }
+                                ],
+                            }
+                            for index in range(2)
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    include_paths = ["src/*", *[f"unused/{index}-{'x' * 80}*" for index in range(80)]]
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(
+                evidence_directory=tmp_path / ".flameox",
+                limits=RequestLimits(max_result_bytes=4_096),
+            ),
+            raise_exceptions=True,
+        ) as client:
+            result = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "static.performance_candidates",
+                        "sources": [{"kind": "path", "path": str(artifact), "format": "sarif"}],
+                        "options": {"include_paths": include_paths},
+                    },
+                    "page_size": 1,
+                },
+            )
+
+        assert result.is_error is not True
+        assert len(canonical_bytes(result.structured_content)) <= 4_096
+        assert result.structured_content.get("next_page") is None
+        assert result.structured_content["continuation"] is None
+        assert result.structured_content["truncation"]["reason"] == "result_bytes"
+        summary = result.content[0]
+        assert isinstance(summary, TextContent)
+        assert "smaller page or simpler options" in summary.text
+
+    anyio.run(exercise)
+
+
+def test_mcp_preservation_refreshes_a_live_capture_handoff(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            captured = await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('one'); print('two')"],
+                            "cwd": str(tmp_path),
+                            "console_output": "full",
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                    },
+                    "page_size": 1,
+                },
+            )
+            preserved = await client.call_tool(
+                "preserve_evidence",
+                {"analysis_id": captured.structured_content["analysis_id"]},
+            )
+            refreshed = preserved.structured_content["next_page"]
+            second = await client.call_tool(refreshed["tool"], refreshed["arguments"])
+
+        assert refreshed["arguments"]["request"]["sources"][0]["kind"] == "evidence"
+        assert isinstance(preserved.content[0], TextContent)
+        assert "refreshed evidence-backed next_page" in preserved.content[0].text
+        assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
+
+    anyio.run(exercise)
+
+
+def test_mcp_failed_capture_retains_an_executable_preserved_handoff(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            failed = await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "print('one'); print('two'); raise SystemExit(7)",
+                            ],
+                            "cwd": str(tmp_path),
+                            "console_output": "full",
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                        "preserve": True,
+                    },
+                    "page_size": 1,
+                },
+            )
+            partial = failed.structured_content["details"]["partial_evidence"]
+            next_page = partial["next_page"]
+            second = await client.call_tool(next_page["tool"], next_page["arguments"])
+
+        assert failed.is_error is True
+        assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
+        assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
+
+    anyio.run(exercise)
+
+
+def test_mcp_handoffs_are_derived_while_the_runtime_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "rows.json"
+    artifact.write_text('[{"value":1},{"value":2}]')
+    original = AnalysisRuntime.next_analysis_request
+    observations: list[bool] = []
+
+    def checked(runtime: AnalysisRuntime, result: Mapping[str, Any]) -> dict[str, Any] | None:
+        observations.append(runtime._request_lock.locked())
+        return original(runtime, result)
+
+    monkeypatch.setattr(AnalysisRuntime, "next_analysis_request", checked)
+
+    async def exercise() -> None:
+        async with Client(
+            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+        ) as client:
+            analyzed = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(artifact)}],
+                    },
+                    "page_size": 1,
+                },
+            )
+            await client.call_tool(
+                "preserve_evidence",
+                {"analysis_id": analyzed.structured_content["analysis_id"]},
+            )
+            await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('captured')"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                    }
+                },
+            )
+
+    anyio.run(exercise)
+    assert observations == [True, True, True]
+
+
+def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    rescue = tmp_path / "rescue"
+
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=store), raise_exceptions=True) as client:
+            captured = await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('one'); print('two')"],
+                            "cwd": str(tmp_path),
+                            "console_output": "full",
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                    },
+                    "page_size": 1,
+                },
+            )
+            rescued = await client.call_tool(
+                "rescue_evidence",
+                {
+                    "analysis_id": captured.structured_content["analysis_id"],
+                    "destination": str(rescue),
+                },
+            )
+            next_page = rescued.structured_content["next_page"]
+
+        async with Client(
+            create_server(evidence_directory=rescue), raise_exceptions=True
+        ) as client:
+            second = await client.call_tool(next_page["tool"], next_page["arguments"])
+
+        assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
+        assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
+
+    anyio.run(exercise)
+
+
+def test_mcp_query_returns_an_exact_next_page(tmp_path: Path) -> None:
+    store = tmp_path / ".flameox"
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        for index in range(2):
+            artifact = tmp_path / f"query-{index}.json"
+            artifact.write_text(json.dumps([{"value": index}]))
+            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            runtime.preserve_evidence(result["analysis_id"])
+    finally:
+        runtime.close()
+
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=store), raise_exceptions=True) as client:
+            first = await client.call_tool(
+                "query_evidence", {"capability_id": "artifact.preview", "page_size": 1}
+            )
+            next_page = first.structured_content["next_page"]
+            second = await client.call_tool(next_page["tool"], next_page["arguments"])
+
+        assert next_page["arguments"]["capability_id"] == "artifact.preview"
+        assert next_page["arguments"]["page_size"] == 1
+        assert second.structured_content.get("next_page") is None
+        assert (
+            first.structured_content["inventory_digest"]
+            == second.structured_content["inventory_digest"]
+        )
 
     anyio.run(exercise)
 
@@ -3673,10 +3948,13 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
-                "preview_artifact",
+                "analyze",
                 {
-                    "sources": [{"kind": "path", "path": str(artifact)}],
-                    "options": {},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(artifact)}],
+                        "options": {},
+                    }
                 },
             )
             assert analyzed.is_error is False
@@ -3685,7 +3963,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             assert preserved.is_error is False
             evidence_id = preserved.structured_content["evidence_id"]
             assert any(block.type == "resource_link" for block in preserved.content)
-            queried = await client.call_tool("query_evidence", {"limit": 10})
+            queried = await client.call_tool("query_evidence", {"page_size": 10})
             assert queried.structured_content["evidence"][0]["evidence_id"] == evidence_id
             resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
             assert resource.contents[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
@@ -3694,16 +3972,19 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as restarted:
             reanalyzed = await restarted.call_tool(
-                "preview_artifact",
+                "analyze",
                 {
-                    "sources": [
-                        {
-                            "kind": "evidence",
-                            "evidence_id": evidence_id,
-                            "artifact_role": "input",
-                        }
-                    ],
-                    "options": {},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [
+                            {
+                                "kind": "evidence",
+                                "evidence_id": evidence_id,
+                                "artifact_role": "input",
+                            }
+                        ],
+                        "options": {},
+                    }
                 },
             )
             assert reanalyzed.is_error is False
@@ -3735,7 +4016,13 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
             create_server(evidence_directory=configured), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
-                "preview_artifact", {"sources": [{"kind": "path", "path": str(artifact)}]}
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(artifact)}],
+                    }
+                },
             )
             rescued = await client.call_tool(
                 "rescue_evidence",
@@ -3770,16 +4057,19 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             captured = await client.call_tool(
-                "capture_process_output",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [sys.executable, "-c", "print('ok')", secret_argument],
-                        "cwd": str(tmp_path),
-                        "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
-                    },
-                    "provider": {"kind": "direct"},
-                    "options": {},
-                    "execution": {"kind": "single"},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('ok')", secret_argument],
+                            "cwd": str(tmp_path),
+                            "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
+                        },
+                        "provider": {"kind": "direct"},
+                        "options": {},
+                        "execution": {"kind": "single"},
+                    }
                 },
             )
             assert captured.is_error is False
@@ -3825,10 +4115,13 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             invalid = await client.call_tool(
-                "preview_artifact",
+                "analyze",
                 {
-                    "sources": [{"kind": "path", "path": str(artifact)}],
-                    "options": {"unexpected": True},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(artifact)}],
+                        "options": {"unexpected": True},
+                    }
                 },
             )
             assert invalid.is_error is True
@@ -3836,15 +4129,15 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             assert invalid.structured_content is None
 
             for arguments in (
-                {"limit": 0},
-                {"limit": 201},
+                {"page_size": 0},
+                {"page_size": 201},
                 {"input_sha256": "not-a-digest"},
             ):
                 invalid_query = await client.call_tool("query_evidence", arguments)
                 assert invalid_query.is_error is True
                 assert invalid_query.structured_content is None
             for limit in (1, 200):
-                valid_query = await client.call_tool("query_evidence", {"limit": limit})
+                valid_query = await client.call_tool("query_evidence", {"page_size": limit})
                 assert valid_query.is_error is False
                 assert valid_query.structured_content is not None
 
@@ -3852,18 +4145,21 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             empty_path.mkdir()
             unmanaged_python = empty_path / "python"
             unmanaged_python.symlink_to(sys.executable)
-            monkeypatch.setattr("flameox.stateless.sys.executable", str(unmanaged_python))
+            monkeypatch.setattr("flameox.runtime.sys.executable", str(unmanaged_python))
             unavailable = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [sys.executable, "-c", "pass"],
-                        "cwd": str(tmp_path),
-                        "environment": {"PATH": str(empty_path)},
-                    },
-                    "provider": {"kind": "py-spy"},
-                    "options": {},
-                    "execution": {"kind": "single"},
+                    "request": {
+                        "capability_id": "cpu.hotspots",
+                        "target": {
+                            "argv": [sys.executable, "-c", "pass"],
+                            "cwd": str(tmp_path),
+                            "environment": {"PATH": str(empty_path)},
+                        },
+                        "provider": {"kind": "py-spy"},
+                        "options": {},
+                        "execution": {"kind": "single"},
+                    }
                 },
             )
             assert unavailable.is_error is True
@@ -3875,15 +4171,18 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             }
 
             failed = await client.call_tool(
-                "capture_process_output",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [sys.executable, "-c", "raise SystemExit(7)"],
-                        "cwd": str(tmp_path),
-                    },
-                    "provider": {"kind": "direct"},
-                    "options": {},
-                    "execution": {"kind": "single"},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "raise SystemExit(7)"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "options": {},
+                        "execution": {"kind": "single"},
+                    }
                 },
             )
             assert failed.is_error is True

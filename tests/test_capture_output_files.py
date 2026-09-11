@@ -7,6 +7,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     ExperimentCase,
@@ -14,7 +15,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     WorkloadBudget,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 def _experiment(oracle: list[str]) -> ExperimentDesign:

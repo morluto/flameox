@@ -76,7 +76,7 @@ they are not averaged as repeated samples. The best configuration is derived
 using Triton's lexicographic comparison. Native caches do not prove cache hits,
 device identity, semantic correctness, or representative performance improvement.
 
-`capture_triton_autotune` uses Triton 3.7 in the declared workload interpreter.
+The `triton.autotune` capture request uses Triton 3.7 in the declared workload interpreter.
 It sets `TRITON_CACHE_AUTOTUNING=1` and a fresh request-owned `TRITON_CACHE_DIR`,
 preserving the native cache bundle, including compilation artifacts. This is a
 cold-cache tuning experiment, not a warm-cache benchmark. Kernels must already

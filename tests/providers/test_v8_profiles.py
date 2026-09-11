@@ -7,8 +7,8 @@ import anyio
 import pytest
 
 from flameox.providers.capture import CAPTURE_BUILDERS
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CAPTURE_PROVIDER_CONTRACTS, CaptureTarget, PathSource
-from flameox.stateless import AnalysisRuntime
 
 
 def test_every_capture_contract_has_exactly_one_registered_builder() -> None:

@@ -10,8 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from flameox.providers.contracts import ProviderAnalysis
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.process

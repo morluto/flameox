@@ -152,7 +152,7 @@ include_external_packages = false
 [[tool.importlinter.contracts]]
 name = "Runtime core must not depend on transports"
 type = "forbidden"
-source_modules = ["flameox.stateless", "flameox.repository", "flameox.providers", "flameox.workers"]
+source_modules = ["flameox.runtime", "flameox.repository", "flameox.providers", "flameox.workers"]
 forbidden_modules = ["flameox.cli", "flameox.mcp"]
 
 [[tool.importlinter.contracts]]

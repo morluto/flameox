@@ -5,23 +5,28 @@ provider behavior, or lifecycle state.
 
 ## MCP catalog
 
-The catalog exposes task-shaped tools for client-side tool search. Flameox does not add a second
-search/inspect protocol in front of its operations. A caller that knows the evidence question can
-invoke its tool directly; an unfamiliar caller relies on the MCP client's ordinary tool search and
-then receives the selected tool's complete schema.
+The catalog exposes six tools. Capability-specific requests are discriminated unions, so the SDK
+still validates exact options, source cardinality, compatible providers, and execution modes while
+common transport fields and result schemas occur only once.
 
-There are exactly 50 tools:
+This replaces the per-capability MCP names from releases before this redesign. Calls such as
+`analyze_cpu_hotspots` now use `analyze` with
+`request.capability_id: "cpu.hotspots"`; calls such as `capture_process_output` now use
+`capture_and_analyze` with `request.capability_id: "artifact.preview"`. The former
+`continuation_sources` and CLI `continuation_handoff` fields are replaced by executable
+`next_page` calls. `flameox mcp inspect` is compact by default; use `--full` for the complete
+catalog. CLI results omit the process-local `analysis_id` because it cannot survive command exit.
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
-| Existing-artifact analysis | 26 | `analyze_cpu_hotspots`, `analyze_cpu_callers`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_pytest_fixtures`, `preview_artifact` | Read-only and idempotent. |
-| Capture and immediate analysis | 20 | `capture_cpu_hotspots`, `capture_cpu_callers`, `capture_triton_autotune`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
+| Existing-artifact analysis | 1 | `analyze` | Read-only and idempotent. |
+| Capture and immediate analysis | 1 | `capture_and_analyze` | Executes typed argv; not read-only or idempotent. |
 | Evidence lifecycle | 4 | `prepare_providers`, `preserve_evidence`, `rescue_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
-For CLI-side discovery, `flameox mcp inspect --summary` returns compact records containing each
-tool's name, description, required top-level inputs, and effect class. After selecting a tool,
+For CLI-side discovery, `flameox mcp inspect` returns compact records containing each tool's name,
+description, required top-level inputs, and standard MCP annotations. After selecting a tool,
 `flameox mcp inspect --tool TOOL_NAME` returns its complete input and output schemas. The unfiltered
-command remains the exact complete catalog. Unknown capability, capture-provider, and tool names
+catalog is available explicitly with `--full`. Unknown capability, capture-provider, and tool names
 return the requested value, bounded valid choices, and the exact discovery command to run next.
 An unsupported artifact format similarly returns the detected or declared format, the capability's
 accepted formats, and its exact analysis-tool name before provider decoding begins.
@@ -42,17 +47,19 @@ its parent before decoding or executing the workload, then returns the same resc
 `rescued`. The `--preserve` and `--rescue-to` options are mutually exclusive so the publication
 destination is unambiguous.
 
-The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
-registration API. The SDK derives each top-level input schema directly from the registered callable.
-A generated analysis tool has `sources`, capability-specific typed `options`, optional lowered
-`limits`, and an optional `continuation`. A generated capture tool has `target`, a discriminated
-`provider` union containing only compatible capture providers, capability-specific typed `options`,
-an explicit execution model, optional lowered `limits`, and optional `preserve`. Capabilities that
+The capability registry generates discriminated request variants through the Python MCP SDK 2.0
+registration API. `analyze.request` contains `capability_id`, `sources`, capability-specific typed
+`options`, and an optional `continuation`. `capture_and_analyze.request`
+contains `capability_id`, `target`, a discriminated `provider` union containing only compatible
+capture providers, typed `options`, an explicit execution model, and
+optional `preserve`. Capabilities that
 can analyze the multiple artifacts produced by paired cases expose the `single` or `experiment`
-union; single-artifact analyses expose only `single`. There is no extra request envelope and there
-are no free-form provider or analysis argument objects.
+union; single-artifact analyses expose only `single`. There are no free-form provider or analysis
+argument objects.
 
-Field descriptions are part of the public MCP contract. Shared source, target, limit, provider,
+Both tools expose only the semantic `page_size` beside the request. Byte, traversal, worker,
+process-output, memory, and provenance ceilings are server policy rather than caller-facing MCP
+knobs. Field descriptions are part of the public MCP contract. Shared source, target, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
 runtime validation, and every generated capability tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
@@ -63,11 +70,18 @@ and next action; it does not serialize the evidence tables a second time. Conten
 still identify the outcome and recovery path, while structured clients retain the authoritative
 bounded evidence. Preserved results also return a resource link.
 
-For a paginated MCP capture result, `continuation_sources` contains ready-to-submit ordered path
-sources while session scratch remains live, or evidence sources when the capture was preserved.
-The summary names the matching analysis tool and directs the caller to reuse those sources, the
-original options and limits, and the returned continuation without rerunning the workload. This
-handoff keeps continuation work read-only and preserves the captured workload identity.
+On the 2026 protocol, SDK cache hints mark the static tool and resource-template catalogs as
+public for one hour. Content-addressed evidence reads are immutable and receive a 24-hour private
+hint so they are reusable within one caller's authorization context. Older negotiated protocol
+revisions omit these fields.
+
+For every paginated MCP result, `next_page` contains the exact `analyze` tool name and complete
+arguments for the next call. It includes ordered live path sources or preserved evidence sources,
+the original options, page size, and continuation. Callers do not reconstruct state
+from prose, and capture continuation never reruns the workload. Preserving a live paginated
+analysis may release its scratch paths, so `preserve_evidence` returns a refreshed evidence-backed
+`next_page` that supersedes the earlier live-path handoff. `rescue_evidence` does the same for the
+alternate store that becomes active after reconnecting.
 
 Each capability declaration also owns its accepted source cardinality. MCP encodes that range in
 the generated `sources` schema, and the runtime checks the same range before resolving paths or
@@ -84,14 +98,17 @@ For example, a single Nsight Compute capture for kernel metrics has this argumen
 
 ```json
 {
-  "target": {
-    "argv": ["python", "kernel.py"],
-    "cwd": "/absolute/path/to/project"
-  },
-  "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
-  "options": {},
-  "execution": {"kind": "single"},
-  "preserve": true
+  "request": {
+    "capability_id": "gpu.kernel_metrics",
+    "target": {
+      "argv": ["python", "kernel.py"],
+      "cwd": "/absolute/path/to/project"
+    },
+    "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
+    "options": {},
+    "execution": {"kind": "single"},
+    "preserve": true
+  }
 }
 ```
 
@@ -164,15 +181,16 @@ inputs remain available, so an analysis of explicit paths can resume in a later 
 `flameox analyze --evidence EVIDENCE_ID` loads a preserved record's ordered analysis sources
 directly. Tokens bind ordered content digests, formats,
 producer identities, arguments, and limits, independently of storage paths and publication roles.
-After preserving a CLI capture, use its structured `continuation_handoff` with `--evidence` and
-repeat the original options, limits, and returned continuation. An unpreserved one-shot CLI capture
+Paginated CLI analysis returns an executable `next_page.argv` for its explicit paths or evidence
+record. After preserving a CLI capture, execute the same field. A rescued handoff also includes
+the exact `next_page.environment` needed to open its alternate evidence store. An unpreserved CLI capture
 sets continuation to null and reports the exact preservation or rescue rerun because its scratch is
 released at exit. Scratch can be released immediately after preserved evidence is available.
 A changed input cannot reuse a continuation. Tokens issued by older path-bound implementations
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
-For oversized text lines, `preview_artifact` also accepts
+For oversized text lines, the `artifact.preview` analyze request also accepts
 `options: {"text_fragment_chars": 1024}` (1–4,096 decoded characters per fragment).
 This opt-in mode requires text files and counts fragment rows instead of lines;
 start a fresh page when switching modes. Rows carry one-based `line`, zero-based
@@ -289,11 +307,11 @@ declared seed. The semantic oracle runs after every successful capture in that c
 `FLAMEOX_CAPTURE_STDOUT` and `FLAMEOX_CAPTURE_STDERR` identify its captured files, and a nonzero
 exit excludes the corresponding case-block observation from paired comparison.
 
-Comparison tools consume explicit artifacts; they do not capture their inputs. A caller captures
+Comparison capabilities consume explicit artifacts; they do not capture their inputs. A caller captures
 representative baseline and candidate summaries separately, preserves them when durable provenance
-is needed, and supplies at least two sources to `analyze_benchmark_compare`,
-`analyze_inference_compare`, or `analyze_kernel_compare`. Flameox does not advertise
-`capture_*_compare`: experiment capture reports the declared cases' effect but does not create the
+is needed, and supplies at least two sources with capability `benchmark.compare`,
+`inference.compare`, or `kernel.compare`. The capture schema omits these variants: experiment
+capture reports the declared cases' effect but does not create the
 case-grouped native inputs required by artifact comparison.
 
 ## Stable failure codes
@@ -325,8 +343,10 @@ For example, `flameox capture --workload-budget
 '{"max_memory_bytes":8589934592}' ...` requests an 8 GiB workload process-tree
 budget without changing decoder protection. Unspecified analysis limits retain
 their defaults and hard contract
-maxima still apply. MCP request limits may only lower these startup bounds; no
-tool can raise them or reconfigure the server. No workspace configuration is created.
+maxima still apply. MCP tools expose `page_size`; they cannot modify or reveal the server's
+enforcement policy. No workspace configuration is created.
+Paginated `flameox evidence query` output also carries an executable `next_page.argv` with the
+original filters, page size, and snapshot-bound cursor.
 
 `setup` detects supported coding agents and uses one multi-select prompt to choose which global MCP
 client configurations to update. It preserves unrelated JSON or TOML content and writes stdio

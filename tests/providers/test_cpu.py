@@ -10,9 +10,9 @@ from typing import Any
 import anyio
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
 from flameox.source_files import sha256_file
-from flameox.stateless import AnalysisRuntime
 
 
 def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) -> None:
@@ -334,7 +334,7 @@ def test_pyspy_capture_rejects_ambient_path_fallback(
     unmanaged_bin.mkdir(parents=True)
     unmanaged_python = unmanaged_bin / "python"
     unmanaged_python.symlink_to(workload_python)
-    monkeypatch.setattr("flameox.stateless.sys.executable", str(unmanaged_python))
+    monkeypatch.setattr("flameox.runtime.sys.executable", str(unmanaged_python))
     executable = tmp_path / "bin" / "py-spy"
     executable.parent.mkdir()
     profile = {

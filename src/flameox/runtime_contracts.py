@@ -945,17 +945,34 @@ class AnalysisFailure(StrictModel):
 
 
 class AnalysisResult(StrictModel):
-    analysis_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
-    capability_id: str
-    provider: ProviderIdentity
-    inputs: list[InputIdentity]
-    blocks: list[EvidenceBlock]
+    analysis_id: str = Field(
+        description="Session-local handle accepted by preserve_evidence and rescue_evidence.",
+        pattern=LOWERCASE_SHA256_PATTERN,
+    )
+    capability_id: str = Field(description="Evidence capability that produced this result.")
+    provider: ProviderIdentity = Field(description="Analysis provider identity and version.")
+    inputs: list[InputIdentity] = Field(
+        description="Ordered analyzed input identities and digests."
+    )
+    blocks: list[EvidenceBlock] = Field(description="Bounded metrics and evidence tables.")
     coverage: Coverage
-    truncation: Truncation | None
-    limitations: list[str]
-    continuation: str | None
-    capture: dict[str, JsonValue] | None = None
-    analysis_failure: AnalysisFailure | None = None
+    truncation: Truncation | None = Field(
+        description="The terminating bound and next unread offset, or null when complete."
+    )
+    limitations: list[str] = Field(
+        description="Constraints on interpreting or generalizing the evidence."
+    )
+    continuation: str | None = Field(
+        description="Opaque next-page token, or null when no further page is retrievable."
+    )
+    capture: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Capture executions and outcome when Flameox produced the input artifacts.",
+    )
+    analysis_failure: AnalysisFailure | None = Field(
+        default=None,
+        description="Typed post-capture analysis failure, or null when analysis succeeded.",
+    )
 
 
 @dataclass(frozen=True, slots=True)

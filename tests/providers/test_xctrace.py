@@ -10,8 +10,8 @@ import pytest
 
 from flameox.providers.contracts import ProviderFailure
 from flameox.providers.xctrace import XctraceProvider
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.unit

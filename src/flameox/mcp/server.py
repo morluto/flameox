@@ -3,52 +3,40 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, cast
 
-from mcp.server import MCPServer
+from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
 from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent, ToolAnnotations
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    GetJsonSchemaHandler,
-    JsonValue,
-    RootModel,
-)
-from pydantic.json_schema import JsonSchemaValue
+from pydantic import Field
 
 import flameox.providers.environment as provider_setup
 from flameox import __version__
-from flameox.mcp.capability_tools import (
-    Execution,
-    ExperimentExecution,
-    SingleExecution,
-    analysis_tool_name,
-    capture_provider_type,
-    capture_tool_name,
+from flameox.canonical import canonical_bytes
+from flameox.mcp.capability_tools import AnalysisRequest, CaptureRequest, ExperimentExecution
+from flameox.mcp.result_contracts import (
+    AnalysisEnvelope,
+    AnalysisOutcome,
+    PreparationOutcome,
+    PreservationOutcome,
+    QueryOutcome,
+    RescueOutcome,
 )
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CAPABILITIES,
     LOWERCASE_SHA256_PATTERN,
-    Capability,
+    MAX_ROWS,
     CaptureTarget,
-    Coverage,
-    DirectTarget,
     RequestLimits,
     RuntimeFailure,
-    Source,
-    compatible_capture_providers,
 )
-from flameox.stateless import AnalysisRuntime
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 CAPTURE = ToolAnnotations(
@@ -71,248 +59,75 @@ PREPARE = ToolAnnotations(
 )
 
 
-class _Envelope(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-
-class ToolFailureEnvelope(_Envelope):
-    code: str = Field(description="Stable machine-readable failure code.")
-    message: str = Field(description="Human-readable failure and recovery guidance.")
-    details: dict[str, JsonValue] = Field(description="Failure-specific structured context.")
-
-
-class AnalysisEnvelope(_Envelope):
-    analysis_id: str = Field(description="Session-local handle accepted by preserve_evidence.")
-    capability_id: str = Field(description="Evidence question answered by this result.")
-    provider: dict[str, JsonValue] = Field(description="Provider identity and version.")
-    inputs: list[dict[str, JsonValue]] = Field(
-        description="Digests and identities of analyzed inputs."
-    )
-    blocks: list[dict[str, JsonValue]] = Field(description="Bounded metrics and evidence tables.")
-    coverage: Coverage
-    truncation: dict[str, JsonValue] | None = Field(
-        description="The terminating bound and next unread offset, or null when not truncated."
-    )
-    limitations: list[str] = Field(
-        description="Constraints on interpreting or generalizing the evidence."
-    )
-    continuation: str | None = Field(
-        description="Opaque next-page token; null means no further page is retrievable."
-    )
-    continuation_sources: list[dict[str, JsonValue]] | None = Field(
-        default=None,
-        description=(
-            "Ready-to-submit ordered sources for the matching analysis tool when continuation "
-            "is non-null."
-        ),
+def _analysis_summary(value: dict[str, Any], *, resource: ResourceLink | None) -> str:
+    coverage = cast(dict[str, Any], value["coverage"])
+    state = "complete" if coverage["complete"] is True else "bounded or incomplete"
+    truncation = value.get("truncation")
+    provider_limited = isinstance(truncation, dict) and truncation.get("reason") == "provider_limit"
+    result_limited = isinstance(truncation, dict) and truncation.get("reason") == "result_bytes"
+    if isinstance(value.get("next_page"), dict):
+        next_action = "call analyze with the exact next_page arguments"
+        if value.get("capture") is not None:
+            next_action += "; do not rerun capture"
+    elif resource is not None or isinstance(value.get("preserved"), dict):
+        next_action = "follow the returned evidence resource"
+    elif provider_limited:
+        next_action = "narrow the semantic query or recapture; no continuation is available"
+    elif result_limited:
+        next_action = "use a smaller page or simpler options and restart the analysis"
+    else:
+        next_action = "preserve the session analysis if durable evidence is needed"
+    return (
+        f"{value['capability_id']}: analysis {state}; analysis_id={value['analysis_id']}; "
+        f"next: {next_action}. Full bounded evidence is in structuredContent."
     )
 
 
-class ExternalRequirementEnvelope(BaseModel):
-    provider_id: str = Field(description="Host provider that Flameox cannot install.")
-    guidance: str = Field(description="Host installation or access requirement.")
-
-
-class PreparationStatusEnvelope(BaseModel):
-    status: Literal["prepared", "not_applicable"] = Field(
-        description="Whether a managed uvx environment was prepared."
-    )
-
-
-class LauncherEnvelope(BaseModel):
-    command: str = Field(description="Executable for the prepared MCP launcher.")
-    args: list[str] = Field(description="Arguments for the prepared MCP launcher.")
-
-
-class ReconnectActionEnvelope(BaseModel):
-    kind: Literal["reconnect_mcp"] = Field(description="Reconnect the MCP server process.")
-    message: str = Field(
-        description="Handoff conditions and session-evidence preservation guidance."
-    )
-    necessity: Literal["required", "conditional"]
-
-
-class PreparationEnvelope(_Envelope):
-    requested_providers: list[str] = Field(
-        description="Complete provider set requested by the caller."
-    )
-    prepared_managed_providers: list[str] = Field(
-        description="Requested providers included in the uvx environment."
-    )
-    external_requirements: list[ExternalRequirementEnvelope] = Field(
-        description="Host tools, drivers, devices, or permissions still required."
-    )
-    preparation: PreparationStatusEnvelope = Field(
-        description="Managed environment preparation status."
-    )
-    launcher: LauncherEnvelope = Field(
-        description="Version-pinned launcher for the requested provider set."
-    )
-    next_action: ReconnectActionEnvelope | None = Field(
-        description=(
-            "Reconnection handoff with explicit necessity; null for ready or host-only preparation."
-        )
-    )
-    activation_status: Literal["ready", "restart_required", "unknown", "not_applicable"]
-    workload_requirements: list[ExternalRequirementEnvelope] = Field(
-        description="Requirements to verify in the exact workload environment before capture."
-    )
-
-
-class PreservationEnvelope(_Envelope):
-    evidence_id: str = Field(description="Content-addressed immutable evidence identifier.")
-    uri: str = Field(description="Opaque MCP resource URI for the preserved manifest projection.")
-    artifact_count: int = Field(description="Native artifacts preserved with the manifest.")
-
-
-class RescueEnvironmentEnvelope(_Envelope):
-    FLAMEOX_DATA_DIR: str = Field(
-        description="Evidence directory to configure when restarting or reconnecting Flameox."
-    )
-
-
-class RescueActionEnvelope(_Envelope):
-    kind: Literal["restart_reconnect"]
-    environment: RescueEnvironmentEnvelope
-    message: str = Field(description="Bounded operator guidance for reopening rescued evidence.")
-
-
-class RescueEnvelope(PreservationEnvelope):
-    rescue_destination: str = Field(description="Absolute directory containing rescued evidence.")
-    next_action: RescueActionEnvelope
-
-
-class QueryEnvelope(_Envelope):
-    evidence: list[dict[str, JsonValue]] = Field(
-        description="Matching immutable evidence summaries."
-    )
-    continuation: str | None = Field(
-        description="Opaque cursor bound to this immutable inventory snapshot."
-    )
-    inventory_digest: str = Field(
-        description="Digest of the inventory snapshot used for this query."
-    )
-
-
-class _ObjectOutcome(RootModel[Any]):
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: Any, handler: GetJsonSchemaHandler
-    ) -> JsonSchemaValue:
-        schema = handler(core_schema)
-        schema["type"] = "object"
-        return schema
-
-
-class PreparationOutcome(_ObjectOutcome):
-    root: PreparationEnvelope | ToolFailureEnvelope
-
-
-class AnalysisOutcome(_ObjectOutcome):
-    root: AnalysisEnvelope | ToolFailureEnvelope
-
-
-class PreservationOutcome(_ObjectOutcome):
-    root: PreservationEnvelope | ToolFailureEnvelope
-
-
-class RescueOutcome(_ObjectOutcome):
-    root: RescueEnvelope | ToolFailureEnvelope
-
-
-class QueryOutcome(_ObjectOutcome):
-    root: QueryEnvelope | ToolFailureEnvelope
-
-
-def _success_summary(value: dict[str, Any], *, resource: ResourceLink | None) -> str:
-    capability_id = value.get("capability_id")
-    if isinstance(capability_id, str):
-        coverage = value.get("coverage")
-        complete = isinstance(coverage, dict) and coverage.get("complete") is True
-        state = "complete" if complete else "bounded or incomplete"
-        continuation = value.get("continuation")
-        preserved = value.get("preserved")
-        truncation = value.get("truncation")
-        provider_limited = (
-            isinstance(truncation, dict) and truncation.get("reason") == "provider_limit"
-        )
-        if isinstance(continuation, str):
-            capability = next((item for item in CAPABILITIES if item.id == capability_id), None)
-            analysis_tool = analysis_tool_name(capability) if capability is not None else None
-            if analysis_tool is None:
-                next_action = "request the continuation page with the same analysis request"
-            elif value.get("capture") is not None:
-                next_action = (
-                    f"call {analysis_tool} with continuation_sources, the original options and "
-                    "limits, and the returned continuation; do not rerun capture"
-                )
-            else:
-                next_action = (
-                    f"call {analysis_tool} again with the same sources, options, limits, and the "
-                    "returned continuation"
-                )
-        elif resource is not None or isinstance(preserved, dict):
-            next_action = "follow the returned evidence resource"
-        elif provider_limited:
-            next_action = "narrow the semantic query or recapture; no continuation is available"
-        else:
-            next_action = "preserve the session analysis if durable evidence is needed"
-        return (
-            f"{capability_id}: analysis {state}; analysis_id={value.get('analysis_id')}; "
-            f"next: {next_action}. Full bounded evidence is in structuredContent."
-        )
-    evidence_id = value.get("evidence_id")
-    if isinstance(evidence_id, str):
-        if value.get("rescue_destination") is not None:
-            return (
-                f"Evidence {evidence_id} rescued with "
-                f"{value.get('artifact_count', 0)} artifact(s); "
-                "next: restart or reconnect with the returned FLAMEOX_DATA_DIR. "
-                "Full details are in structuredContent."
-            )
-        return (
-            f"Evidence {evidence_id} preserved with {value.get('artifact_count', 0)} artifact(s); "
-            "next: follow the returned evidence resource. Full details are in structuredContent."
-        )
-    if "requested_providers" in value:
-        preparation_action = value.get("next_action")
+def _preparation_summary(value: dict[str, Any]) -> str:
+    next_action = value["next_action"]
+    action = "reconnect using the returned launcher" if next_action else "continue capture"
+    if isinstance(next_action, dict) and next_action["necessity"] == "conditional":
+        action = "verify the active environment; reconnect only if support is absent"
+    if value["external_requirements"]:
         action = (
-            "reconnect using the returned launcher" if preparation_action else "continue capture"
-        )
-        if (
-            isinstance(preparation_action, dict)
-            and preparation_action.get("necessity") == "conditional"
-        ):
-            action = (
-                "verify the active environment; reconnect only if the requested support is absent"
-            )
-        if value.get("external_requirements"):
-            action = (
-                (action + "; " if preparation_action else "")
-                + "verify or satisfy the listed external requirements before capture; "
-                "host readiness has not been verified"
-            )
-        if value.get("workload_requirements"):
-            action += "; verify the listed requirements in the exact workload interpreter"
-        return (
-            f"Provider preparation completed; next: {action}. "
-            "Full details are in structuredContent."
-        )
-    if "evidence" in value:
-        evidence = value.get("evidence")
-        count = len(evidence) if isinstance(evidence, list) else 0
-        action = "request the continuation page" if value.get("continuation") else "query complete"
-        return (
-            f"Found {count} evidence record(s); next: {action}. "
-            "Full details are in structuredContent."
-        )
-    return "Operation completed. Full details are in structuredContent."
+            action + "; " if next_action else ""
+        ) + "satisfy the listed external requirements before capture; host readiness is unknown"
+    if value["workload_requirements"]:
+        action += "; verify the listed requirements in the workload interpreter"
+    return f"Provider preparation completed; next: {action}. Details are in structuredContent."
 
 
-def _success(value: dict[str, Any], *, resource: ResourceLink | None = None) -> CallToolResult:
-    content: list[ContentBlock] = [
-        TextContent(type="text", text=_success_summary(value, resource=resource))
-    ]
+def _evidence_summary(value: dict[str, Any], *, rescued: bool) -> str:
+    if rescued:
+        action = "restart or reconnect with the returned FLAMEOX_DATA_DIR"
+        if value.get("next_page") is not None:
+            action += ", then use this refreshed next_page"
+        verb = "rescued"
+    else:
+        action = (
+            "use this refreshed evidence-backed next_page"
+            if value.get("next_page") is not None
+            else "follow the returned evidence resource"
+        )
+        verb = "preserved"
+    return (
+        f"Evidence {value['evidence_id']} {verb} with {value['artifact_count']} artifact(s); "
+        f"next: {action}. Full details are in structuredContent."
+    )
+
+
+def _query_summary(value: dict[str, Any]) -> str:
+    action = "call the exact next_page" if value.get("next_page") else "query complete"
+    return (
+        f"Found {len(value['evidence'])} evidence record(s); next: {action}. "
+        "Full details are in structuredContent."
+    )
+
+
+def _success(
+    value: dict[str, Any], *, summary: str, resource: ResourceLink | None = None
+) -> CallToolResult:
+    content: list[ContentBlock] = [TextContent(type="text", text=summary)]
     if resource is not None:
         content.append(resource)
     return CallToolResult(content=content, structured_content=value)
@@ -332,24 +147,33 @@ def _failure(error: RuntimeFailure, *, resource: ResourceLink | None = None) -> 
     )
 
 
-def _attach_continuation_sources(active_runtime: AnalysisRuntime, value: dict[str, Any]) -> None:
-    if not isinstance(value.get("continuation"), str):
+def _attach_next_page(
+    value: dict[str, Any],
+    request: dict[str, Any] | None,
+    *,
+    max_result_bytes: int,
+) -> None:
+    """Project an internal continuation into one bounded, executable MCP call."""
+
+    if request is None:
         return
-    preserved = value.get("preserved")
-    if isinstance(preserved, dict):
-        projection = active_runtime.read_evidence_agent_projection(str(preserved["evidence_id"]))
-        value["continuation_sources"] = projection["analysis_sources"]
+    limits = request.pop("limits")
+    if "continuation" in value:
+        value["continuation"] = None
+    value["next_page"] = {
+        "tool": "analyze",
+        "arguments": {"request": request, "page_size": limits["max_rows"]},
+    }
+    if len(canonical_bytes(value)) <= max_result_bytes:
         return
-    value["continuation_sources"] = [
-        {
-            "kind": "path",
-            "path": item["path"],
-            "format": item["format"],
-            "producer": item.get("producer"),
-            "expected_sha256": item["sha256"],
-        }
-        for item in value["inputs"]
-    ]
+
+    # The runtime bounded the evidence before the transport-only handoff existed. If the
+    # complete request cannot fit, preserve the evidence bound and report a non-resumable
+    # byte truncation instead of returning an oversized or partial invocation.
+    value["next_page"] = None
+    truncation = value.get("truncation")
+    next_offset = truncation.get("next_offset", 0) if isinstance(truncation, dict) else 0
+    value["truncation"] = {"reason": "result_bytes", "next_offset": next_offset}
 
 
 def create_server(
@@ -381,17 +205,25 @@ def create_server(
             "session-local unless preserve_evidence is called. If a capture reports a missing "
             "Flameox-managed provider, call prepare_providers with the complete desired provider "
             "set and reconnect with its returned launcher. Profiles are exploratory: use "
-            "capture_* with execution.kind=experiment for baseline/candidate cases measured in "
+            "capture_and_analyze with execution.kind=experiment for baseline/candidate cases "
+            "measured in "
             "randomized paired blocks with a wall-clock effect and semantic oracle. Use "
             "benchmark.scaling for measurements across a declared numeric input axis, and "
-            "analyze_*_compare for compatible native artifacts captured separately. Flameox "
+            "the comparison analysis capabilities for compatible artifacts captured separately. "
+            "Flameox "
             "never installs host tools, searches parent directories, accepts shell strings, or "
             "creates durable jobs."
         ),
         lifespan=lifespan,
+        cache_hints={
+            "tools/list": CacheHint(ttl_ms=3_600_000, scope="public"),
+            "resources/list": CacheHint(ttl_ms=3_600_000, scope="public"),
+            "resources/read": CacheHint(ttl_ms=86_400_000, scope="private"),
+            "resources/templates/list": CacheHint(ttl_ms=3_600_000, scope="public"),
+        },
     )
 
-    @server.tool(annotations=PREPARE, structured_output=True)
+    @server.tool(annotations=PREPARE)
     async def prepare_providers(
         ctx: Context[AnalysisRuntime],
         provider_ids: Annotated[
@@ -414,6 +246,7 @@ def create_server(
         """Prepare managed providers and return any required MCP reconnection action."""
 
         try:
+            await ctx.report_progress(0.0, message="preparing selected providers")
             preparation = await runtime(ctx).dependencies.prepare(provider_ids, timeout_seconds)
         except provider_setup.ProviderSelectionFailure as error:
             return _failure(RuntimeFailure("INVALID_INPUT", str(error)))
@@ -435,286 +268,165 @@ def create_server(
                     "returned launcher. Reconnection ends session-local evidence access."
                 ),
             }
-        return _success(
-            {
-                "requested_providers": preparation.requested_providers,
-                "prepared_managed_providers": preparation.prepared_managed_providers,
-                "external_requirements": [
-                    {
-                        "provider_id": requirement.provider_id,
-                        "guidance": requirement.guidance,
-                    }
-                    for requirement in preparation.external_requirements
-                ],
-                "preparation": {"status": preparation.preparation_status},
-                "launcher": {
-                    "command": preparation.launcher_command,
-                    "args": preparation.launcher_args,
-                },
-                "next_action": next_action,
-                "activation_status": preparation.activation_status,
-                "workload_requirements": [
-                    {"provider_id": item.provider_id, "guidance": item.guidance}
-                    for item in preparation.workload_requirements
-                ],
-            }
+        value = {
+            "requested_providers": preparation.requested_providers,
+            "prepared_managed_providers": preparation.prepared_managed_providers,
+            "external_requirements": [
+                {
+                    "provider_id": requirement.provider_id,
+                    "guidance": requirement.guidance,
+                }
+                for requirement in preparation.external_requirements
+            ],
+            "preparation": {"status": preparation.preparation_status},
+            "launcher": {
+                "command": preparation.launcher_command,
+                "args": preparation.launcher_args,
+            },
+            "next_action": next_action,
+            "activation_status": preparation.activation_status,
+            "workload_requirements": [
+                {"provider_id": item.provider_id, "guidance": item.guidance}
+                for item in preparation.workload_requirements
+            ],
+        }
+        return _success(value, summary=_preparation_summary(value))
+
+    @server.tool(annotations=READ_ONLY)
+    async def analyze(
+        request: AnalysisRequest,
+        ctx: Context[AnalysisRuntime],
+        page_size: Annotated[
+            int,
+            Field(description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS),
+        ] = 100,
+    ) -> Annotated[CallToolResult, AnalysisOutcome]:
+        """Analyze existing native artifacts with one typed evidence capability."""
+
+        try:
+            await ctx.report_progress(0.0, message=f"analyzing {request.capability_id}")
+            value, next_request = await runtime(ctx).run_in_request(
+                partial(
+                    runtime(ctx).analyze_page,
+                    request.capability_id,
+                    request.sources,
+                    request.options.model_dump(),
+                    limits=RequestLimits(max_rows=page_size),
+                    continuation=request.continuation,
+                )
+            )
+            _attach_next_page(
+                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
+            )
+            return _success(value, summary=_analysis_summary(value, resource=None))
+        except RuntimeFailure as error:
+            return _failure(error)
+        except OSError:
+            return _failure(
+                RuntimeFailure("DECODE_FAILURE", "Input could not be read during analysis.")
+            )
+        except (ValueError, json.JSONDecodeError):
+            return _failure(
+                RuntimeFailure("DECODE_FAILURE", "Input could not be decoded during analysis.")
+            )
+        except Exception:
+            return _failure(RuntimeFailure("ANALYSIS_FAILURE", "Analysis failed unexpectedly."))
+
+    @server.tool(annotations=CAPTURE)
+    async def capture_and_analyze(
+        request: CaptureRequest,
+        ctx: Context[AnalysisRuntime],
+        page_size: Annotated[
+            int,
+            Field(description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS),
+        ] = 100,
+    ) -> Annotated[CallToolResult, AnalysisOutcome]:
+        """Execute a typed target, capture native artifacts, and analyze them."""
+
+        async def progress(current: int, total: int, message: str) -> None:
+            await ctx.report_progress(float(current), float(total), message)
+
+        target = CaptureTarget(
+            **request.target.model_dump(),
+            provider_id=request.provider.kind,
+            capture_arguments=request.provider.options.model_dump(),
+            analysis_arguments=request.options.model_dump(),
         )
-
-    def analysis_handler(capability: Capability) -> Callable[..., Awaitable[CallToolResult]]:
-        async def handler(
-            sources: Annotated[
-                list[Source],
-                Field(
-                    description="Native paths or preserved evidence artifacts to analyze.",
-                    min_length=1,
-                    max_length=32,
-                ),
-            ],
-            ctx: Context[AnalysisRuntime],
-            options: Any = None,
-            limits: Annotated[
-                RequestLimits | None,
-                Field(description="Optional bounds that may only lower the server limits."),
-            ] = None,
-            continuation: Annotated[
-                str | None,
-                Field(
-                    description=(
-                        "Opaque token from the previous page; repeat the same sources, "
-                        "options, and limits."
-                    )
-                ),
-            ] = None,
-        ) -> Annotated[CallToolResult, AnalysisOutcome]:
-            if options is None:
-                options = capability.model.model_validate({})
-            try:
-                return _success(
-                    await runtime(ctx).run_in_request(
-                        partial(
-                            runtime(ctx).analyze,
-                            capability.id,
-                            sources,
-                            options.model_dump(),
-                            limits=limits,
-                            continuation=continuation,
-                        )
-                    )
-                )
-            except RuntimeFailure as error:
-                return _failure(error)
-            except OSError:
-                return _failure(
-                    RuntimeFailure("DECODE_FAILURE", "Input could not be read during analysis.")
-                )
-            except (ValueError, json.JSONDecodeError):
-                return _failure(
-                    RuntimeFailure("DECODE_FAILURE", "Input could not be decoded during analysis.")
-                )
-            except Exception:
-                return _failure(RuntimeFailure("ANALYSIS_FAILURE", "Analysis failed unexpectedly."))
-
-        # MCP SDK 2.0 derives schemas and diagnostic names from the registered callable.
-        handler.__name__ = analysis_tool_name(capability)
-        handler.__annotations__["sources"] = Annotated[
-            list[Source],
-            Field(
-                description="Native paths or preserved evidence artifacts to analyze.",
-                min_length=capability.minimum_sources,
-                max_length=capability.maximum_sources,
-            ),
-        ]
-        handler.__annotations__["options"] = Annotated[
-            capability.model,
-            Field(description=f"Options for {capability.summary.lower()}"),
-        ]
-        if any(field.is_required() for field in capability.model.model_fields.values()):
-            signature = inspect.signature(handler, eval_str=True)
-            parameters = list(signature.parameters.values())
-            option_index = next(
-                index for index, parameter in enumerate(parameters) if parameter.name == "options"
+        experiment = (
+            request.execution.design if isinstance(request.execution, ExperimentExecution) else None
+        )
+        try:
+            value, next_request = await runtime(ctx).capture_analysis_page(
+                target,
+                request.capability_id,
+                mode=request.execution.kind,
+                experiment=experiment,
+                limits=RequestLimits(max_rows=page_size),
+                progress=progress,
+                preserve=request.preserve,
             )
-            parameters[option_index] = parameters[option_index].replace(
-                default=inspect.Parameter.empty
+            _attach_next_page(
+                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
             )
-            handler.__signature__ = signature.replace(parameters=parameters)  # type: ignore[attr-defined]
-        return handler
-
-    def capture_handler(
-        capability: Capability,
-        provider_type: Any,
-    ) -> Callable[..., Awaitable[CallToolResult]]:
-        async def handler(
-            target: Annotated[
-                DirectTarget, Field(description="Process target to execute and capture.")
-            ],
-            provider: Any,
-            execution: Annotated[
-                Execution, Field(description="Run once or execute a randomized paired experiment.")
-            ],
-            ctx: Context[AnalysisRuntime],
-            options: Any = None,
-            limits: Annotated[
-                RequestLimits | None,
-                Field(description="Optional bounds that may only lower the server limits."),
-            ] = None,
-            preserve: Annotated[
-                bool,
-                Field(
-                    description=(
-                        "Preserve this session analysis and its native artifacts as "
-                        "immutable evidence."
-                    )
-                ),
-            ] = False,
-        ) -> Annotated[CallToolResult, AnalysisOutcome]:
-            if options is None:
-                options = capability.model.model_validate({})
-
-            async def progress(current: int, total: int, message: str) -> None:
-                await ctx.report_progress(float(current), float(total), message)
-
-            target = CaptureTarget(
-                **target.model_dump(),
-                provider_id=provider.kind,
-                capture_arguments=provider.options.model_dump(),
-                analysis_arguments=options.model_dump(),
-            )
-            experiment = execution.design if isinstance(execution, ExperimentExecution) else None
-            try:
-                value = await runtime(ctx).capture_and_analyze(
-                    target,
-                    capability.id,
-                    mode=execution.kind,
-                    experiment=experiment,
-                    limits=limits,
-                    progress=progress,
-                    preserve=preserve,
+            failed = [
+                item for item in value["capture"]["executions"] if item["status"] != "succeeded"
+            ]
+            preserved = value.get("preserved")
+            link = None
+            if isinstance(preserved, dict):
+                link = ResourceLink(
+                    type="resource_link",
+                    uri=preserved["uri"],
+                    name=f"Evidence {preserved['evidence_id']}",
+                    mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
                 )
-                failed = [
-                    item for item in value["capture"]["executions"] if item["status"] != "succeeded"
-                ]
-                preserved = value.get("preserved")
-                link = None
-                if isinstance(preserved, dict):
-                    link = ResourceLink(
-                        type="resource_link",
-                        uri=preserved["uri"],
-                        name=f"Evidence {preserved['evidence_id']}",
-                        mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
-                    )
-                if value["capture"]["outcome"]["status"] != "succeeded":
-                    return _failure(
-                        RuntimeFailure(
-                            "EXECUTION_FAILURE",
-                            "One or more capture executions failed; consult exit attribution "
-                            "and preserved diagnostics before inferring workload failure.",
-                            details={"partial_evidence": value, "failed_executions": failed},
-                        ),
-                        resource=link,
-                    )
-                analysis_failure = value.get("analysis_failure")
-                if isinstance(analysis_failure, dict):
-                    return _failure(
-                        RuntimeFailure(
-                            str(analysis_failure["code"]),
-                            "Capture completed, but requested analysis failed. "
-                            "Preserve the returned analysis_id if not already preserved, then "
-                            "read the evidence resource and retry "
-                            f"{analysis_tool_name(capability)} with its analysis_sources "
-                            "after addressing analysis_failure; do not rerun the target.",
-                            details={"partial_evidence": value},
-                        ),
-                        resource=link,
-                    )
-                _attach_continuation_sources(runtime(ctx), value)
-                return _success(value, resource=link)
-            except RuntimeFailure as error:
-                return _failure(error)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+            if value["capture"]["outcome"]["status"] != "succeeded":
+                partial_evidence = AnalysisEnvelope.model_validate(value).model_dump(mode="json")
                 return _failure(
                     RuntimeFailure(
                         "EXECUTION_FAILURE",
-                        "Capture failed unexpectedly without trustworthy evidence.",
-                    )
+                        "One or more capture executions failed; consult exit attribution "
+                        "and preserved diagnostics before inferring workload failure.",
+                        details={
+                            "partial_evidence": partial_evidence,
+                            "failed_executions": failed,
+                        },
+                    ),
+                    resource=link,
                 )
-
-        handler.__name__ = capture_tool_name(capability)
-        handler.__annotations__["provider"] = Annotated[
-            provider_type, Field(description="Compatible capture provider and its typed settings.")
-        ]
-        handler.__annotations__["options"] = Annotated[
-            capability.model,
-            Field(description=f"Options for {capability.summary.lower()}"),
-        ]
-        execution_type = Execution if capability.maximum_sources > 1 else SingleExecution
-        handler.__annotations__["execution"] = Annotated[
-            execution_type,
-            Field(
-                description=(
-                    "Run once or execute a randomized paired experiment."
-                    if capability.maximum_sources > 1
-                    else "Run once; this analysis accepts exactly one captured artifact."
+            analysis_failure = value.get("analysis_failure")
+            if isinstance(analysis_failure, dict):
+                partial_evidence = AnalysisEnvelope.model_validate(value).model_dump(mode="json")
+                return _failure(
+                    RuntimeFailure(
+                        str(analysis_failure["code"]),
+                        "Capture completed, but requested analysis failed. "
+                        "Preserve the returned analysis_id if not already preserved, then "
+                        "read the evidence resource and retry "
+                        "analyze with its analysis_sources "
+                        "after addressing analysis_failure; do not rerun the target.",
+                        details={"partial_evidence": partial_evidence},
+                    ),
+                    resource=link,
                 )
-            ),
-        ]
-        if any(field.is_required() for field in capability.model.model_fields.values()):
-            signature = inspect.signature(handler, eval_str=True)
-            parameters = list(signature.parameters.values())
-            option_index = next(
-                index for index, parameter in enumerate(parameters) if parameter.name == "options"
+            return _success(
+                value,
+                summary=_analysis_summary(value, resource=link),
+                resource=link,
             )
-            parameters[option_index] = parameters[option_index].replace(
-                default=inspect.Parameter.empty
-            )
-            handler.__signature__ = signature.replace(parameters=parameters)  # type: ignore[attr-defined]
-        return handler
-
-    for capability in CAPABILITIES:
-        analysis_routing = (
-            " Use this for compatible native artifacts already captured separately, not for "
-            "paired baseline/candidate execution."
-            if capability.id.endswith(".compare")
-            else ""
-        )
-        server.add_tool(
-            analysis_handler(capability),
-            name=analysis_tool_name(capability),
-            title=capability.summary,
-            description=(
-                f"{capability.summary} Accepts: {', '.join(capability.formats)}. "
-                f"Limitation: {capability.limitation}{analysis_routing}"
-            ),
-            annotations=READ_ONLY,
-            structured_output=True,
-        )
-        provider_type = capture_provider_type(capability)
-        if provider_type is not None:
-            providers = compatible_capture_providers(capability)
-            experiment_routing = (
-                " Set execution.kind=experiment for baseline/candidate cases in randomized "
-                "paired blocks; the experiment effect is wall_time_ns and the semantic oracle "
-                "checks successful captures."
-                if capability.maximum_sources > 1
-                else ""
-            )
-            server.add_tool(
-                capture_handler(capability, provider_type),
-                name=capture_tool_name(capability),
-                title=f"Capture and {capability.summary.lower()}",
-                description=(
-                    f"Execute typed argv and {capability.summary.lower()} Compatible providers: "
-                    f"{', '.join(provider.id for provider in providers)}. Flameox bounds and "
-                    "records the process but does not prevent the target's external side effects."
-                    f"{experiment_routing}"
-                ),
-                annotations=CAPTURE,
-                structured_output=True,
+        except RuntimeFailure as error:
+            return _failure(error)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return _failure(
+                RuntimeFailure(
+                    "EXECUTION_FAILURE",
+                    "Capture failed unexpectedly without trustworthy evidence.",
+                )
             )
 
-    @server.tool(annotations=PRESERVE, structured_output=True)
+    @server.tool(annotations=PRESERVE)
     async def preserve_evidence(
         analysis_id: Annotated[
             str,
@@ -724,8 +436,11 @@ def create_server(
     ) -> Annotated[CallToolResult, PreservationOutcome]:
         """Idempotently preserve one session analysis and its native artifacts."""
         try:
-            value = await runtime(ctx).run_in_request(
-                partial(runtime(ctx).preserve_evidence, analysis_id)
+            value, next_request = await runtime(ctx).run_in_request(
+                partial(runtime(ctx).preserve_evidence_page, analysis_id)
+            )
+            _attach_next_page(
+                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
             )
             link = ResourceLink(
                 type="resource_link",
@@ -733,11 +448,15 @@ def create_server(
                 name=f"Evidence {value['evidence_id']}",
                 mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
             )
-            return _success(value, resource=link)
+            return _success(
+                value,
+                summary=_evidence_summary(value, rescued=False),
+                resource=link,
+            )
         except RuntimeFailure as error:
             return _failure(error)
 
-    @server.tool(annotations=PRESERVE, structured_output=True)
+    @server.tool(annotations=PRESERVE)
     async def rescue_evidence(
         analysis_id: Annotated[
             str,
@@ -758,14 +477,17 @@ def create_server(
     ) -> Annotated[CallToolResult, RescueOutcome]:
         """Rescue one live session analysis to a distinct empty store before restart."""
         try:
-            value = await runtime(ctx).run_in_request(
-                partial(runtime(ctx).rescue_evidence, analysis_id, destination)
+            value, next_request = await runtime(ctx).run_in_request(
+                partial(runtime(ctx).rescue_evidence_page, analysis_id, destination)
             )
-            return _success(value)
+            _attach_next_page(
+                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
+            )
+            return _success(value, summary=_evidence_summary(value, rescued=True))
         except RuntimeFailure as error:
             return _failure(error)
 
-    @server.tool(annotations=READ_ONLY, structured_output=True)
+    @server.tool(annotations=READ_ONLY)
     async def query_evidence(
         ctx: Context[AnalysisRuntime],
         evidence_kind: Annotated[
@@ -788,7 +510,7 @@ def create_server(
         created_before: Annotated[
             datetime | None, Field(description="Inclusive upper creation-time bound with timezone.")
         ] = None,
-        limit: Annotated[
+        page_size: Annotated[
             int,
             Field(description="Maximum matching manifests returned on this page.", ge=1, le=200),
         ] = 50,
@@ -801,21 +523,34 @@ def create_server(
     ) -> Annotated[CallToolResult, QueryOutcome]:
         """Search an immutable, request-pinned manifest inventory in deterministic order."""
         try:
-            return _success(
-                await runtime(ctx).run_in_request(
-                    partial(
-                        runtime(ctx).query_evidence,
-                        evidence_kind=evidence_kind,
-                        capability_id=capability_id,
-                        provider_id=provider_id,
-                        input_sha256=input_sha256,
-                        created_after=created_after,
-                        created_before=created_before,
-                        limit=limit,
-                        cursor=cursor,
-                    )
+            value = await runtime(ctx).run_in_request(
+                partial(
+                    runtime(ctx).query_evidence,
+                    evidence_kind=evidence_kind,
+                    capability_id=capability_id,
+                    provider_id=provider_id,
+                    input_sha256=input_sha256,
+                    created_after=created_after,
+                    created_before=created_before,
+                    limit=page_size,
+                    cursor=cursor,
                 )
             )
+            if continuation := value.pop("continuation", None):
+                value["next_page"] = {
+                    "tool": "query_evidence",
+                    "arguments": {
+                        "evidence_kind": evidence_kind,
+                        "capability_id": capability_id,
+                        "provider_id": provider_id,
+                        "input_sha256": input_sha256,
+                        "created_after": created_after,
+                        "created_before": created_before,
+                        "page_size": page_size,
+                        "cursor": continuation,
+                    },
+                }
+            return _success(value, summary=_query_summary(value))
         except RuntimeFailure as error:
             return _failure(error)
 

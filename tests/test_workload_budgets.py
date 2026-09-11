@@ -9,6 +9,7 @@ import anyio
 import psutil
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     ExperimentCase,
@@ -16,7 +17,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     WorkloadBudget,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 def _target(

@@ -9,13 +9,13 @@ import psutil
 import pytest
 
 from flameox.execution import ExecutionOutcome, ExecutionRequest, SubprocessBroker
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     ExperimentCase,
     ExperimentDesign,
     RequestLimits,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 class ExitedBeforeCollectionBroker(SubprocessBroker):

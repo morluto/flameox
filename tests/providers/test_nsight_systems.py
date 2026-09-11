@@ -10,8 +10,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, PathSource
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.process

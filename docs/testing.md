@@ -1,6 +1,6 @@
 # Testing
 
-Tests prove the stateless runtime, bounded execution, provider adapters, and
+Tests prove the process-lifespan runtime, bounded execution, provider adapters, and
 optional immutable repository independently.
 
 ## Baseline
@@ -13,14 +13,14 @@ uv run lint-imports
 uv run pytest -q
 ```
 
-Use `uv run pytest tests/test_stateless.py -q` while changing the public runtime
+Use `uv run pytest tests/test_runtime.py -q` while changing the public runtime
 or repository. Process tests use `-o addopts='' -m process`; performance tests
 use `-o addopts='' -m performance`.
 
 ## Required behavioral proof
 
-Contract tests assert exactly 49 MCP tools, one resource template, no concrete resource list,
-capability-specific top-level input schemas, compatible-provider discriminators, output schemas,
+Contract tests assert exactly six MCP tools, one resource template, no concrete resource list,
+capability-discriminated input schemas, compatible-provider discriminators, output schemas,
 truthful annotations, and direct structured success content without a universal wrapper.
 
 Runtime tests cover bounded streaming analysis, digest-bound continuation,

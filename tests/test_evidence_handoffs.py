@@ -14,6 +14,7 @@ from mcp_types import TextResourceContents
 
 from flameox.canonical import canonical_bytes
 from flameox.mcp import create_server
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
@@ -24,7 +25,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.integration
@@ -343,25 +343,35 @@ def test_mcp_uses_capture_outcome_when_execution_diagnostics_are_empty(
 ) -> None:
     executions = [{"status": "failed", "failure_code": failure_code} for _ in range(16)]
 
-    async def capture(self: AnalysisRuntime, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "capture": {
-                "outcome": self._capture_outcome(executions),
-                "executions": [],
-                "executions_truncated": 16,
-            }
-        }
+    original = AnalysisRuntime.capture_analysis_page
 
-    monkeypatch.setattr(AnalysisRuntime, "capture_and_analyze", capture)
+    async def capture(
+        self: AnalysisRuntime, *args: Any, **kwargs: Any
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        result, next_request = await original(self, *args, **kwargs)
+        result["capture"].update(
+            outcome=self._capture_outcome(executions),
+            executions=[],
+            executions_truncated=16,
+        )
+        return result, next_request
+
+    monkeypatch.setattr(AnalysisRuntime, "capture_analysis_page", capture)
 
     async def exercise() -> None:
         async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
-                "capture_process_output",
+                "capture_and_analyze",
                 {
-                    "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
-                    "provider": {"kind": "direct"},
-                    "execution": {"kind": "single"},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "target": {
+                            "argv": [sys.executable, "-c", "pass"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "execution": {"kind": "single"},
+                    }
                 },
             )
             assert result.is_error
@@ -441,16 +451,19 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
     async def exercise() -> None:
         async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": [sys.executable, "-c", "pass"],
-                        "cwd": str(tmp_path),
-                        **({"console_output": "full"} if full_output else {}),
-                    },
-                    "provider": {"kind": "py-spy"},
-                    "execution": {"kind": "single"},
-                    "preserve": True,
+                    "request": {
+                        "capability_id": "cpu.hotspots",
+                        "target": {
+                            "argv": [sys.executable, "-c", "pass"],
+                            "cwd": str(tmp_path),
+                            **({"console_output": "full"} if full_output else {}),
+                        },
+                        "provider": {"kind": "py-spy"},
+                        "execution": {"kind": "single"},
+                        "preserve": True,
+                    }
                 },
             )
             assert result.is_error
@@ -467,7 +480,13 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
             for artifact in projection["body"]["artifacts"]:
                 if artifact["format"] == "text":
                     preview = await client.call_tool(
-                        "preview_artifact", {"sources": [artifact["source"]]}
+                        "analyze",
+                        {
+                            "request": {
+                                "capability_id": "artifact.preview",
+                                "sources": [artifact["source"]],
+                            }
+                        },
                     )
                     texts.extend(
                         row["text"] for row in preview.structured_content["blocks"][1]["rows"]
