@@ -908,9 +908,7 @@ def test_projection_cache_is_bounded_and_returns_defensive_copies(
 
         runtime.projections.clear()
         monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTIONS", 16)
-        monkeypatch.setattr(
-            "flameox.stateless.MAX_SESSION_PROJECTION_BYTES", serialized_size + 1
-        )
+        monkeypatch.setattr("flameox.stateless.MAX_SESSION_PROJECTION_BYTES", serialized_size + 1)
         runtime._cache_projection("one", projection)
         runtime._cache_projection("two", projection)
         assert list(runtime.projections) == ["two"]
@@ -2197,9 +2195,7 @@ def test_perf_conversion_reports_signalled_decoder_termination(
     executable = tmp_path / "bin" / "perf"
     executable.parent.mkdir()
     executable.write_text(
-        f"#!{sys.executable}\n"
-        "import os, signal\n"
-        "os.kill(os.getpid(), signal.SIGTERM)\n"
+        f"#!{sys.executable}\nimport os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n"
     )
     executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
@@ -3159,9 +3155,7 @@ def test_mcp_tools_are_generated_from_typed_capabilities() -> None:
         }
         rescue_action = rescue_output["$defs"]["RescueActionEnvelope"]["properties"]
         assert rescue_action["kind"]["const"] == "restart_reconnect"
-        assert rescue_action["environment"]["$ref"].endswith(
-            "/RescueEnvironmentEnvelope"
-        )
+        assert rescue_action["environment"]["$ref"].endswith("/RescueEnvironmentEnvelope")
         multi_source_capabilities = {
             "artifact.preview": (1, 32),
             "benchmark.summary": (1, 32),

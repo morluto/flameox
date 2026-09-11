@@ -115,9 +115,10 @@ def test_rescue_repository_failures_identify_the_alternate_store(
             runtime.rescue_evidence(result["analysis_id"], str(rescue))
         assert failure.value.details["configuration_source"] == "rescue_destination"
         assert "local_diagnostic" not in failure.value.details
-        assert failure.value.details["store_identifier"] == hashlib.sha256(
-            str(rescue.absolute()).encode()
-        ).hexdigest()
+        assert (
+            failure.value.details["store_identifier"]
+            == hashlib.sha256(str(rescue.absolute()).encode()).hexdigest()
+        )
     finally:
         runtime.close()
 

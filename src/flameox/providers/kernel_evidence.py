@@ -73,9 +73,7 @@ class KernelEvidenceProvider:
         cases = document.get("cases")
         if not isinstance(cases, list) or len(cases) > _MAX_CASES:
             raise ProviderFailure("LIMIT_EXCEEDED", "Kernel validation case count is invalid")
-        if "coverage_complete" in document and not isinstance(
-            document["coverage_complete"], bool
-        ):
+        if "coverage_complete" in document and not isinstance(document["coverage_complete"], bool):
             raise ProviderFailure(
                 "DECODE_FAILURE", "Kernel validation coverage_complete must be a boolean"
             )
@@ -242,6 +240,7 @@ class KernelEvidenceProvider:
             complete=len(rows) <= max_rows,
             limitations=limitations,
         )
+
     def _compare_kernel(
         self,
         documents: Sequence[Mapping[str, Any]],
@@ -580,9 +579,7 @@ def _kernel_consistency_failures(document: Mapping[str, Any]) -> list[dict[str, 
     failures: list[dict[str, Any]] = []
 
     def record(path: str, declared: str, derived: str, rule: str) -> None:
-        failures.append(
-            {"path": path, "declared": declared, "derived": derived, "rule": rule}
-        )
+        failures.append({"path": path, "declared": declared, "derived": derived, "rule": rule})
 
     cases = cast(list[object], document["cases"])
     for case_index, case_value in enumerate(cases):

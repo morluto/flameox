@@ -273,9 +273,10 @@ class AnalysisRuntime:
             return
         projections[key] = (copied, size)
         projections.move_to_end(key)
-        while len(projections) > MAX_SESSION_PROJECTIONS or sum(
-            item[1] for item in projections.values()
-        ) > MAX_SESSION_PROJECTION_BYTES:
+        while (
+            len(projections) > MAX_SESSION_PROJECTIONS
+            or sum(item[1] for item in projections.values()) > MAX_SESSION_PROJECTION_BYTES
+        ):
             projections.popitem(last=False)
 
     @staticmethod
@@ -479,9 +480,7 @@ class AnalysisRuntime:
             ],
             "arguments": validated.model_dump(mode="json"),
             "limits": selected_limits.model_dump(mode="json"),
-            "projection_implementation": self._projection_runtime_identity(
-                capability_id, resolved
-            ),
+            "projection_implementation": self._projection_runtime_identity(capability_id, resolved),
         }
         default_offset = validated.offset if isinstance(validated, PreviewArguments) else 0
         offset = self._decode_continuation(continuation, identity, default_offset)
@@ -807,9 +806,7 @@ class AnalysisRuntime:
                     )
                     if (
                         target.provider_id == "nsight-compute"
-                        and self.nsight_compute.resolve_interface(
-                            collector_binding.invocation_path
-                        )
+                        and self.nsight_compute.resolve_interface(collector_binding.invocation_path)
                         is None
                     ):
                         raise RuntimeFailure(
@@ -1789,9 +1786,7 @@ class AnalysisRuntime:
                         "INVALID_INPUT", "Rescue destination must be an empty directory"
                     ) from exc
                 raise
-            result = self._rescue_result(
-                expected_id, len(manifest["body"]["artifacts"]), selected
-            )
+            result = self._rescue_result(expected_id, len(manifest["body"]["artifacts"]), selected)
         else:
             result = self._publish_rescue_stage(
                 parent_descriptor,
