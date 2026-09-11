@@ -161,13 +161,17 @@ Corruption remains fail-closed. Runtime errors include the selected configuratio
 path-free store identifier, and recovery instructions. `flameox evidence location` prints the
 resolved directory locally without reading or initializing the repository. Restore the original
 store from a known-good backup, or select a distinct empty store with `FLAMEOX_DATA_DIR` and
-restart/reconnect. Switching stores does not recover old evidence. Do not delete existing data or
+restart/reconnect. Before restarting a live process that still owns needed session evidence, call
+`rescue_evidence` with that analysis handle and the distinct empty store. Rescue uses normal bounded,
+validated, atomic evidence publication without changing the active configured repository. Switching
+stores does not recover evidence that was not preserved or rescued. Do not delete existing data or
 synthesize replacement metadata.
 
 ## Format evolution
 
-This is repository format `2`. Unsupported repository, artifact, or manifest versions fail
-explicitly before their contents are trusted. Format `1` layout inference and optional execution
-attribution are not supported. Existing stores are never rewritten automatically: inspect or export
-them with a compatible older release, and select a separate empty directory for a format-2 store.
+This is repository format `3`. Capture executions record collector and workload executable digests
+separately; wrapped captures pin and revalidate both identities. Unsupported repository, artifact, or
+manifest versions fail explicitly before their contents are trusted. Formats `1` and `2` are not
+supported. Existing stores are never rewritten automatically: inspect or export them with a compatible
+older release, and select a separate empty directory for a format-3 store.
 Changing the version field does not migrate evidence and would invalidate its contract.

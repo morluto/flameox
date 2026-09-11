@@ -10,13 +10,21 @@ search/inspect protocol in front of its operations. A caller that knows the evid
 invoke its tool directly; an unfamiliar caller relies on the MCP client's ordinary tool search and
 then receives the selected tool's complete schema.
 
-There are exactly 49 tools:
+There are exactly 50 tools:
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
 | Existing-artifact analysis | 26 | `analyze_cpu_hotspots`, `analyze_cpu_callers`, `analyze_gpu_launches`, `analyze_benchmark_compare`, `analyze_pytest_fixtures`, `preview_artifact` | Read-only and idempotent. |
 | Capture and immediate analysis | 20 | `capture_cpu_hotspots`, `capture_cpu_callers`, `capture_triton_autotune`, `capture_gpu_launches`, `capture_benchmark_summary`, `capture_pytest_fixtures`, `capture_process_output` | Executes typed argv; not read-only or idempotent. |
-| Evidence lifecycle | 3 | `prepare_providers`, `preserve_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
+| Evidence lifecycle | 4 | `prepare_providers`, `preserve_evidence`, `rescue_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
+
+`rescue_evidence` accepts one live session analysis and an explicit absolute path below an existing,
+symlink-free parent to a distinct empty directory. It anchors publication to an open parent
+directory, publishes the normal immutable evidence format there, and returns the
+`FLAMEOX_DATA_DIR` restart/reconnect handoff. It does not repair or modify the configured repository,
+change the active runtime store, release the session handle, or expose the alternate store through
+the active server's resource template. Repeating the same rescue request during the live session
+validates the published evidence and returns the original handoff.
 
 The capability registry generates the analysis and capture tools through the Python MCP SDK 2.0
 registration API. The SDK derives each top-level input schema directly from the registered callable.
@@ -243,8 +251,9 @@ on the metrics block. It does not claim confidence-qualified improvement or equi
 Capture `outcome` is computed from every execution before diagnostic compaction and retains exact
 success/failure counts. MCP error classification consumes that outcome even when no execution
 diagnostics fit inline. Each execution identifies whether `returncode` belongs to the workload or
-collector, retains the invoked executable SHA-256, and leaves `workload_returncode` null for wrapped
-captures. Exit ownership is declared by each invocation builder: self-reporting workloads retain
+collector, retains separate collector and workload executable SHA-256 identities, and leaves
+`workload_returncode` null for wrapped captures. The compatibility `executable_sha256` field identifies
+the invoked collector. Exit ownership is declared by each invocation builder: self-reporting workloads retain
 their observed exit even when they use a provider other than `direct`. A usable profile does not
 prove workload success. When retained, preserved stdout, stderr, and profiles
 are individually selectable from the evidence resource.

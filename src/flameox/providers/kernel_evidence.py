@@ -73,6 +73,11 @@ class KernelEvidenceProvider:
         cases = document.get("cases")
         if not isinstance(cases, list) or len(cases) > _MAX_CASES:
             raise ProviderFailure("LIMIT_EXCEEDED", "Kernel validation case count is invalid")
+        if "coverage_complete" in document and not isinstance(document["coverage_complete"], bool):
+            raise ProviderFailure(
+                "DECODE_FAILURE", "Kernel validation coverage_complete must be a boolean"
+            )
+        document.setdefault("coverage_complete", False)
         return document
 
     @staticmethod
@@ -95,10 +100,23 @@ class KernelEvidenceProvider:
             outputs = case.get("outputs")
             if not isinstance(outputs, list) or len(outputs) > _MAX_OUTPUTS_PER_CASE:
                 raise ProviderFailure("LIMIT_EXCEEDED", "Kernel validation output count is invalid")
+            if not outputs:
+                append(
+                    {
+                        "evidence_kind": "case",
+                        "case_id": case_id,
+                        "case_status": status,
+                        "dimensions": _json_object(case.get("dimensions", {}), "dimensions"),
+                        "seed": case.get("seed"),
+                        "device": case.get("device"),
+                    }
+                )
+            seen_outputs: set[bytes] = set()
             for output_value in outputs:
                 output = _object(output_value, "kernel validation output")
                 output_name = _text(output.get("name"), "output name")
                 output_status = _status(output.get("status"), "output status")
+                output_dtype = _text(output.get("dtype"), "output dtype")
                 shape = output.get("shape")
                 if (
                     not isinstance(shape, list)
@@ -117,6 +135,14 @@ class KernelEvidenceProvider:
                     raise ProviderFailure(
                         "LIMIT_EXCEEDED", "Kernel failure witness count is invalid"
                     )
+                output_identity = canonical_bytes(
+                    {"name": output_name, "dtype": output_dtype, "shape": shape}
+                )
+                if output_identity in seen_outputs:
+                    raise ProviderFailure(
+                        "DECODE_FAILURE", "Kernel validation repeats an output identity"
+                    )
+                seen_outputs.add(output_identity)
                 base = {
                     "case_id": case_id,
                     "case_status": status,
@@ -124,29 +150,47 @@ class KernelEvidenceProvider:
                     "seed": case.get("seed"),
                     "device": case.get("device"),
                     "output": output_name,
-                    "dtype": _text(output.get("dtype"), "output dtype"),
+                    "dtype": output_dtype,
                     "shape": shape,
                     "output_status": output_status,
                 }
                 if not metrics and not failures:
                     append({"evidence_kind": "output", **base})
+                seen_metrics: set[bytes] = set()
                 for metric_value in metrics:
                     metric = _object(metric_value, "kernel metric")
                     metric_status = _status(metric.get("status"), "metric status")
+                    metric_name = _text(metric.get("name"), "metric name")
                     comparator = metric.get("comparator")
                     if comparator not in {"<=", ">=", None}:
                         raise ProviderFailure(
                             "DECODE_FAILURE", "Kernel metric comparator is invalid"
                         )
+                    threshold = _finite_or_none(metric.get("threshold"), "threshold")
+                    unit = _text(metric.get("unit"), "metric unit")
+                    value = _metric_value(metric.get("value"))
+                    metric_identity = canonical_bytes(
+                        {
+                            "name": metric_name,
+                            "comparator": comparator,
+                            "threshold": threshold,
+                            "unit": unit,
+                        }
+                    )
+                    if metric_identity in seen_metrics:
+                        raise ProviderFailure(
+                            "DECODE_FAILURE", "Kernel validation repeats a metric identity"
+                        )
+                    seen_metrics.add(metric_identity)
                     append(
                         {
                             "evidence_kind": "measurement",
                             **base,
-                            "metric": _text(metric.get("name"), "metric name"),
-                            "value": _metric_value(metric.get("value")),
+                            "metric": metric_name,
+                            "value": value,
                             "comparator": comparator,
-                            "threshold": _finite_or_none(metric.get("threshold"), "threshold"),
-                            "unit": _text(metric.get("unit"), "metric unit"),
+                            "threshold": threshold,
+                            "unit": unit,
                             "metric_status": metric_status,
                             "limitation": metric.get("limitation"),
                         }
@@ -166,6 +210,13 @@ class KernelEvidenceProvider:
     def _summarize_kernel(self, document: Mapping[str, Any], *, max_rows: int) -> ProviderAnalysis:
         rows = self._kernel_rows(document)
         limitations = _string_list(document.get("limitations", []), "limitations", maximum=100)
+        consistency_failures = _kernel_consistency_failures(document)
+        if consistency_failures:
+            limitations = [
+                *limitations,
+                "Producer verdicts contradict retained kernel-validation evidence; "
+                "Flameox reports the derived status as inconclusive.",
+            ]
         return ProviderAnalysis(
             provider_id="kernel-validation",
             provider_version="flameox.kernel-validation.v2",
@@ -173,11 +224,14 @@ class KernelEvidenceProvider:
                 {
                     "type": "metrics",
                     "values": {
-                        "status": document["status"],
-                        "coverage_complete": bool(document.get("coverage_complete", False)),
+                        "status": "inconclusive" if consistency_failures else document["status"],
+                        "producer_status": document["status"],
+                        "coverage_complete": document["coverage_complete"],
                         "case_count": len(cast(list[object], document["cases"])),
                         "producer": document.get("producer"),
                         "producer_version": document.get("producer_version"),
+                        "consistency_failure_count": len(consistency_failures),
+                        "consistency_failures": consistency_failures[:20],
                     },
                 },
                 {"type": "table", "rows": rows[:max_rows]},
@@ -200,6 +254,11 @@ class KernelEvidenceProvider:
         if baseline_index >= len(documents):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
         requested_metric = arguments.get("metric")
+        consistency_failures = [
+            {"input_index": input_index, **failure}
+            for input_index, document in enumerate(documents)
+            for failure in _kernel_consistency_failures(document)
+        ]
         series: list[dict[bytes, float]] = []
         identities: list[dict[bytes, dict[str, Any]]] = []
         statuses: list[dict[bytes, str]] = []
@@ -266,9 +325,12 @@ class KernelEvidenceProvider:
                 {
                     "type": "metrics",
                     "values": {
+                        "status": "inconclusive" if consistency_failures else "consistent",
                         "input_count": len(documents),
                         "compatible_metric_count": len(common),
                         "unmatched_identity_count": len(unmatched),
+                        "consistency_failure_count": len(consistency_failures),
+                        "consistency_failures": consistency_failures[:20],
                     },
                 },
                 {"type": "table", "rows": rows[:max_rows]},
@@ -281,6 +343,14 @@ class KernelEvidenceProvider:
                 *(
                     ["Measurements absent from one or more inputs were not compared."]
                     if unmatched
+                    else []
+                ),
+                *(
+                    [
+                        "One or more producer verdicts contradict retained numerical evidence; "
+                        "declared comparison statuses remain visible."
+                    ]
+                    if consistency_failures
                     else []
                 ),
             ],
@@ -503,6 +573,60 @@ def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_count": len(candidates),
         "candidates": normalized_candidates,
     }
+
+
+def _kernel_consistency_failures(document: Mapping[str, Any]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+
+    def record(path: str, declared: str, derived: str, rule: str) -> None:
+        failures.append({"path": path, "declared": declared, "derived": derived, "rule": rule})
+
+    cases = cast(list[object], document["cases"])
+    for case_index, case_value in enumerate(cases):
+        case = _object(case_value, "kernel validation case")
+        case_status = _status(case.get("status"), "case status")
+        if document["status"] == "pass" and case_status != "pass":
+            record(f"cases[{case_index}].status", "pass", case_status, "document_pass")
+        outputs = cast(list[object], case.get("outputs", []))
+        for output_index, output_value in enumerate(outputs):
+            output = _object(output_value, "kernel validation output")
+            output_status = _status(output.get("status"), "output status")
+            if case_status == "pass" and output_status != "pass":
+                record(
+                    f"cases[{case_index}].outputs[{output_index}].status",
+                    "pass",
+                    output_status,
+                    "case_pass",
+                )
+            metrics = cast(list[object], output.get("metrics", []))
+            for metric_index, metric_value in enumerate(metrics):
+                metric = _object(metric_value, "kernel metric")
+                metric_status = _status(metric.get("status"), "metric status")
+                path = f"cases[{case_index}].outputs[{output_index}].metrics[{metric_index}]"
+                if output_status == "pass" and metric_status != "pass":
+                    record(f"{path}.status", "pass", metric_status, "output_pass")
+                comparator = metric.get("comparator")
+                threshold = _finite_or_none(metric.get("threshold"), "threshold")
+                value = _metric_value(metric.get("value"))
+                if (
+                    comparator in {"<=", ">="}
+                    and threshold is not None
+                    and isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                ):
+                    numerical_status = (
+                        "pass"
+                        if (value <= threshold if comparator == "<=" else value >= threshold)
+                        else "fail"
+                    )
+                    if metric_status in {"pass", "fail"} and metric_status != numerical_status:
+                        record(
+                            f"{path}.status",
+                            metric_status,
+                            numerical_status,
+                            "numeric_comparator",
+                        )
+    return failures
 
 
 def _object(value: object, subject: str) -> dict[str, Any]:

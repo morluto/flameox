@@ -11,6 +11,7 @@ import anyio
 import pytest
 
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
+from flameox.source_files import sha256_file
 from flameox.stateless import AnalysisRuntime
 
 
@@ -416,9 +417,54 @@ def test_perf_capture_converts_native_data_in_session_scratch(
     assert result["blocks"][1]["rows"] == [
         {"function": "leaf", "self_samples": 1, "unit": "samples"}
     ]
+    execution = result["capture"]["executions"][0]
+    collector_digest, _ = sha256_file(executable)
+    workload_digest, _ = sha256_file(Path(sys.executable))
+    assert execution["collector_executable_sha256"] == collector_digest
+    assert execution["workload_executable_sha256"] == workload_digest
+    assert execution["capture_argv"][-3] == str(Path(sys.executable).absolute())
     record, script = calls.read_text().splitlines()
     assert "record --freq 199 --call-graph fp" in record
     assert script.startswith("script --input ")
+
+
+@pytest.mark.process
+def test_wrapped_capture_revalidates_workload_after_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collector = tmp_path / "bin" / "perf"
+    collector.parent.mkdir()
+    collector.write_text(f"#!{sys.executable}\nraise SystemExit(99)\n")
+    collector.chmod(0o755)
+    workload = tmp_path / "workload"
+    workload.write_text(f"#!{sys.executable}\nprint('original')\n")
+    workload.chmod(0o755)
+    monkeypatch.setenv("PATH", str(collector.parent) + os.pathsep + os.environ["PATH"])
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+
+        async def replace_workload(current: int, _total: int, _message: str) -> None:
+            if current == 0:
+                workload.write_text(f"#!{sys.executable}\nprint('replacement')\n")
+
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[str(workload)],
+                        cwd=str(tmp_path),
+                        provider_id="perf",
+                        capture_arguments={"frequency": 99, "call_graph": "fp"},
+                    ),
+                    "cpu.hotspots",
+                    progress=replace_workload,
+                )
+            assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
 
 
 def test_node_capture_uses_explicit_profile_name_and_analyzes_v8_output(tmp_path: Path) -> None:

@@ -41,8 +41,8 @@ from flameox.source_files import (
     sha256_file,
 )
 
-REPOSITORY_FORMAT = "2"
-EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=2"
+REPOSITORY_FORMAT = "3"
+EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=3"
 AGENT_EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence-projection+json;version=1"
 
 
@@ -161,28 +161,14 @@ class EvidenceRepository:
         sources: Sequence[NativeSource],
         analysis: Mapping[str, Any],
     ) -> dict[str, Any]:
-        artifacts, layout = self._publication_layout(sources, manifest_body)
+        artifacts, _layout, artifact_refs, analysis_bytes, manifest = self._publication_plan(
+            manifest_body, sources, analysis
+        )
         self.initialize()
-        artifact_refs = [self._publish_artifact(item) for item in artifacts]
-        analysis_bytes = canonical_bytes(analysis)
-        analysis_digest = hashlib.sha256(analysis_bytes).hexdigest()
-        body = dict(manifest_body)
-        body["artifacts"] = artifact_refs
-        body["source_layout"] = layout.model_dump(mode="json")
-        body["data_files"] = [
-            {
-                "path": "data/analysis.json",
-                "sha256": analysis_digest,
-                "size_bytes": len(analysis_bytes),
-                "media_type": EVIDENCE_MEDIA_TYPE,
-            }
-        ]
-        evidence_id = hashlib.sha256(canonical_bytes(body)).hexdigest()
-        manifest = {
-            "format_version": REPOSITORY_FORMAT,
-            "evidence_id": evidence_id,
-            "body": body,
-        }
+        published_refs = [self._publish_artifact(item) for item in artifacts]
+        if published_refs != artifact_refs:
+            raise RepositoryError("REPOSITORY_CORRUPTION", "Artifact publication changed identity.")
+        evidence_id = str(manifest["evidence_id"])
         destination = self._evidence_path(evidence_id)
         if destination.exists():
             self._validate_evidence(destination, expected=manifest)
@@ -205,6 +191,54 @@ class EvidenceRepository:
             "uri": f"flameox://evidence/{evidence_id}",
             "artifact_count": len(artifact_refs),
         }
+
+    def expected_evidence_id(
+        self,
+        *,
+        manifest_body: Mapping[str, Any],
+        sources: Sequence[NativeSource],
+        analysis: Mapping[str, Any],
+    ) -> str:
+        """Derive a publication identity without initializing or writing the repository."""
+        return str(self._publication_plan(manifest_body, sources, analysis)[4]["evidence_id"])
+
+    def _publication_plan(
+        self,
+        manifest_body: Mapping[str, Any],
+        sources: Sequence[NativeSource],
+        analysis: Mapping[str, Any],
+    ) -> tuple[list[NativeSource], SourceLayout, list[dict[str, Any]], bytes, dict[str, Any]]:
+        artifacts, layout = self._publication_layout(sources, manifest_body)
+        artifact_refs = [
+            {
+                "format_version": REPOSITORY_FORMAT,
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+                "role": artifact.role,
+                "format": artifact.format,
+                "producer": artifact.producer,
+            }
+            for artifact in artifacts
+        ]
+        analysis_bytes = canonical_bytes(analysis)
+        body = dict(manifest_body)
+        body["artifacts"] = artifact_refs
+        body["source_layout"] = layout.model_dump(mode="json")
+        body["data_files"] = [
+            {
+                "path": "data/analysis.json",
+                "sha256": hashlib.sha256(analysis_bytes).hexdigest(),
+                "size_bytes": len(analysis_bytes),
+                "media_type": EVIDENCE_MEDIA_TYPE,
+            }
+        ]
+        evidence_id = hashlib.sha256(canonical_bytes(body)).hexdigest()
+        manifest = {
+            "format_version": REPOSITORY_FORMAT,
+            "evidence_id": evidence_id,
+            "body": body,
+        }
+        return artifacts, layout, artifact_refs, analysis_bytes, manifest
 
     @staticmethod
     def _publication_layout(
@@ -485,6 +519,8 @@ class EvidenceRepository:
                 "returncode": True,
                 "returncode_scope": True,
                 "executable_sha256": True,
+                "collector_executable_sha256": True,
+                "workload_executable_sha256": True,
                 "workload_returncode": True,
                 "status": True,
                 "failure_code": True,

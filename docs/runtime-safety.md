@@ -97,6 +97,11 @@ including a request for one member of a cached bundle. Reused materializations a
 an analysis-cache hit can return. Failed requests discard newly acquired, unretained scratch artifacts.
 Failed analyses use the same bounded handle cache as successful analyses.
 
+Provider projections have a separate least-recently-used cache bounded by entry count and serialized
+bytes. Continuation pages reuse the same immutable bounded projection, while every request still
+binds the projection to the Flameox implementation and any external decoder executable digest, and
+resolves and hashes its sources before and after analysis. Eviction changes latency only.
+
 Capture performs compatibility, invocation binding, executable, aggregate scratch, and provenance
 admission before allocating request scratch or executing workload and oracle processes. These
 checks are part of the capture request rather than a separate plan or preflight lifecycle.

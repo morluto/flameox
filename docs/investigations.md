@@ -122,7 +122,7 @@ behavioral equivalence; benchmark timing is not an oracle.
 
 ## Identity and preservation
 
-`analysis_id` exists only to preserve one result during the current process. It
+`analysis_id` exists only to preserve or rescue one result during the current process. It
 may expire earlier when the bounded session cache evicts it and must not appear in a durable claim.
 `evidence_id` binds the effective request,
 provider/input identity, data files, coverage, limitations, and episode time.
@@ -132,6 +132,12 @@ must reproduce later. The evidence resource exposes the canonical manifest;
 native payloads remain local files addressed by digest.
 
 ## Comparisons
+
+Kernel-validation producers retain authority over their declared verdicts, but Flameox checks their
+internal consistency. Structurally ambiguous documents, including duplicate semantic measurements,
+are rejected. Status or comparator contradictions remain visible as bounded consistency failures and
+make the derived summary inconclusive; producer statuses and native JSON remain unchanged. Cases with
+no outputs still produce case evidence rows.
 
 Comparison handlers accumulate member identities in dictionaries and test each
 incoming identity directly against existing keys. They must not rebuild the
