@@ -15,8 +15,8 @@ import pytest
 from flameox.evidence_models import EvidenceManifest
 from flameox.providers.benchmarks import BenchmarkProvider
 from flameox.repository import EvidenceRepository
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource, RequestLimits
-from flameox.stateless import AnalysisRuntime
 
 pytestmark = pytest.mark.performance
 

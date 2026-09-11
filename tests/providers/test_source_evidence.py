@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource
-from flameox.stateless import AnalysisRuntime
 
 
 def test_sarif_export_uses_explicit_source_root_and_preserves_containment(tmp_path: Path) -> None:

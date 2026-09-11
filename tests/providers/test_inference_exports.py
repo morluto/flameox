@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource, RequestLimits, RuntimeFailure
-from flameox.stateless import AnalysisRuntime
 
 
 def _vllm_payload(*, throughput: float = 5.0) -> dict[str, object]:

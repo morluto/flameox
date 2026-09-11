@@ -89,21 +89,17 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 ## MCP interface
 
-The server exposes actual evidence operations for client-side tool search instead of hiding its
-capabilities behind `discover`, `inspect`, or generic `analyze(capability_id, arguments)` calls.
-There are 26 read-only analysis tools, 20 executing capture tools, and three lifecycle tools. For
-example:
+The server exposes six operations. Read-only analysis and executing capture remain separate for
+accurate MCP effect annotations, while each accepts a discriminated capability request that retains
+capability-specific options and provider validation:
 
 ```text
-analyze_cpu_hotspots       capture_cpu_hotspots
-analyze_cpu_callers        capture_cpu_callers
-analyze_gpu_launches       capture_gpu_launches
-analyze_benchmark_compare  capture_benchmark_summary
-analyze_kernel_validation  capture_sanitizer_failures
-prepare_providers          preserve_evidence          query_evidence
+analyze              capture_and_analyze
+prepare_providers    preserve_evidence
+rescue_evidence      query_evidence
 ```
 
-Each tool advertises its capability-specific options and compatible providers in its input schema.
+The two operation schemas advertise every capability's exact options and compatible providers.
 Analysis and capture have separate names and annotations because reading an artifact and executing a
 target are materially different effects. Tool search happens in the MCP client; Flameox does not
 require an additional catalog-search call.
@@ -116,7 +112,8 @@ deliberately not available as MCP resources.
 
 Direct capture accepts an argv array, an explicit absolute cwd, bounded environment overrides, a
 typed compatible-provider variant, capability-specific options, an explicit single/experiment
-choice, and limits as top-level tool arguments. There is no generic request or arguments envelope.
+choice, and a semantic page size. Server resource ceilings stay out of the request schema. There
+is no generic provider or analysis-arguments object.
 Shell strings are never accepted. Work remains owned by the live MCP request, so SDK progress and
 cancellation apply directly; there are no detached or restart-surviving tasks.
 

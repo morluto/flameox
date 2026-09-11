@@ -129,6 +129,7 @@ class CachedAnalysis:
     result: dict[str, Any]
     sources: list[NativeSource]
     manifest_body: dict[str, Any]
+    analysis_sources: list[NativeSource] | None = None
     preserved: dict[str, Any] | None = None
 
 
@@ -437,7 +438,7 @@ class AnalysisRuntime:
                 details={
                     "requested_capability": capability_id,
                     "available_capabilities": sorted(CAPABILITY_BY_ID),
-                    "recovery": "Run `flameox mcp inspect --summary` to select a capability.",
+                    "recovery": "Run `flameox mcp inspect` to select a capability.",
                 },
             )
         capability.validate_source_count(len(sources))
@@ -458,7 +459,6 @@ class AnalysisRuntime:
                 (item.format for item in resolved if item.format not in capability.formats), None
             )
         ):
-            analysis_tool = f"analyze_{capability_id.replace('.', '_')}"
             raise RuntimeFailure(
                 "UNSUPPORTED_FORMAT",
                 f"{capability_id} does not accept artifact format {bad!r}",
@@ -467,8 +467,8 @@ class AnalysisRuntime:
                     "received_format": bad,
                     "accepted_formats": list(capability.formats),
                     "recovery": (
-                        f"Select one accepted format or inspect `{analysis_tool}` "
-                        f"with `flameox mcp inspect --tool {analysis_tool}`."
+                        "Select one accepted format or inspect the `analyze` request variants "
+                        "with `flameox mcp inspect --tool analyze`."
                     ),
                 },
             )
@@ -631,7 +631,12 @@ class AnalysisRuntime:
         )
         self._cache_analysis(
             analysis_id,
-            CachedAnalysis(self._copy_result(validated_result), resolved, body),
+            CachedAnalysis(
+                self._copy_result(validated_result),
+                resolved,
+                body,
+                analysis_sources=resolved,
+            ),
         )
         return self._copy_result(validated_result)
 
@@ -709,7 +714,7 @@ class AnalysisRuntime:
                 details={
                     "requested_capability": capability_id,
                     "available_capabilities": sorted(CAPABILITY_BY_ID),
-                    "recovery": "Run `flameox mcp inspect --summary` to select a capability.",
+                    "recovery": "Run `flameox mcp inspect` to select a capability.",
                 },
             )
         capture_arguments = self._capture_arguments(
@@ -767,7 +772,7 @@ class AnalysisRuntime:
         contract = CAPTURE_PROVIDER_CONTRACTS[provider_id]
         return [artifact.format for artifact in contract.artifacts]
 
-    async def capture_and_analyze(  # noqa: C901 - capture lifecycle keeps failure artifacts together
+    async def capture_and_analyze(
         self,
         target: CaptureTarget,
         capability_id: str,
@@ -778,6 +783,54 @@ class AnalysisRuntime:
         progress: Any | None = None,
         preserve: bool = False,
     ) -> dict[str, Any]:
+        result, _ = await self._capture_analysis_page(
+            target,
+            capability_id,
+            mode=mode,
+            experiment=experiment,
+            limits=limits,
+            progress=progress,
+            preserve=preserve,
+            include_next_request=False,
+        )
+        return result
+
+    async def capture_analysis_page(
+        self,
+        target: CaptureTarget,
+        capability_id: str,
+        *,
+        mode: Literal["single", "experiment"] = "single",
+        experiment: ExperimentDesign | None = None,
+        limits: RequestLimits | None = None,
+        progress: Any | None = None,
+        preserve: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Capture and derive any next-page request under the same runtime ownership."""
+
+        return await self._capture_analysis_page(
+            target,
+            capability_id,
+            mode=mode,
+            experiment=experiment,
+            limits=limits,
+            progress=progress,
+            preserve=preserve,
+            include_next_request=True,
+        )
+
+    async def _capture_analysis_page(  # noqa: C901 - capture lifecycle keeps failure artifacts together
+        self,
+        target: CaptureTarget,
+        capability_id: str,
+        *,
+        mode: Literal["single", "experiment"] = "single",
+        experiment: ExperimentDesign | None = None,
+        limits: RequestLimits | None = None,
+        progress: Any | None = None,
+        preserve: bool = False,
+        include_next_request: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         validated_capture = self._validate_capture_request(
             target, capability_id, mode=mode, experiment=experiment, limits=limits
         )
@@ -1167,7 +1220,7 @@ class AnalysisRuntime:
                 if progress:
                     await progress(sequence_number, total, f"captured {case.name} block {block}")
 
-            def finish_analysis() -> dict[str, Any]:
+            def finish_analysis() -> tuple[dict[str, Any], dict[str, Any] | None]:
                 effective_capability_id, selected_sources = self._capture_analysis_sources(
                     capability_id, analysis_sources, captured
                 )
@@ -1203,7 +1256,10 @@ class AnalysisRuntime:
                     )
                     if preserve:
                         result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
-                    return result
+                    next_request = (
+                        self.next_analysis_request(result) if include_next_request else None
+                    )
+                    return result, next_request
                 cached = self.analyses[str(result["analysis_id"])]
                 if target.provider_id == "py-spy":
                     py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
@@ -1235,7 +1291,8 @@ class AnalysisRuntime:
                 if preserve:
                     result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
                 self._prune_scratch(protected_root=request_scratch)
-                return result
+                next_request = self.next_analysis_request(result) if include_next_request else None
+                return result, next_request
 
             return await self.run_in_request(finish_analysis)
 
@@ -1667,11 +1724,6 @@ class AnalysisRuntime:
     ) -> CaptureArguments:
         contract = CAPTURE_PROVIDER_CONTRACTS.get(provider_id)
         if contract is None:
-            capture_tool = (
-                "capture_process_output"
-                if capability_id == "artifact.preview"
-                else f"capture_{capability_id.replace('.', '_')}"
-            )
             raise RuntimeFailure(
                 "UNKNOWN_CAPABILITY",
                 f"Unknown capture provider: {provider_id}",
@@ -1679,8 +1731,8 @@ class AnalysisRuntime:
                     "requested_provider": provider_id,
                     "available_capture_providers": sorted(CAPTURE_PROVIDER_CONTRACTS),
                     "recovery": (
-                        "Inspect the compatible provider schema with "
-                        f"`flameox mcp inspect --tool {capture_tool}`."
+                        "Inspect compatible provider variants with "
+                        "`flameox mcp inspect --tool capture_and_analyze`."
                     ),
                 },
             )
@@ -1741,6 +1793,69 @@ class AnalysisRuntime:
         self.analyses.move_to_end(analysis_id)
         return dict(cached.preserved)
 
+    def preserve_evidence_page(
+        self, analysis_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Preserve an analysis and refresh its handoff after scratch is released."""
+
+        preserved = self.preserve_evidence(analysis_id)
+        cached = self.analyses[analysis_id]
+        return preserved, self.next_analysis_request(cached.result)
+
+    def analyze_page(
+        self,
+        capability_id: str,
+        sources: list[Source],
+        arguments: Mapping[str, Any],
+        *,
+        limits: RequestLimits | None = None,
+        continuation: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Analyze and derive any next-page request under the same runtime ownership."""
+
+        result = self.analyze(
+            capability_id,
+            sources,
+            arguments,
+            limits=limits,
+            continuation=continuation,
+        )
+        return result, self.next_analysis_request(result)
+
+    def next_analysis_request(self, result: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Return the complete replayable request for a result's next evidence page."""
+
+        continuation = result.get("continuation")
+        analysis_id = result.get("analysis_id")
+        if not isinstance(continuation, str) or not isinstance(analysis_id, str):
+            return None
+        cached = self.analyses.get(analysis_id)
+        if cached is None:
+            return None
+        preserved = cached.preserved
+        if isinstance(preserved, Mapping):
+            projection = self.read_evidence_agent_projection(str(preserved["evidence_id"]))
+            sources = projection["analysis_sources"]
+        else:
+            sources = [
+                {
+                    "kind": "path",
+                    "path": str(item.path),
+                    "format": item.format,
+                    "producer": item.producer,
+                    "expected_sha256": item.sha256,
+                }
+                for item in (cached.analysis_sources or cached.sources)
+            ]
+        analysis_request = cached.manifest_body["analysis_request"]
+        return {
+            "capability_id": cached.manifest_body["capability_id"],
+            "sources": sources,
+            "options": analysis_request["arguments"],
+            "limits": analysis_request["limits"],
+            "continuation": continuation,
+        }
+
     def preflight_rescue_destination(self, destination: str) -> str:
         """Validate a new rescue store before an expensive request begins."""
         selected = self._rescue_destination(destination)
@@ -1799,6 +1914,22 @@ class AnalysisRuntime:
         while len(rescues) > MAX_SESSION_RESCUES:
             rescues.popitem(last=False)
         return self._copy_result(result)
+
+    def rescue_evidence_page(
+        self, analysis_id: str, destination: str
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Rescue an analysis and return a handoff for the restarted repository."""
+
+        rescued = self.rescue_evidence(analysis_id, destination)
+        cached = self.analyses.get(analysis_id)
+        if cached is None:
+            return rescued, None
+        next_request = self.next_analysis_request(cached.result)
+        if next_request is not None:
+            alternate = EvidenceRepository(Path(rescued["rescue_destination"]), self.session_id)
+            projection = alternate.read_agent_projection(str(rescued["evidence_id"]))
+            next_request["sources"] = projection["analysis_sources"]
+        return rescued, next_request
 
     def _rescue_destination(self, destination: str) -> Path:
         supplied = Path(destination).expanduser()
@@ -2856,7 +2987,7 @@ class AnalysisRuntime:
                     suggested = 128 if fragment_chars is None else max(1, fragment_chars // 2)
                     recovery = {
                         "recovery": (
-                            f"Retry preview_artifact with text_fragment_chars={suggested} "
+                            f"Retry artifact.preview analysis with text_fragment_chars={suggested} "
                             "and start a fresh page. Fragment offsets differ from line offsets. "
                             "If metadata still cannot fit, use a larger max_result_bytes "
                             "within server limits."

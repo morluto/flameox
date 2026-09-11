@@ -64,7 +64,7 @@ durable SHA-256 identity derived from the canonical manifest body.
 ## Package boundaries
 
 - `runtime_contracts.py` owns public models and the capability/capture-provider registries.
-- `stateless.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
+- `runtime.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
 - `providers/capture.py` owns provider-specific command construction and expected native outputs;
   `providers/availability.py` owns installation and workload requirements.
 - `repository.py` owns lazy repository creation, validation, publication,

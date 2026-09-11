@@ -46,7 +46,7 @@ uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
 ## Understand the contract you are changing
 
 Production code uses a `src/` layout. `runtime_contracts.py` owns public contracts and registries,
-`stateless.py` owns request-local orchestration, `repository.py` owns optional immutable
+`runtime.py` owns process-lifespan orchestration, `repository.py` owns optional immutable
 preservation, and `execution.py` owns bounded subprocess work. Provider integrations live in
 `providers/`, reusable native-format parsing in `adapters/`, isolated protocols in `workers/`, and
 transport code in `cli.py` and `mcp/`. Tests mirror these semantic owners under `tests/`.
@@ -98,7 +98,7 @@ contract is an invariant over a useful input range.
 Run a focused test while iterating:
 
 ```console
-uv run pytest tests/test_stateless.py -q
+uv run pytest tests/test_runtime.py -q
 ```
 
 Then run validation proportional to the change. The usual baseline is:

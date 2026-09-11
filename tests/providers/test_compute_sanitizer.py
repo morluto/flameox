@@ -8,8 +8,8 @@ from typing import Any
 import anyio
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, RequestLimits
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.parametrize("error_count", [1, 133])

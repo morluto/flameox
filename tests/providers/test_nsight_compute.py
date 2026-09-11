@@ -10,8 +10,8 @@ import pytest
 
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.providers.nsight_compute import find_report_interface
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
-from flameox.stateless import AnalysisRuntime
 
 
 def _write_fake_report_interface(executable: Path) -> None:

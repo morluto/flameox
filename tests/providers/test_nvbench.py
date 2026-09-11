@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
     PathSource,
     RuntimeFailure,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 def _bundle(root: Path, samples: list[float], *, elements: int = 65_536) -> Path:

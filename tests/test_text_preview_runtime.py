@@ -7,8 +7,8 @@ import pytest
 from mcp import Client
 
 from flameox.mcp import create_server
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import EvidenceSource, PathSource, RequestLimits, RuntimeFailure
-from flameox.stateless import AnalysisRuntime
 
 
 def test_text_fragments_preserve_native_bytes_and_resume_after_restart(tmp_path: Path) -> None:
@@ -132,14 +132,18 @@ def test_mcp_exposes_and_executes_text_fragment_recovery(tmp_path: Path) -> None
     async def exercise() -> None:
         async with Client(create_server(), raise_exceptions=True) as client:
             result = await client.call_tool(
-                "preview_artifact",
+                "analyze",
                 {
-                    "sources": [{"kind": "path", "path": str(path), "format": "text"}],
-                    "options": {"text_fragment_chars": 128},
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(path), "format": "text"}],
+                        "options": {"text_fragment_chars": 128},
+                    }
                 },
             )
             assert result.is_error is False
             assert result.structured_content["coverage"]["complete"] is False
-            assert result.structured_content["continuation"] is not None
+            assert result.structured_content["continuation"] is None
+            assert result.structured_content["next_page"]["tool"] == "analyze"
 
     anyio.run(exercise)

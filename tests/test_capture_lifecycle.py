@@ -8,6 +8,7 @@ import anyio
 import psutil
 import pytest
 
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
@@ -17,7 +18,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.integration
@@ -95,7 +95,7 @@ def test_cancelled_capture_settles_child_and_removes_scratch(tmp_path: Path) -> 
 def test_live_capture_keeps_capacity_reserved_until_unwind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 1024)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 1024)
 
     async def exercise() -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
@@ -184,7 +184,7 @@ def test_preserved_capture_keeps_ancestor_cached_by_final_progress(tmp_path: Pat
 def test_written_capture_output_consumes_its_existing_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 3072)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 3072)
 
     async def exercise() -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
@@ -249,7 +249,7 @@ def test_evidence_materialization_cannot_consume_live_capture_reservation(
         source = EvidenceSource.model_validate(projection["analysis_sources"][0])
     finally:
         publisher.close()
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 2048)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 2048)
 
     async def exercise() -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")

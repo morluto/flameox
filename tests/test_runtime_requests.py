@@ -15,8 +15,8 @@ from flameox.command_binding import ExecutableResolver
 from flameox.executable_models import ResolvedExecutable
 from flameox.execution import ExecutionRequest
 from flameox.mcp import create_server
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, RuntimeFailure
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.unit
@@ -62,8 +62,13 @@ async def test_mcp_catalog_remains_available_during_blocking_analysis(
         async with Client(create_server(evidence_directory=tmp_path / "evidence")) as client:
             analysis = asyncio.create_task(
                 client.call_tool(
-                    "preview_artifact",
-                    {"sources": [{"kind": "path", "path": str(source)}]},
+                    "analyze",
+                    {
+                        "request": {
+                            "capability_id": "artifact.preview",
+                            "sources": [{"kind": "path", "path": str(source)}],
+                        }
+                    },
                 )
             )
             assert await anyio.to_thread.run_sync(started.wait, 3)

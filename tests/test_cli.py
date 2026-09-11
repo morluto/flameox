@@ -40,22 +40,27 @@ def test_help_exposes_current_command_families() -> None:
 
 def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> None:
     runner = CliRunner()
-    summary_result = runner.invoke(app, ["mcp", "inspect", "--summary"])
-    exact_result = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_cpu_hotspots"])
+    summary_result = runner.invoke(app, ["mcp", "inspect"])
+    exact_result = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_and_analyze"])
 
     assert summary_result.exit_code == 0, summary_result.output
     summary = json.loads(summary_result.output)
-    assert summary["tool_count"] == 50
+    assert summary["tool_count"] == 6
     assert len(summary_result.output) < 30_000
-    hotspot = next(tool for tool in summary["tools"] if tool["name"] == "capture_cpu_hotspots")
-    assert hotspot["effect"] == "destructive"
-    assert hotspot["required_inputs"] == ["target", "provider", "execution"]
-    assert "input_schema" not in hotspot
+    hotspot_capability = next(
+        item for item in summary["capabilities"] if item["id"] == "cpu.hotspots"
+    )
+    assert hotspot_capability["capture_providers"] == ["py-spy", "perf", "node-cpu-profile"]
+    capture = next(tool for tool in summary["tools"] if tool["name"] == "capture_and_analyze")
+    assert capture["annotations"]["destructive_hint"] is True
+    assert capture["required_inputs"] == ["request"]
+    assert "input_schema" not in capture
 
     assert exact_result.exit_code == 0, exact_result.output
     exact = json.loads(exact_result.output)
-    assert [tool["name"] for tool in exact["tools"]] == ["capture_cpu_hotspots"]
-    assert exact["tools"][0]["input_schema"]["properties"]["provider"]
+    assert [tool["name"] for tool in exact["tools"]] == ["capture_and_analyze"]
+    request = exact["tools"][0]["input_schema"]["properties"]["request"]
+    assert request["discriminator"]["propertyName"] == "capability_id"
 
 
 def test_mcp_inspect_unknown_tool_returns_bounded_recovery() -> None:
@@ -65,16 +70,14 @@ def test_mcp_inspect_unknown_tool_returns_bounded_recovery() -> None:
     failure = json.loads(result.stderr)
     assert failure["code"] == "UNKNOWN_CAPABILITY"
     assert failure["details"]["requested_tool"] == "missing_tool"
-    assert "capture_cpu_hotspots" in failure["details"]["available_tools"]
-    assert failure["details"]["recovery"] == (
-        "Run `flameox mcp inspect --summary` to select a tool."
-    )
+    assert "capture_and_analyze" in failure["details"]["available_tools"]
+    assert failure["details"]["recovery"] == "Run `flameox mcp inspect` to select a tool."
 
 
 def test_mcp_inspect_rejects_conflicting_detail_modes() -> None:
     result = CliRunner().invoke(
         app,
-        ["mcp", "inspect", "--tool", "capture_cpu_hotspots", "--summary"],
+        ["mcp", "inspect", "--tool", "capture_and_analyze", "--full"],
     )
 
     assert result.exit_code == 1
@@ -160,7 +163,9 @@ def test_analyze_consumes_continuation_from_a_previous_cli_invocation(tmp_path: 
     assert first.exit_code == 0, first.output
     first_payload = json.loads(first.output)
 
-    second = runner.invoke(app, [*arguments, "--continuation", first_payload["continuation"]])
+    assert "analysis_id" not in first_payload
+    assert first_payload["next_page"]["command"] == "flameox"
+    second = runner.invoke(app, first_payload["next_page"]["argv"])
     assert second.exit_code == 0, second.output
     second_payload = json.loads(second.output)
 
@@ -186,19 +191,9 @@ def test_analyze_reads_ordered_sources_from_preserved_evidence(tmp_path: Path) -
     assert first.exit_code == 0, first.output
     first_payload = json.loads(first.output)
 
-    second = runner.invoke(
-        app,
-        [
-            "analyze",
-            "artifact.preview",
-            "--evidence",
-            first_payload["preserved"]["evidence_id"],
-            "--limits",
-            '{"max_rows":1}',
-            "--continuation",
-            first_payload["continuation"],
-        ],
-    )
+    next_page = first_payload["next_page"]
+    assert first_payload["preserved"]["evidence_id"] in next_page["argv"]
+    second = runner.invoke(app, next_page["argv"])
 
     assert second.exit_code == 0, second.output
     assert json.loads(second.output)["blocks"][1]["rows"][0]["value"] == 2
@@ -298,7 +293,7 @@ def test_capture_does_not_offer_an_unusable_scratch_continuation(tmp_path: Path)
 
 
 @pytest.mark.process
-def test_preserved_capture_returns_a_cross_process_continuation_handoff(tmp_path: Path) -> None:
+def test_preserved_capture_returns_an_executable_cross_process_next_page(tmp_path: Path) -> None:
     runner = CliRunner()
     first = runner.invoke(
         app,
@@ -319,25 +314,12 @@ def test_preserved_capture_returns_a_cross_process_continuation_handoff(tmp_path
     )
     assert first.exit_code == 0, first.output
     first_payload = json.loads(first.output)
-    handoff = first_payload["continuation_handoff"]
-    assert handoff["command"] == "flameox analyze"
-    assert handoff["evidence_id"] == first_payload["preserved"]["evidence_id"]
+    next_page = first_payload["next_page"]
+    assert next_page["command"] == "flameox"
+    assert first_payload["preserved"]["evidence_id"] in next_page["argv"]
+    assert "analysis_id" not in first_payload
 
-    second = runner.invoke(
-        app,
-        [
-            "analyze",
-            handoff["capability_id"],
-            "--evidence",
-            handoff["evidence_id"],
-            "--limits",
-            json.dumps(handoff["limits"]),
-            "--arguments",
-            json.dumps(handoff["arguments"]),
-            "--continuation",
-            handoff["continuation"],
-        ],
-    )
+    second = runner.invoke(app, next_page["argv"])
 
     assert second.exit_code == 0, second.output
     assert json.loads(second.output)["blocks"][1]["rows"][0]["text"] == "second"
@@ -560,7 +542,7 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
     failure = json.loads(result.stderr)
     assert failure["details"]["requested_capability"] == "unknown.capability"
     assert "cpu.hotspots" in failure["details"]["available_capabilities"]
-    assert "mcp inspect --summary" in failure["details"]["recovery"]
+    assert "flameox mcp inspect" in failure["details"]["recovery"]
     assert "Traceback" not in result.output
 
 
@@ -584,7 +566,7 @@ def test_capture_unknown_provider_returns_choices_before_execution(tmp_path: Pat
     assert failure["details"]["requested_provider"] == "missing-provider"
     assert "direct" in failure["details"]["available_capture_providers"]
     assert failure["details"]["recovery"].endswith(
-        "`flameox mcp inspect --tool capture_process_output`."
+        "`flameox mcp inspect --tool capture_and_analyze`."
     )
     assert not marker.exists()
 
@@ -608,9 +590,7 @@ def test_analyze_unsupported_format_returns_accepted_formats(tmp_path: Path) -> 
         "perf",
         "perf-data",
     ]
-    assert failure["details"]["recovery"].endswith(
-        "`flameox mcp inspect --tool analyze_cpu_hotspots`."
-    )
+    assert failure["details"]["recovery"].endswith("`flameox mcp inspect --tool analyze`.")
 
 
 def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: Path) -> None:
@@ -618,12 +598,20 @@ def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: 
     configured.mkdir()
     (configured / "unexpected").write_text("owned")
     artifact = tmp_path / "rows.json"
-    artifact.write_text('[{"value": 1}]')
+    artifact.write_text('[{"value": 1}, {"value": 2}]')
     rescue = tmp_path / "rescue"
 
     result = CliRunner().invoke(
         app,
-        ["analyze", "artifact.preview", str(artifact), "--rescue-to", str(rescue)],
+        [
+            "analyze",
+            "artifact.preview",
+            str(artifact),
+            "--limits",
+            '{"max_rows":1}',
+            "--rescue-to",
+            str(rescue),
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -631,6 +619,8 @@ def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: 
     rescued = payload["rescued"]
     assert rescued["rescue_destination"] == str(rescue)
     assert rescued["next_action"]["environment"] == {"FLAMEOX_DATA_DIR": str(rescue)}
+    assert payload["next_page"]["environment"] == {"FLAMEOX_DATA_DIR": str(rescue)}
+    assert rescued["evidence_id"] in payload["next_page"]["argv"]
     assert (configured / "unexpected").read_text() == "owned"
     manifest = EvidenceRepository(rescue, "cli-test").read(rescued["evidence_id"])
     assert manifest["body"]["capability_id"] == "artifact.preview"
@@ -697,6 +687,32 @@ def test_evidence_query_rejects_a_malformed_input_digest() -> None:
 
     assert result.exit_code == 1
     assert '"code": "INVALID_INPUT"' in result.stderr
+
+
+def test_evidence_query_returns_an_executable_next_page(tmp_path: Path) -> None:
+    runner = CliRunner()
+    for index in range(2):
+        artifact = tmp_path / f"evidence-{index}.json"
+        artifact.write_text(json.dumps([{"value": index}]))
+        preserved = runner.invoke(
+            app,
+            ["analyze", "artifact.preview", str(artifact), "--preserve"],
+        )
+        assert preserved.exit_code == 0, preserved.output
+
+    first = runner.invoke(
+        app,
+        ["evidence", "query", "--capability", "artifact.preview", "--limit", "1"],
+    )
+    assert first.exit_code == 0, first.output
+    payload = json.loads(first.output)
+    next_page = payload["next_page"]
+    second = runner.invoke(app, next_page["argv"])
+
+    assert next_page["command"] == "flameox"
+    assert "artifact.preview" in next_page["argv"]
+    assert second.exit_code == 0, second.output
+    assert json.loads(second.output).get("next_page") is None
 
 
 def test_setup_without_a_tty_requires_an_explicit_client(tmp_path: Path) -> None:

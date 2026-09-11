@@ -49,7 +49,7 @@ An actual Slime scheduling run followed by deliberate large console output
 completed with 17,825,838 stdout bytes and 17,825,792 stderr bytes, retaining
 65,536 bytes per stream in memory. The execution receipt is preserved, but normal
 analysis/preservation of the native logs exposed a separate oversized-text-row
-gap. The subsequent `preview_artifact` fragment option now recovers and preserves
+gap. The subsequent `artifact.preview` fragment option now recovers and preserves
 those native logs through bounded pages. Neither milestone proves the planned
 resource-policy redesign complete. Subsequent real captures exercise both
 retention choices and restart recovery; see the console-retention section in the

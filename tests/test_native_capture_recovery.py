@@ -11,8 +11,8 @@ from mcp import Client
 from mcp_types import ResourceLink, TextResourceContents
 
 from flameox.mcp import create_server
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, EvidenceSource, RequestLimits
-from flameox.stateless import AnalysisRuntime
 
 
 def _coverage_target(tmp_path: Path) -> CaptureTarget:
@@ -87,18 +87,28 @@ def test_mcp_native_analysis_failure_exposes_preservable_partial_evidence(
 ) -> None:
     async def exercise() -> None:
         target = _coverage_target(tmp_path)
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+        async with Client(
+            create_server(
+                evidence_directory=tmp_path / "store",
+                limits=RequestLimits(max_input_bytes=1024, max_input_files=1),
+            )
+        ) as client:
             response = await client.call_tool(
-                "capture_coverage_summary",
+                "capture_and_analyze",
                 {
-                    "target": {
-                        "argv": target.argv,
-                        "cwd": target.cwd,
-                    },
-                    "provider": {"kind": "coverage", "options": target.capture_arguments},
-                    "execution": {"kind": "single"},
-                    "limits": {"max_input_bytes": 1024, "max_input_files": 1},
-                    "preserve": True,
+                    "request": {
+                        "capability_id": "coverage.summary",
+                        "target": {
+                            "argv": target.argv,
+                            "cwd": target.cwd,
+                        },
+                        "provider": {
+                            "kind": "coverage",
+                            "options": target.capture_arguments,
+                        },
+                        "execution": {"kind": "single"},
+                        "preserve": True,
+                    }
                 },
             )
 
@@ -127,7 +137,7 @@ def test_mcp_native_analysis_failure_exposes_preservable_partial_evidence(
 def test_rejected_sparse_native_artifact_keeps_capture_failure_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preserve: bool
 ) -> None:
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 1024)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 1024)
     workload = tmp_path / "sparse.py"
     workload.write_text(
         "from pathlib import Path\n"

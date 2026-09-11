@@ -1,1 +1,1 @@
-"""Explicit-input provider handlers owned by the stateless runtime."""
+"""Explicit-input provider handlers owned by the application runtime."""

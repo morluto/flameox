@@ -59,8 +59,8 @@ remaining proof gaps.
 
 ## Project Structure & Module Organization
 
-flameox is a Python 3.12+ package using a `src/` layout. `stateless.py` owns the
-process-lifespan capability runtime and strict public contracts; `repository.py`
+flameox is a Python 3.12+ package using a `src/` layout. `runtime.py` owns the
+process-lifespan capability runtime; `runtime_contracts.py` owns strict public contracts; `repository.py`
 owns optional immutable preservation; `execution.py` owns bounded subprocess
 work; capability integrations live in `providers/`; reusable format parsers live
 in `adapters/`; isolated protocols live in `workers/`; and `cli.py` plus `mcp/`
@@ -93,7 +93,7 @@ uv run mypy src tests tools
 
 The first command installs development tools and supported lightweight
 integrations. Run a focused test while iterating, for example
-`uv run pytest tests/test_stateless.py -q`. Marked performance checks
+`uv run pytest tests/test_runtime.py -q`. Marked performance checks
 can be selected with `uv run pytest -m performance`.
 
 ## Coding Style & Naming Conventions
@@ -103,7 +103,7 @@ Ruff enforces a 100-character line limit, import ordering, modernization, and
 common bug patterns; mypy runs in strict mode. Keep modules and functions
 `snake_case`, classes `PascalCase`, and constants `UPPER_SNAKE_CASE`. Follow
 existing architectural boundaries: keep request/runtime coordination in
-`stateless.py`, repository publication in `repository.py`, transports thin, and
+`runtime.py`, repository publication in `repository.py`, transports thin, and
 provider-specific behavior in `providers/`, with shared format parsing in
 `adapters/` and isolated protocols in `workers/`.
 

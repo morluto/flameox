@@ -11,6 +11,7 @@ import pytest
 
 from flameox.canonical import canonical_bytes
 from flameox.repository import EvidenceRepository, RepositoryError
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
@@ -19,7 +20,6 @@ from flameox.runtime_contracts import (
     RuntimeFailure,
 )
 from flameox.source_files import bundle_digest
-from flameox.stateless import AnalysisRuntime
 
 
 def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
@@ -190,7 +190,7 @@ def test_evidence_limits_reject_before_materialization(
 ) -> None:
     projection = preserve_bundle(tmp_path)
     if bound == "scratch":
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 1024)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 1024)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
@@ -212,7 +212,7 @@ def test_materialized_evidence_participates_in_eviction(
 ) -> None:
     first = preserve_bundle(tmp_path, "one")
     second = preserve_bundle(tmp_path, "two")
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 2048)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 2048)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         old = runtime.analyze(
@@ -244,9 +244,9 @@ def test_multisource_admission_is_aggregate_and_allocates_nothing_on_rejection(
     elif bound == "input_files":
         limits = RequestLimits(max_input_files=1)
     elif bound == "scratch_bytes":
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 3000)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 3000)
     else:
-        monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_FILES", 1)
+        monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_FILES", 1)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
@@ -270,7 +270,7 @@ def test_cache_handle_eviction_keeps_shared_active_evidence_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     projection = preserve_bundle(tmp_path)
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_ANALYSES", 1)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_ANALYSES", 1)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     source = EvidenceSource.model_validate(projection["analysis_sources"][0])
     try:
@@ -367,7 +367,7 @@ def test_acquiring_second_input_cannot_evict_the_first_active_input(
 ) -> None:
     first = preserve_bundle(tmp_path, "one")
     second = preserve_bundle(tmp_path, "two")
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 4096)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 4096)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         source = EvidenceSource.model_validate(first["analysis_sources"][0])
@@ -389,7 +389,7 @@ def test_active_member_protects_its_containing_materialized_bundle(
 ) -> None:
     first = preserve_bundle(tmp_path, "one")
     second = preserve_bundle(tmp_path, "two")
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_SCRATCH_BYTES", 2048)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 2048)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
@@ -613,7 +613,7 @@ def test_json_projection_keeps_literal_keys_separate_from_nested_paths(tmp_path:
 def test_failed_analyses_obey_session_cache_capacity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("flameox.stateless.MAX_SESSION_ANALYSES", 2)
+    monkeypatch.setattr("flameox.runtime.MAX_SESSION_ANALYSES", 2)
 
     async def exercise() -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")

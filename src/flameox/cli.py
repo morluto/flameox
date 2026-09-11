@@ -1,4 +1,4 @@
-"""Thin command-line mirrors of the stateless application capabilities."""
+"""Thin command-line mirrors of the process-lifespan application runtime."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
+    CAPABILITIES,
     CaptureTarget,
     EvidenceSource,
     ExperimentDesign,
@@ -21,6 +23,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     WorkloadBudget,
+    compatible_capture_providers,
 )
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
@@ -40,7 +43,6 @@ from flameox.setup import (
     plan_client_setup,
     prepare_providers,
 )
-from flameox.stateless import AnalysisRuntime
 
 app = typer.Typer(
     name="flameox",
@@ -326,7 +328,7 @@ def _setup_value(
 def analyze(
     capability_id: Annotated[
         str,
-        typer.Argument(help="Capability ID; discover IDs with `flameox mcp inspect --summary`."),
+        typer.Argument(help="Capability ID; discover IDs with `flameox mcp inspect`."),
     ],
     sources: Annotated[list[Path] | None, typer.Argument()] = None,
     arguments: Annotated[str, typer.Option("--arguments")] = "{}",
@@ -368,6 +370,13 @@ def analyze(
             )
         elif preserve:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
+        _finalize_cli_analysis_continuation(
+            runtime,
+            result,
+            evidence_id=evidence_id,
+            format_name=format_name,
+        )
+        result.pop("analysis_id", None)
         _write(result)
     except (RuntimeFailure, ValidationError) as error:
         _cli_failure(error)
@@ -389,7 +398,7 @@ def capture(
         str,
         typer.Option(
             "--capability",
-            help="Capability ID; discover IDs with `flameox mcp inspect --summary`.",
+            help="Capability ID; discover IDs with `flameox mcp inspect`.",
         ),
     ] = "artifact.preview",
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
@@ -478,10 +487,10 @@ def capture(
         elif preserve and "preserved" not in result:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
         _finalize_cli_capture_continuation(
+            runtime,
             result,
-            analysis_arguments=target.analysis_arguments,
-            limits=runtime.limits,
         )
+        result.pop("analysis_id", None)
         _write(result)
         if result.get("analysis_failure") is not None or any(
             item["status"] != "succeeded" for item in result["capture"]["executions"]
@@ -504,15 +513,25 @@ def evidence_query(
     """Search immutable evidence manifests."""
     runtime = _runtime()
     try:
-        _write(
-            runtime.query_evidence(
-                capability_id=capability_id,
-                provider_id=provider_id,
-                input_sha256=input_sha256,
-                limit=limit,
-                cursor=cursor,
-            )
+        result = runtime.query_evidence(
+            capability_id=capability_id,
+            provider_id=provider_id,
+            input_sha256=input_sha256,
+            limit=limit,
+            cursor=cursor,
         )
+        if continuation := result.get("continuation"):
+            argv = ["evidence", "query"]
+            for option, value in (
+                ("--capability", capability_id),
+                ("--provider", provider_id),
+                ("--input-sha256", input_sha256),
+            ):
+                if value is not None:
+                    argv.extend([option, value])
+            argv.extend(["--limit", str(limit), "--cursor", str(continuation)])
+            result["next_page"] = {"command": "flameox", "argv": argv}
+        _write(result)
     except (RuntimeFailure, ValidationError) as error:
         _cli_failure(error)
     finally:
@@ -564,9 +583,9 @@ def mcp_inspect(
         str | None,
         typer.Option("--tool", help="Return the complete schema for one exact tool name."),
     ] = None,
-    summary: Annotated[
+    full: Annotated[
         bool,
-        typer.Option("--summary", help="List compact tool discovery records without schemas."),
+        typer.Option("--full", help="Return the complete catalog including every schema."),
     ] = False,
 ) -> None:
     """Inspect the MCP catalog without starting a transport."""
@@ -582,11 +601,11 @@ def mcp_inspect(
 
     catalog = anyio.run(inspect_server)
     tools = cast(list[dict[str, Any]], catalog["tools"])
-    if tool_name is not None and summary:
+    if tool_name is not None and full:
         _cli_failure(
             RuntimeFailure(
                 "INVALID_INPUT",
-                "Use either --tool for one complete schema or --summary for compact discovery.",
+                "Use either --tool for one complete schema or --full for the complete catalog.",
             )
         )
     if tool_name is not None:
@@ -599,23 +618,34 @@ def mcp_inspect(
                     details={
                         "requested_tool": tool_name,
                         "available_tools": sorted(tool["name"] for tool in catalog["tools"]),
-                        "recovery": "Run `flameox mcp inspect --summary` to select a tool.",
+                        "recovery": "Run `flameox mcp inspect` to select a tool.",
                     },
                 )
             )
-    if summary:
+    if tool_name is None and not full:
         tools = [
             {
                 "name": tool["name"],
                 "description": tool["description"],
                 "required_inputs": tool["input_schema"].get("required", []),
-                "effect": _tool_effect(cast(dict[str, Any] | None, tool["annotations"])),
+                "annotations": tool["annotations"],
             }
             for tool in tools
         ]
         catalog = {
             "tool_count": len(tools),
             "tools": tools,
+            "capabilities": [
+                {
+                    "id": capability.id,
+                    "summary": capability.summary,
+                    "formats": list(capability.formats),
+                    "capture_providers": [
+                        provider.id for provider in compatible_capture_providers(capability)
+                    ],
+                }
+                for capability in CAPABILITIES
+            ],
             "resources": [
                 {
                     "name": resource["name"],
@@ -628,16 +658,6 @@ def mcp_inspect(
     else:
         catalog["tools"] = tools
     _write(catalog)
-
-
-def _tool_effect(annotations: dict[str, Any] | None) -> str:
-    if annotations is None:
-        return "unspecified"
-    if annotations.get("read_only_hint") is True:
-        return "read_only"
-    if annotations.get("destructive_hint") is True:
-        return "destructive"
-    return "executes_or_writes"
 
 
 def _evidence_destination(
@@ -667,10 +687,8 @@ def _cli_analysis_sources(
 
 
 def _finalize_cli_capture_continuation(
+    runtime: AnalysisRuntime,
     result: dict[str, Any],
-    *,
-    analysis_arguments: dict[str, Any],
-    limits: RequestLimits,
 ) -> None:
     continuation = result.get("continuation")
     if not isinstance(continuation, str):
@@ -685,11 +703,68 @@ def _finalize_cli_capture_continuation(
             "sources without rerunning the workload between pages."
         )
         return
-    result["continuation_handoff"] = {
-        "command": "flameox analyze",
-        "capability_id": result["capability_id"],
-        "evidence_id": durable["evidence_id"],
-        "arguments": analysis_arguments,
-        "limits": limits.model_dump(mode="json"),
-        "continuation": continuation,
+    request = runtime.next_analysis_request(result)
+    if request is None:
+        result["continuation"] = None
+        cast(list[str], result["limitations"]).append(
+            "The next-page request expired before the CLI result was finalized."
+        )
+        return
+    next_page: dict[str, object] = {
+        "command": "flameox",
+        "argv": _cli_next_page_argv(request, evidence_id=str(durable["evidence_id"])),
     }
+    if "rescued" in result:
+        next_page["environment"] = durable["next_action"]["environment"]
+    result["next_page"] = next_page
+
+
+def _finalize_cli_analysis_continuation(
+    runtime: AnalysisRuntime,
+    result: dict[str, Any],
+    *,
+    evidence_id: str | None,
+    format_name: str | None,
+) -> None:
+    request = runtime.next_analysis_request(result)
+    if request is None:
+        return
+    durable = result.get("preserved") or result.get("rescued")
+    selected_evidence_id = str(durable["evidence_id"]) if isinstance(durable, dict) else evidence_id
+    next_page: dict[str, object] = {
+        "command": "flameox",
+        "argv": _cli_next_page_argv(
+            request,
+            evidence_id=selected_evidence_id,
+            format_name=format_name,
+        ),
+    }
+    if isinstance(result.get("rescued"), dict):
+        next_page["environment"] = result["rescued"]["next_action"]["environment"]
+    result["next_page"] = next_page
+
+
+def _cli_next_page_argv(
+    request: dict[str, Any],
+    *,
+    evidence_id: str | None,
+    format_name: str | None = None,
+) -> list[str]:
+    argv = ["analyze", str(request["capability_id"])]
+    if evidence_id is not None:
+        argv.extend(["--evidence", evidence_id])
+    else:
+        argv.extend(str(source["path"]) for source in request["sources"])
+        if format_name is not None:
+            argv.extend(["--format", format_name])
+    argv.extend(
+        [
+            "--arguments",
+            json.dumps(request["options"], sort_keys=True, separators=(",", ":")),
+            "--limits",
+            json.dumps(request["limits"], sort_keys=True, separators=(",", ":")),
+            "--continuation",
+            str(request["continuation"]),
+        ]
+    )
+    return argv

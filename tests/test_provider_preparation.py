@@ -14,9 +14,9 @@ from mcp_types import TextContent
 from flameox import __version__
 from flameox.mcp import create_server
 from flameox.providers.preparation import PY_SPY_VERSION, ProviderDependencies
+from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource, RuntimeFailure
 from flameox.setup import SetupFailure, active_provider_status
-from flameox.stateless import AnalysisRuntime
 
 
 @pytest.mark.unit
@@ -74,7 +74,7 @@ def test_mcp_preparation_reports_verified_or_conditional_handoff(
                 )
                 assert "Preserve" in value["next_action"]["message"]
             assert isinstance(result.content[0], TextContent)
-            assert "host readiness has not been verified" in result.content[0].text
+            assert "host readiness is unknown" in result.content[0].text
 
     anyio.run(exercise)
 

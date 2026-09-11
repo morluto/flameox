@@ -1,4 +1,4 @@
-"""Lazy, immutable evidence repository for the stateless runtime."""
+"""Lazy, immutable evidence repository for the process-lifespan runtime."""
 
 from __future__ import annotations
 
