@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
@@ -89,7 +90,24 @@ class EvidenceSource(StrictModel):
         return self
 
 
-Source = Annotated[PathSource | EvidenceSource, Field(discriminator="kind")]
+def _normalize_source_kind(value: Any) -> Any:
+    """Inject the advertised default ``kind`` when a source omits the discriminator.
+
+    ``PathSource.kind`` defaults to ``"path"`` in the public schema, so a request that
+    omits ``kind`` is admitted by the contract and must select the path member. An
+    explicit ``kind`` is left untouched, so unknown values keep failing validation.
+    """
+    if isinstance(value, Mapping) and "kind" not in value:
+        value = dict(value)
+        value["kind"] = "evidence" if "evidence_id" in value else "path"
+    return value
+
+
+Source = Annotated[
+    PathSource | EvidenceSource,
+    Field(discriminator="kind"),
+    BeforeValidator(_normalize_source_kind),
+]
 
 
 class EmptyArguments(StrictModel):

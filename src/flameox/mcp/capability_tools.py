@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import reduce
 from operator import or_
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, create_model
+from pydantic import BeforeValidator, Field, create_model
 
 from flameox.runtime_contracts import (
     CAPTURE_PROVIDER_CONTRACTS,
@@ -29,7 +30,24 @@ class ExperimentExecution(StrictModel):
     design: ExperimentDesign = Field(description="Paired experiment design and decision rule.")
 
 
-Execution = Annotated[SingleExecution | ExperimentExecution, Field(discriminator="kind")]
+def _normalize_execution_kind(value: Any) -> Any:
+    """Inject the advertised default ``kind`` when an execution omits the discriminator.
+
+    ``SingleExecution.kind`` defaults to ``"single"`` in the public schema, so a request
+    that omits ``kind`` is admitted by the contract and must select the single member. An
+    explicit ``kind`` is left untouched, so unknown values keep failing validation.
+    """
+    if isinstance(value, Mapping) and "kind" not in value:
+        value = dict(value)
+        value["kind"] = "experiment" if "design" in value else "single"
+    return value
+
+
+Execution = Annotated[
+    SingleExecution | ExperimentExecution,
+    Field(discriminator="kind"),
+    BeforeValidator(_normalize_execution_kind),
+]
 
 
 def tool_stem(capability: Capability) -> str:
