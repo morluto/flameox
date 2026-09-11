@@ -8,10 +8,9 @@ Flameox coordinates profilers, benchmark tools, trace processors, and direct
 local targets. It gives an agent a short path from an explicit native artifact
 or live command to bounded evidence, while keeping preservation optional.
 
-Version 0.2 is a clean break. There is no workspace to initialize, no
-`flameox.toml`, no SQLite control plane, no durable job to poll, and no parent
-directory discovery. Existing artifacts remain usable by passing their exact
-paths and formats to `analyze`; old `.diagnostics` state is not migrated.
+There is no workspace to initialize, `flameox.toml`, SQLite control plane,
+durable job to poll, or parent-directory discovery. Analyze existing artifacts
+by passing their exact paths and formats.
 
 ## Quick start
 
@@ -104,6 +103,25 @@ Analysis and capture have separate names and annotations because reading an arti
 target are materially different effects. Tool search happens in the MCP client; Flameox does not
 require an additional catalog-search call.
 
+For example, a bounded artifact preview calls `analyze` with the capability inside `request` and
+the response bound beside it:
+
+```json
+{
+  "request": {
+    "capability_id": "artifact.preview",
+    "sources": [{"kind": "path", "path": "/absolute/path/to/output.log"}]
+  },
+  "page_size": 100
+}
+```
+
+`capture_and_analyze` uses the same outer shape, but its `request` also contains `target`,
+`provider`, and `execution`. Use `request.execution.kind: "single"` for one run and
+`request.execution.kind: "experiment"` with an experiment `design` for paired cases. When a result
+contains `next_page`, call its named tool with its arguments unchanged; continuing a capture uses
+`analyze` and never runs the target again.
+
 It exposes one resource template, `flameox://evidence/{evidence_id}`, for the
 digest-bound, redacted projection of the canonical immutable manifest. Full
 argv, environment values, working directories, and host paths remain available
@@ -111,9 +129,10 @@ only through explicit local manifest inspection. Native artifact bytes are
 deliberately not available as MCP resources.
 
 Direct capture accepts an argv array, an explicit absolute cwd, bounded environment overrides, a
-typed compatible-provider variant, capability-specific options, an explicit single/experiment
-choice, and a semantic page size. Server resource ceilings stay out of the request schema. There
-is no generic provider or analysis-arguments object.
+typed compatible-provider variant, capability-specific options, and an explicit single/experiment
+choice inside `request`. The only public response bound, `page_size`, is a top-level tool argument.
+Server resource ceilings stay out of the request schema. There is no generic provider or
+analysis-arguments object.
 Shell strings are never accepted. Work remains owned by the live MCP request, so SDK progress and
 cancellation apply directly; there are no detached or restart-surviving tasks.
 

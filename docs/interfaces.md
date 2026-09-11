@@ -9,13 +9,9 @@ The catalog exposes six tools. Capability-specific requests are discriminated un
 still validates exact options, source cardinality, compatible providers, and execution modes while
 common transport fields and result schemas occur only once.
 
-This replaces the per-capability MCP names from releases before this redesign. Calls such as
-`analyze_cpu_hotspots` now use `analyze` with
-`request.capability_id: "cpu.hotspots"`; calls such as `capture_process_output` now use
-`capture_and_analyze` with `request.capability_id: "artifact.preview"`. The former
-`continuation_sources` and CLI `continuation_handoff` fields are replaced by executable
-`next_page` calls. `flameox mcp inspect` is compact by default; use `--full` for the complete
-catalog. CLI results omit the process-local `analysis_id` because it cannot survive command exit.
+`flameox mcp inspect` is compact by default; use `--tool TOOL_NAME` for one complete schema or
+`--full` for the complete catalog. CLI results omit the process-local `analysis_id` because it
+cannot survive command exit.
 
 | Group | Count | Examples | Effect |
 | --- | ---: | --- | --- |
@@ -64,6 +60,17 @@ and experiment descriptions are declared on their owning Pydantic models so CLI 
 runtime validation, and every generated capability tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
 
+The nesting is consistent across capabilities:
+
+```text
+analyze({request: {capability_id, sources, options?, continuation?}, page_size?})
+capture_and_analyze({request: {capability_id, target, provider, options?, execution, preserve?}, page_size?})
+```
+
+`capability_id` and `execution` are never top-level tool arguments. For experiment capture, the
+exact discriminator path is `request.execution.kind: "experiment"`; its sibling `design` contains
+the cases, blocks, seed, metric, estimand, threshold, and optional oracle.
+
 Successful calls keep the complete validated result in `structuredContent`. Their text block is a
 short compatibility summary with the capability, completion or truncation state, session handle,
 and next action; it does not serialize the evidence tables a second time. Content-only clients can
@@ -82,6 +89,25 @@ from prose, and capture continuation never reruns the workload. Preserving a liv
 analysis may release its scratch paths, so `preserve_evidence` returns a refreshed evidence-backed
 `next_page` that supersedes the earlier live-path handoff. `rescue_evidence` does the same for the
 alternate store that becomes active after reconnecting.
+
+For example, existing-artifact analysis has this complete outer shape:
+
+```json
+{
+  "request": {
+    "capability_id": "artifact.preview",
+    "sources": [
+      {"kind": "path", "path": "/absolute/path/to/output.log", "format": "text"}
+    ],
+    "options": {"text_fragment_chars": 1024}
+  },
+  "page_size": 100
+}
+```
+
+If the response is partial, do not copy its continuation token into a newly assembled request.
+Submit `next_page.tool` with `next_page.arguments` unchanged. This preserves source order, options,
+identity checks, and the original page size.
 
 Each capability declaration also owns its accepted source cardinality. MCP encodes that range in
 the generated `sources` schema, and the runtime checks the same range before resolving paths or
@@ -246,8 +272,7 @@ An oracle's own output remains diagnostic unless `full` is explicitly selected.
 Diagnostics retain at most 4,096 bytes per stream, lowered by the provenance
 budget, with UTF-8 replacement decoding. `console_diagnostics` reports observed,
 retained, and omitted byte counts and stream completeness; full-output metadata
-is reported under `output_streams`. Omitted bytes cannot be recovered later. See
-[workload resources and evidence bounds](workload-resource-policy.md).
+is reported under `output_streams`. Omitted bytes cannot be recovered later.
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields live in the capture tool's
@@ -283,7 +308,7 @@ reports separate capture execution state and a typed `analysis_failure`. An anal
 never converted into empty successful evidence.
 
 Experiment mode adds 2-16 cases, 1-100 blocks, a seed, metric, estimand,
-practical threshold, and optional semantic-oracle argv. Version 0.2 evaluates
+practical threshold, and optional semantic-oracle argv. Flameox evaluates
 `wall_time_ns` with a paired `median_difference` or `mean_difference`, reports
 eligible blocks and a deterministic percentile interval when at least three
 blocks survive capture/oracle validation, and classifies the effect against the

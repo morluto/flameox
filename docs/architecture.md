@@ -1,6 +1,6 @@
 # Architecture
 
-Flameox 0.2 is a process-lifespan capability runtime with an optional immutable
+Flameox is a process-lifespan capability runtime with an optional immutable
 evidence repository. It is not a workspace application and has no mutable
 control plane.
 
@@ -31,9 +31,7 @@ Native artifacts remain useful when an investigation needs their contents; full
 console output is retained only when it is the requested evidence, an oracle
 requires it, or the caller explicitly requests it. Only that full-output case
 needs a disk-backed console sink. Preservation controls durability, not an
-implicit expansion of what is collected. See
-[workload resources and evidence bounds](workload-resource-policy.md) for the
-remaining native-artifact and storage-admission work.
+implicit expansion of what is collected.
 
 `DirectTarget.budget` owns optional workload time and sampled process-tree RSS
 controls. Absent values impose neither a workload deadline nor an RSS cap.

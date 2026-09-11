@@ -1,7 +1,7 @@
 # Storage and evidence
 
 Storage is optional. Analysis and unpreserved capture must not create user data, project files,
-`.diagnostics`, SQLite files, or persistent DuckDB files.
+SQLite files, or persistent DuckDB files.
 
 ## Console retention and disk backing
 
@@ -35,9 +35,6 @@ Full streams have `output_streams` metadata; excerpts have `console_diagnostics`
 The ordinary evidence resource exposes counts and completeness, not excerpt text.
 Failed captures with no native artifacts can still preserve their diagnostics,
 execution outcome, and analysis failure without creating placeholder log files.
-
-See [workload resources and evidence bounds](workload-resource-policy.md) for the
-remaining native-artifact budget and storage-admission work.
 
 ## Repository layout
 

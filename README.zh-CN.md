@@ -3,8 +3,8 @@
 Flameox 是面向编码代理的本地、有界运行时证据层。它协调分析器、基准工具、
 跟踪处理器和明确指定的本地命令，但本身不是分析器或托管可观测平台。
 
-0.2 是一次不兼容重构：无需初始化工作区，没有命名工作负载、SQLite 控制面、
-持久 DuckDB 目录或可轮询的后台任务。调用方直接传入原生证据的绝对路径，或
+Flameox 无需初始化工作区，也没有命名工作负载、SQLite 控制面、持久 DuckDB 目录
+或可轮询的后台任务。调用方直接传入原生证据的绝对路径，或
 包含 argv、绝对 cwd、环境覆盖、提供方参数和限制的类型化目标。服务本身不绑定项目或工作区。
 
 ```console
@@ -29,12 +29,29 @@ MCP 公开 `analyze` 与 `capture_and_analyze` 两个类型化操作；它们通
 管理。工具搜索由 MCP 客户端负责。唯一资源模板是
 `flameox://evidence/{evidence_id}`，只返回不可变规范清单，不公开原生载荷。
 
+例如，有界预览通过 `analyze` 调用。能力和来源放在 `request` 内，语义分页大小是
+顶层参数：
+
+```json
+{
+  "request": {
+    "capability_id": "artifact.preview",
+    "sources": [{"kind": "path", "path": "/absolute/path/to/output.log"}]
+  },
+  "page_size": 100
+}
+```
+
+`capture_and_analyze` 使用相同外层结构，其 `request` 另外包含 `target`、`provider`
+和 `execution`。单次采集使用 `request.execution.kind: "single"`；成对实验使用
+`request.execution.kind: "experiment"` 并提供 `design`。若结果包含 `next_page`，
+应原样调用其中指定的工具和参数。采集的后续页由 `analyze` 读取，不会再次执行目标。
+服务端的字节数、内存、超时等保护上限不是 MCP 调节旋钮；公开的响应范围参数只有
+顶层 `page_size`。
+
 `analysis_id` 仅在当前服务进程内有效；重启后过期。`evidence_id` 是持久的内容
 身份。长任务属于当前 MCP 请求，通过 SDK 报告进度并响应取消；不存在脱离请求、
 跨重启恢复的任务。
-
-旧版 `.diagnostics` 不迁移也不兼容读取。仍可将其中的原生证据按确切路径和格式
-传给 `analyze`。
 
 详细契约见英文文档：
 [architecture](docs/architecture.md)、

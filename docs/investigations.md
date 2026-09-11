@@ -48,7 +48,7 @@ correctness through `kernel.validation` and `kernel.compare` analysis, checks ha
 `gpu.kernel_metrics`. Flameox preserves the verification evidence;
 it does not generate kernels, wrap compilers, or decide which optimization to implement.
 
-The 0.2 runtime accepts `wall_time_ns` and paired `median_difference` or
+The runtime accepts `wall_time_ns` and paired `median_difference` or
 `mean_difference`. Each non-baseline case is compared with the first declared
 case within the same blocks. Failed or oracle-invalid pairs are excluded and
 reported as limitations; fewer than three eligible pairs produce a descriptive

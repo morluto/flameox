@@ -115,8 +115,7 @@ collection uses request-owned disk files and the existing combined output ceilin
 Native artifact growth and decoder bounds still apply. Workload time/RSS budgets
 are optional fields on `target.budget`; absent values do not inherit decoder
 limits. The same explicit budget applies separately to each capture and oracle.
-Cancellation and cleanup remain mandatory. Remaining storage-bound separation is tracked in
-[workload resources and evidence bounds](workload-resource-policy.md).
+Cancellation and cleanup remain mandatory.
 
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
 - result JSON is capped at 256 KiB by default;
