@@ -11,7 +11,6 @@ import random
 import re
 import secrets
 import shutil
-import stat
 import statistics
 import sys
 import tempfile
@@ -432,7 +431,15 @@ class AnalysisRuntime:
     ) -> dict[str, Any]:
         capability = CAPABILITY_BY_ID.get(capability_id)
         if capability is None:
-            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {capability_id}")
+            raise RuntimeFailure(
+                "UNKNOWN_CAPABILITY",
+                f"Unknown capability: {capability_id}",
+                details={
+                    "requested_capability": capability_id,
+                    "available_capabilities": sorted(CAPABILITY_BY_ID),
+                    "recovery": "Run `flameox mcp inspect --summary` to select a capability.",
+                },
+            )
         capability.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         validated = TypeAdapter(capability.model).validate_python(arguments)
@@ -451,7 +458,20 @@ class AnalysisRuntime:
                 (item.format for item in resolved if item.format not in capability.formats), None
             )
         ):
-            raise RuntimeFailure("UNSUPPORTED_FORMAT", f"Unsupported format: {bad}")
+            analysis_tool = f"analyze_{capability_id.replace('.', '_')}"
+            raise RuntimeFailure(
+                "UNSUPPORTED_FORMAT",
+                f"{capability_id} does not accept artifact format {bad!r}",
+                details={
+                    "capability_id": capability_id,
+                    "received_format": bad,
+                    "accepted_formats": list(capability.formats),
+                    "recovery": (
+                        f"Select one accepted format or inspect `{analysis_tool}` "
+                        f"with `flameox mcp inspect --tool {analysis_tool}`."
+                    ),
+                },
+            )
         if (
             isinstance(validated, CpuHotspotArguments)
             and validated.metric is not None
@@ -683,8 +703,18 @@ class AnalysisRuntime:
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         capability = CAPABILITY_BY_ID.get(capability_id)
         if capability is None:
-            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capability: {capability_id}")
-        capture_arguments = self._capture_arguments(target.provider_id, target.capture_arguments)
+            raise RuntimeFailure(
+                "UNKNOWN_CAPABILITY",
+                f"Unknown capability: {capability_id}",
+                details={
+                    "requested_capability": capability_id,
+                    "available_capabilities": sorted(CAPABILITY_BY_ID),
+                    "recovery": "Run `flameox mcp inspect --summary` to select a capability.",
+                },
+            )
+        capture_arguments = self._capture_arguments(
+            target.provider_id, target.capture_arguments, capability_id=capability_id
+        )
         TypeAdapter(capability.model).validate_python(target.analysis_arguments)
         if (mode == "experiment") != (experiment is not None):
             raise RuntimeFailure(
@@ -1632,10 +1662,28 @@ class AnalysisRuntime:
         ]
 
     @staticmethod
-    def _capture_arguments(provider_id: str, arguments: Mapping[str, Any]) -> CaptureArguments:
+    def _capture_arguments(
+        provider_id: str, arguments: Mapping[str, Any], *, capability_id: str
+    ) -> CaptureArguments:
         contract = CAPTURE_PROVIDER_CONTRACTS.get(provider_id)
         if contract is None:
-            raise RuntimeFailure("UNKNOWN_CAPABILITY", f"Unknown capture provider: {provider_id}")
+            capture_tool = (
+                "capture_process_output"
+                if capability_id == "artifact.preview"
+                else f"capture_{capability_id.replace('.', '_')}"
+            )
+            raise RuntimeFailure(
+                "UNKNOWN_CAPABILITY",
+                f"Unknown capture provider: {provider_id}",
+                details={
+                    "requested_provider": provider_id,
+                    "available_capture_providers": sorted(CAPTURE_PROVIDER_CONTRACTS),
+                    "recovery": (
+                        "Inspect the compatible provider schema with "
+                        f"`flameox mcp inspect --tool {capture_tool}`."
+                    ),
+                },
+            )
         return cast(CaptureArguments, contract.argument_model.model_validate(arguments))
 
     def _reserve_capture_capacity(
@@ -1693,20 +1741,27 @@ class AnalysisRuntime:
         self.analyses.move_to_end(analysis_id)
         return dict(cached.preserved)
 
-    def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
-        supplied = Path(destination).expanduser()
-        if not supplied.is_absolute():
-            raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an absolute path")
-        selected = Path(os.path.abspath(supplied))
-        configured = self.repository.root
-        if (
-            selected == configured
-            or selected.is_relative_to(configured)
-            or configured.is_relative_to(selected)
-        ):
+    def preflight_rescue_destination(self, destination: str) -> str:
+        """Validate a new rescue store before an expensive request begins."""
+        selected = self._rescue_destination(destination)
+        parent_descriptor = self._open_rescue_parent(selected.parent)
+        try:
+            try:
+                os.stat(selected.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return str(selected)
             raise RuntimeFailure(
-                "INVALID_INPUT", "Rescue destination must be outside the configured repository"
+                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
             )
+        except OSError as exc:
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "Rescue destination could not be validated."
+            ) from exc
+        finally:
+            os.close(parent_descriptor)
+
+    def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
+        selected = self._rescue_destination(destination)
         rescue_key = (analysis_id, str(selected))
         rescues = getattr(self, "rescues", None)
         if rescues is None:
@@ -1745,6 +1800,26 @@ class AnalysisRuntime:
             rescues.popitem(last=False)
         return self._copy_result(result)
 
+    def _rescue_destination(self, destination: str) -> Path:
+        supplied = Path(destination).expanduser()
+        if not supplied.is_absolute():
+            raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an absolute path")
+        selected = Path(os.path.abspath(supplied))
+        configured = self.repository.root
+        configured_physical = configured.resolve(strict=False)
+        selected_physical = selected.resolve(strict=False)
+        if self._paths_overlap(selected, configured) or self._paths_overlap(
+            selected_physical, configured_physical
+        ):
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be outside the configured repository"
+            )
+        return selected
+
+    @staticmethod
+    def _paths_overlap(first: Path, second: Path) -> bool:
+        return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+
     def _rescue_to_open_parent(
         self,
         parent_descriptor: int,
@@ -1775,15 +1850,14 @@ class AnalysisRuntime:
             )
         except FileNotFoundError:
             destination_status = None
-        if destination_status is not None and not stat.S_ISDIR(destination_status.st_mode):
-            raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an empty directory")
-        if destination_status is not None and any(anchored_destination.iterdir()):
+        if destination_status is not None:
             try:
                 manifest = alternate.read(expected_id)
             except RepositoryError as exc:
                 if previous is None and not (anchored_destination / "repository.json").exists():
                     raise RuntimeFailure(
-                        "INVALID_INPUT", "Rescue destination must be an empty directory"
+                        "INVALID_INPUT",
+                        "Rescue destination must be a new path that does not exist",
                     ) from exc
                 raise
             result = self._rescue_result(expected_id, len(manifest["body"]["artifacts"]), selected)
@@ -1793,15 +1867,23 @@ class AnalysisRuntime:
                 anchored_parent=anchored_parent,
                 anchored_destination=anchored_destination,
                 selected=selected,
-                destination_exists=destination_status is not None,
                 cached=cached,
                 durable=durable,
             )
         anchored_status = os.fstat(parent_descriptor)
-        selected_status = os.stat(selected.parent)
+        try:
+            final_parent_descriptor = self._open_rescue_parent(selected.parent)
+        except RuntimeFailure as exc:
+            raise RuntimeFailure(
+                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
+            ) from exc
+        try:
+            final_status = os.fstat(final_parent_descriptor)
+        finally:
+            os.close(final_parent_descriptor)
         if (anchored_status.st_dev, anchored_status.st_ino) != (
-            selected_status.st_dev,
-            selected_status.st_ino,
+            final_status.st_dev,
+            final_status.st_ino,
         ):
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
@@ -1815,7 +1897,6 @@ class AnalysisRuntime:
         anchored_parent: Path,
         anchored_destination: Path,
         selected: Path,
-        destination_exists: bool,
         cached: CachedAnalysis | None,
         durable: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
@@ -1834,8 +1915,6 @@ class AnalysisRuntime:
                 sources=cached.sources,
                 analysis=durable,
             )
-            if destination_exists:
-                os.rmdir(selected.name, dir_fd=parent_descriptor)
             os.rename(
                 stage_name,
                 selected.name,
@@ -1873,6 +1952,11 @@ class AnalysisRuntime:
 
     @staticmethod
     def _open_rescue_parent(path: Path) -> int:
+        if os.name == "nt":
+            raise RuntimeFailure(
+                "UNAVAILABLE_CAPABILITY",
+                "Secure rescue publication is unavailable on Windows hosts.",
+            )
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path.anchor, flags)
         try:
@@ -2040,7 +2124,7 @@ class AnalysisRuntime:
                         else "Restore the original repository from a known-good backup; do not "
                         "delete existing data or synthesize repository.json."
                     ),
-                    "Alternatively set FLAMEOX_DATA_DIR to a distinct empty directory and "
+                    "Alternatively set FLAMEOX_DATA_DIR to a distinct new directory and "
                     "restart or reconnect Flameox. Switching stores does not recover old evidence; "
                     "preserve any recoverable session evidence before ending the session.",
                 ],

@@ -15,6 +15,7 @@ from flameox import __version__
 from flameox.mcp import create_server, run_server
 from flameox.runtime_contracts import (
     CaptureTarget,
+    EvidenceSource,
     ExperimentDesign,
     PathSource,
     RequestLimits,
@@ -323,8 +324,11 @@ def _setup_value(
 
 @app.command("analyze")
 def analyze(
-    capability_id: Annotated[str, typer.Argument()],
-    sources: Annotated[list[Path], typer.Argument()],
+    capability_id: Annotated[
+        str,
+        typer.Argument(help="Capability ID; discover IDs with `flameox mcp inspect --summary`."),
+    ],
+    sources: Annotated[list[Path] | None, typer.Argument()] = None,
     arguments: Annotated[str, typer.Option("--arguments")] = "{}",
     format_name: Annotated[str | None, typer.Option("--format")] = None,
     continuation: Annotated[str | None, typer.Option("--continuation")] = None,
@@ -332,17 +336,37 @@ def analyze(
         str, typer.Option("--limits", help="Startup RequestLimits as a JSON object.")
     ] = "{}",
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option(
+            "--evidence",
+            help="Use the ordered analysis sources from one preserved evidence record.",
+        ),
+    ] = None,
+    rescue_to: Annotated[
+        Path | None,
+        typer.Option(
+            "--rescue-to",
+            help="Publish to a distinct new evidence store and return a restart handoff.",
+        ),
+    ] = None,
 ) -> None:
     """Analyze explicit artifacts and optionally preserve the result."""
     runtime = _runtime(limits)
     try:
+        rescue_destination = _evidence_destination(runtime, preserve, rescue_to)
+        selected_sources = _cli_analysis_sources(runtime, sources, evidence_id, format_name)
         result = runtime.analyze(
             capability_id,
-            [PathSource(path=str(path.resolve()), format=format_name) for path in sources],
+            selected_sources,
             _json_object(arguments, option="--arguments"),
             continuation=continuation,
         )
-        if preserve:
+        if rescue_destination is not None:
+            result["rescued"] = runtime.rescue_evidence(
+                str(result["analysis_id"]), rescue_destination
+            )
+        elif preserve:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
         _write(result)
     except (RuntimeFailure, ValidationError) as error:
@@ -354,8 +378,20 @@ def analyze(
 @app.command("capture", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def capture(
     ctx: typer.Context,
-    provider_id: Annotated[str, typer.Option("--provider")],
-    capability_id: Annotated[str, typer.Option("--capability")] = "artifact.preview",
+    provider_id: Annotated[
+        str,
+        typer.Option(
+            "--provider",
+            help="Capture provider accepted by the selected capability's MCP tool schema.",
+        ),
+    ],
+    capability_id: Annotated[
+        str,
+        typer.Option(
+            "--capability",
+            help="Capability ID; discover IDs with `flameox mcp inspect --summary`.",
+        ),
+    ] = "artifact.preview",
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
     capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
     analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
@@ -382,6 +418,13 @@ def capture(
         ),
     ] = None,
     preserve: Annotated[bool, typer.Option("--preserve")] = False,
+    rescue_to: Annotated[
+        Path | None,
+        typer.Option(
+            "--rescue-to",
+            help="Publish to a distinct new evidence store and return a restart handoff.",
+        ),
+    ] = None,
 ) -> None:
     """Capture a typed argv target after `--` and immediately analyze its output."""
     argv = list(ctx.args)
@@ -395,35 +438,50 @@ def capture(
             if experiment_json is not None
             else None
         )
+        target = CaptureTarget(
+            argv=argv,
+            budget=WorkloadBudget.model_validate(
+                _json_object(workload_budget, option="--workload-budget")
+            ),
+            console_output=TypeAdapter(Literal["diagnostics", "full"]).validate_python(
+                console_output
+            ),
+            cwd=str(cwd.resolve(strict=True)),
+            provider_id=provider_id,
+            capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
+            analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
+        )
     except ValidationError as error:
         _cli_failure(error)
     runtime = _runtime(limits)
+    try:
+        rescue_destination = _evidence_destination(runtime, preserve, rescue_to)
+    except RuntimeFailure as error:
+        runtime.close()
+        _cli_failure(error)
 
     async def execute() -> dict[str, Any]:
         return await runtime.capture_and_analyze(
-            CaptureTarget(
-                argv=argv,
-                budget=WorkloadBudget.model_validate(
-                    _json_object(workload_budget, option="--workload-budget")
-                ),
-                console_output=TypeAdapter(Literal["diagnostics", "full"]).validate_python(
-                    console_output
-                ),
-                cwd=str(cwd.resolve(strict=True)),
-                provider_id=provider_id,
-                capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
-                analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
-            ),
+            target,
             capability_id,
             mode="experiment" if experiment is not None else "single",
             experiment=experiment,
-            preserve=preserve,
+            preserve=preserve and rescue_destination is None,
         )
 
     try:
         result = anyio.run(execute)
-        if preserve and "preserved" not in result:
+        if rescue_destination is not None:
+            result["rescued"] = runtime.rescue_evidence(
+                str(result["analysis_id"]), rescue_destination
+            )
+        elif preserve and "preserved" not in result:
             result["preserved"] = runtime.preserve_evidence(str(result["analysis_id"]))
+        _finalize_cli_capture_continuation(
+            result,
+            analysis_arguments=target.analysis_arguments,
+            limits=runtime.limits,
+        )
         _write(result)
         if result.get("analysis_failure") is not None or any(
             item["status"] != "succeeded" for item in result["capture"]["executions"]
@@ -501,8 +559,17 @@ def mcp_serve(
 
 
 @mcp_app.command("inspect")
-def mcp_inspect() -> None:
-    """Print the exact MCP catalog without starting a transport."""
+def mcp_inspect(
+    tool_name: Annotated[
+        str | None,
+        typer.Option("--tool", help="Return the complete schema for one exact tool name."),
+    ] = None,
+    summary: Annotated[
+        bool,
+        typer.Option("--summary", help="List compact tool discovery records without schemas."),
+    ] = False,
+) -> None:
+    """Inspect the MCP catalog without starting a transport."""
 
     async def inspect_server() -> dict[str, Any]:
         server = create_server()
@@ -513,4 +580,116 @@ def mcp_inspect() -> None:
             ],
         }
 
-    _write(anyio.run(inspect_server))
+    catalog = anyio.run(inspect_server)
+    tools = cast(list[dict[str, Any]], catalog["tools"])
+    if tool_name is not None and summary:
+        _cli_failure(
+            RuntimeFailure(
+                "INVALID_INPUT",
+                "Use either --tool for one complete schema or --summary for compact discovery.",
+            )
+        )
+    if tool_name is not None:
+        tools = [tool for tool in tools if tool["name"] == tool_name]
+        if not tools:
+            _cli_failure(
+                RuntimeFailure(
+                    "UNKNOWN_CAPABILITY",
+                    f"Unknown MCP tool: {tool_name}",
+                    details={
+                        "requested_tool": tool_name,
+                        "available_tools": sorted(tool["name"] for tool in catalog["tools"]),
+                        "recovery": "Run `flameox mcp inspect --summary` to select a tool.",
+                    },
+                )
+            )
+    if summary:
+        tools = [
+            {
+                "name": tool["name"],
+                "description": tool["description"],
+                "required_inputs": tool["input_schema"].get("required", []),
+                "effect": _tool_effect(cast(dict[str, Any] | None, tool["annotations"])),
+            }
+            for tool in tools
+        ]
+        catalog = {
+            "tool_count": len(tools),
+            "tools": tools,
+            "resources": [
+                {
+                    "name": resource["name"],
+                    "uri_template": resource["uri_template"],
+                    "description": resource["description"],
+                }
+                for resource in catalog["resources"]
+            ],
+        }
+    else:
+        catalog["tools"] = tools
+    _write(catalog)
+
+
+def _tool_effect(annotations: dict[str, Any] | None) -> str:
+    if annotations is None:
+        return "unspecified"
+    if annotations.get("read_only_hint") is True:
+        return "read_only"
+    if annotations.get("destructive_hint") is True:
+        return "destructive"
+    return "executes_or_writes"
+
+
+def _evidence_destination(
+    runtime: AnalysisRuntime, preserve: bool, rescue_to: Path | None
+) -> str | None:
+    if preserve and rescue_to is not None:
+        raise RuntimeFailure("INVALID_INPUT", "Use either --preserve or --rescue-to, not both.")
+    if rescue_to is None:
+        return None
+    return runtime.preflight_rescue_destination(str(rescue_to))
+
+
+def _cli_analysis_sources(
+    runtime: AnalysisRuntime,
+    paths: list[Path] | None,
+    evidence_id: str | None,
+    format_name: str | None,
+) -> list[PathSource | EvidenceSource]:
+    if paths and evidence_id is not None:
+        raise RuntimeFailure("INVALID_INPUT", "Use either artifact paths or --evidence, not both.")
+    if evidence_id is not None:
+        projection = runtime.read_evidence_agent_projection(evidence_id)
+        return [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]]
+    if not paths:
+        raise RuntimeFailure("INVALID_INPUT", "Provide artifact paths or --evidence EVIDENCE_ID.")
+    return [PathSource(path=str(path.resolve()), format=format_name) for path in paths]
+
+
+def _finalize_cli_capture_continuation(
+    result: dict[str, Any],
+    *,
+    analysis_arguments: dict[str, Any],
+    limits: RequestLimits,
+) -> None:
+    continuation = result.get("continuation")
+    if not isinstance(continuation, str):
+        return
+    durable = result.get("preserved") or result.get("rescued")
+    if not isinstance(durable, dict):
+        result["continuation"] = None
+        limitations = cast(list[str], result["limitations"])
+        limitations.append(
+            "This one-shot CLI capture cannot resume because its session scratch is released "
+            "at exit. Rerun capture with --preserve or --rescue-to to retain continuation "
+            "sources without rerunning the workload between pages."
+        )
+        return
+    result["continuation_handoff"] = {
+        "command": "flameox analyze",
+        "capability_id": result["capability_id"],
+        "evidence_id": durable["evidence_id"],
+        "arguments": analysis_arguments,
+        "limits": limits.model_dump(mode="json"),
+        "continuation": continuation,
+    }
