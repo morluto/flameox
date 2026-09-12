@@ -33,9 +33,9 @@ containment must not be silently promoted to complete evidence.
 
 ## Experiments
 
-MCP capture tools accept `single` execution. Capabilities whose analysis intentionally composes
-multiple artifacts also accept a discriminated `experiment` request. Single-artifact analyses do
-not advertise experiment mode and reject it during runtime preflight before a target starts. The
+MCP capture runs the target once by default. Capabilities whose analysis intentionally composes
+multiple artifacts also accept an optional `request.experiment` design. Single-artifact analyses do
+not advertise that field and reject experiments before a target starts. The
 CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON` when the chosen
 capability supports it. An experiment declares cases, blocks, seed, metric, estimand, practical
 threshold, and an optional semantic oracle. Cases are bounded and execute through the same broker
@@ -63,8 +63,8 @@ Artifact comparison is separate from that experiment result. Capture the represe
 and candidate summaries independently, preserve them if they must survive the session, then submit
 both sources to `analyze` with `request.capability_id` set to `benchmark.compare`,
 `inference.compare`, or `kernel.compare`. The `capture_and_analyze` request union excludes those
-comparison variants because comparison requires explicit artifact identity, while experiment mode
-owns randomized case order and repeated measurements within one request.
+comparison variants because comparison requires explicit artifact identity. An experiment owns
+randomized case order and repeated measurements within one request.
 
 ## Scaling
 

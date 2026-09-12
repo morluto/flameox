@@ -6,8 +6,8 @@ provider behavior, or lifecycle state.
 ## MCP catalog
 
 The catalog exposes six tools. Capability-specific requests are discriminated unions, so the SDK
-still validates exact options, source cardinality, compatible providers, and execution modes while
-common transport fields and result schemas occur only once.
+validates exact options, source cardinality, compatible providers, and experiment support. Common
+transport fields and result schemas occur only once.
 
 `flameox mcp inspect` is compact by default; use `--tool TOOL_NAME` for one complete schema or
 `--full` for the complete catalog. CLI results omit the process-local `analysis_id` because it
@@ -47,13 +47,12 @@ The capability registry generates discriminated request variants through the Pyt
 registration API. `analyze.request` contains `capability_id`, `sources`, capability-specific typed
 `options`, and an optional `continuation`. `capture_and_analyze.request`
 contains `capability_id`, `target`, a discriminated `provider` union containing only compatible
-capture providers, typed `options`, an explicit execution model, and
-optional `preserve`. Capabilities that
-can analyze the multiple artifacts produced by paired cases expose the `single` or `experiment`
-union; single-artifact analyses expose only `single`. There are no free-form provider or analysis
-argument objects.
+capture providers, typed `options`, and optional `preserve`. Targets run once by default.
+Capabilities that can analyze the multiple artifacts produced by paired cases also expose an
+optional `experiment` design; single-artifact analyses omit that field. Provider and analysis
+arguments are always typed.
 
-Both tools expose only the semantic `page_size` beside the request. Byte, traversal, worker,
+Both tools expose only the semantic `page_size` beside the request. Input-byte, traversal, worker,
 process-output, memory, and provenance ceilings are server policy rather than caller-facing MCP
 knobs. Field descriptions are part of the public MCP contract. Shared source, target, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
@@ -64,18 +63,24 @@ The nesting is consistent across capabilities:
 
 ```text
 analyze({request: {capability_id, sources, options?, continuation?}, page_size?})
-capture_and_analyze({request: {capability_id, target, provider, options?, execution, preserve?}, page_size?})
+capture_and_analyze({request: {capability_id, target, provider, options?, experiment?, preserve?}, page_size?})
 ```
 
-`capability_id` and `execution` are never top-level tool arguments. For experiment capture, the
-exact discriminator path is `request.execution.kind: "experiment"`; its sibling `design` contains
-the cases, blocks, seed, metric, estimand, threshold, and optional oracle.
+Omit `request.experiment` to execute the target once. When present, it contains cases, blocks,
+seed, metric, estimand, threshold, and an optional oracle. Experiment-capable requests also accept
+null. There is no separate execution-mode field.
 
 Successful calls keep the complete validated result in `structuredContent`. Their text block is a
 short compatibility summary with the capability, completion or truncation state, session handle,
 and next action; it does not serialize the evidence tables a second time. Content-only clients can
 still identify the outcome and recovery path, while structured clients retain the authoritative
 bounded evidence. Preserved results also return a resource link.
+
+Failures likewise use a short text summary and keep structured details in `structuredContent`.
+Failed captures include execution records once, in `details.partial_evidence.capture.executions`.
+Their text summary retains the live analysis handle and the next preservation or pagination step.
+Pages are selected by row count; complete rows, execution provenance, and continuation arguments
+are returned without a response-byte ceiling or a second compaction pass.
 
 On the 2026 protocol, SDK cache hints mark the static tool and resource-template catalogs as
 public for one hour. Content-addressed evidence reads are immutable and receive a 24-hour private
@@ -132,7 +137,6 @@ For example, a single Nsight Compute capture for kernel metrics has this argumen
     },
     "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
     "options": {},
-    "execution": {"kind": "single"},
     "preserve": true
   }
 }
@@ -225,9 +229,8 @@ ending in LF). Text retains LF and CR characters. An unterminated final line sta
 `line_terminated=false` even when coverage is complete. UTF-8 decoding replaces
 invalid byte sequences; fragments and offsets are not byte-exact slices. Original
 native bytes remain unchanged and can be preserved with the analysis handle.
-Continuations bind fragment size as well as the native source identity. Lower
-fragment sizes can accommodate tighter result-byte limits. The default remains
-whole-line preview with its existing offsets.
+Continuations bind fragment size as well as the native source identity. Fragment mode provides a
+smaller view of long lines; without it, each preview row contains one complete line.
 
 The fragment reader uses Python's bounded
 [text `readline(size)`](https://docs.python.org/3.12/library/io.html#io.TextIOBase.readline)
@@ -252,10 +255,14 @@ it never promises access beyond a provider's declared projection bound. MCP summ
 terminal case toward a narrower semantic query or a reduced recapture; preservation cannot recover
 rows the provider never returned.
 
-Requests may lower startup row, result-byte, decoder timeout/RSS, output-byte, and durable
-provenance-byte limits. Durable provenance bounds the captured argv and execution
-metadata retained for explicit preservation.
-They cannot raise them.
+CLI capture takes the target as a positional argv after `--`; unknown Flameox options before
+that separator are rejected. Paths are resolved and validated by the runtime, so missing or
+cyclic paths and malformed preview artifacts produce typed failures. `--format` applies only to
+path inputs; combining it with `--evidence` is rejected because preserved sources retain their format.
+
+Requests may lower analysis row limits, decoder timeout and RSS limits, process-output limits, and
+durable-provenance limits. Durable provenance includes captured argv and execution metadata.
+Requests cannot raise server limits.
 
 `query_evidence` returns 1-200 manifests per page. Its cursor is bound to both the immutable
 inventory snapshot and the original filters; callers resume by repeating those filters unchanged.
@@ -307,7 +314,7 @@ preservation publishes the native artifacts even if immediate analysis fails; th
 reports separate capture execution state and a typed `analysis_failure`. An analysis failure is
 never converted into empty successful evidence.
 
-Experiment mode adds 2-16 cases, 1-100 blocks, a seed, metric, estimand,
+Adding `request.experiment` runs 2-16 cases across 1-100 blocks with a seed, metric, estimand,
 practical threshold, and optional semantic-oracle argv. Flameox evaluates
 `wall_time_ns` with a paired `median_difference` or `mean_difference`, reports
 eligible blocks and a deterministic percentile interval when at least three
@@ -317,9 +324,9 @@ cancellation.
 The experiment's `point_estimate_classification` is descriptive; its `decision_basis` is explicit
 on the metrics block. It does not claim confidence-qualified improvement or equivalence.
 
-Capture `outcome` is computed from every execution before diagnostic compaction and retains exact
-success/failure counts. MCP error classification consumes that outcome even when no execution
-diagnostics fit inline. Each execution identifies whether `returncode` belongs to the workload or
+Capture `outcome` is computed from every execution and retains exact success/failure counts.
+MCP error classification consumes that outcome, and every execution record remains available in
+the structured result. Each execution identifies whether `returncode` belongs to the workload or
 collector, retains separate collector and workload executable SHA-256 identities, and leaves
 `workload_returncode` null for wrapped captures. The compatibility `executable_sha256` field identifies
 the invoked collector. Exit ownership is declared by each invocation builder: self-reporting workloads retain

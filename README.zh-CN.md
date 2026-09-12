@@ -42,9 +42,9 @@ MCP 公开 `analyze` 与 `capture_and_analyze` 两个类型化操作；它们通
 }
 ```
 
-`capture_and_analyze` 使用相同外层结构，其 `request` 另外包含 `target`、`provider`
-和 `execution`。单次采集使用 `request.execution.kind: "single"`；成对实验使用
-`request.execution.kind: "experiment"` 并提供 `design`。若结果包含 `next_page`，
+`capture_and_analyze` 使用相同外层结构，其 `request` 另外包含 `target`、`provider`。
+默认执行一次目标；成对实验直接通过 `request.experiment` 提供实验设计，
+无需额外的执行模式开关。若结果包含 `next_page`，
 应原样调用其中指定的工具和参数。采集的后续页由 `analyze` 读取，不会再次执行目标。
 服务端的字节数、内存、超时等保护上限不是 MCP 调节旋钮；公开的响应范围参数只有
 顶层 `page_size`。

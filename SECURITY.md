@@ -31,6 +31,7 @@ committed to the repository.
 
 Analysis is bounded and session-local unless `preserve_evidence` or `--preserve`
 is requested. Native artifacts and captured output can contain workload data;
-preserving them copies those bytes and their provenance into the project's
-content-addressed `.flameox` repository. Treat that repository with the same
+preserving them copies those bytes and their provenance into the user-level
+content-addressed evidence directory selected by `FLAMEOX_DATA_DIR` or the platform default.
+Use `flameox evidence location` to inspect that location. Treat that directory with the same
 sensitivity as the measured application.

@@ -107,6 +107,11 @@ describe that same projected population. A bounded prefix of unrelated native ro
 that the requested activity is absent. OTLP time windows apply their span predicate before resource
 and scope rows consume the normalization budget; only owning context for retained spans is emitted.
 
+Nsight Systems CUDA runtime, driver, and synchronization tables feed `trace.operations`.
+`gpu.launches` selects device kernel and memory activity; CUDA API calls and profiler overhead
+cannot establish that a GPU launch occurred. The native `CUPTI_ACTIVITY_KIND_*` table family
+contains both host and device evidence and must not be selected as one accelerator population.
+
 Projection identity includes every non-axis dimension that can distinguish a series, including
 device, dtype, variant, scope, and worker identity where applicable. Providers must not blend those
 series. When a composite native label is successfully decomposed into named dimensions, the raw

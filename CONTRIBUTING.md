@@ -35,12 +35,12 @@ uv run flameox --help
 ```
 
 Install only the optional providers needed for the area you are changing. The
-[testing guide](docs/testing.md#optional-and-performance-evidence) lists the
-available extras and their markers. To install every supported integration,
+[testing guide](docs/testing.md) describes test markers and required evidence.
+To install every supported integration,
 run:
 
 ```console
-uv sync --extra dev --extra memory --extra trace --extra cpu --extra torch
+uv sync --all-extras
 ```
 
 ## Understand the contract you are changing
@@ -95,11 +95,15 @@ artifacts over assertions about private helper names or source text. Cover the
 meaningful failure path as well as the success path, and use Hypothesis when the
 contract is an invariant over a useful input range.
 
-Run a focused test while iterating:
+Run the tests owned by the area you changed. For example:
 
 ```console
-uv run pytest tests/test_runtime.py -q
+uv run pytest -o addopts='' tests/test_runtime*.py tests/test_capture*.py -q
+uv run pytest -o addopts='' tests/mcp -q
+uv run pytest -o addopts='' tests/test_repository.py -q
 ```
+
+The [testing guide](docs/testing.md) lists every owner and the matching CI marker command.
 
 Then run validation proportional to the change. The usual baseline is:
 

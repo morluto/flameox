@@ -82,14 +82,14 @@ catalog. Flameox production code must not create or depend on SQLite state.
 ## Capability boundary
 
 One registry entry owns a capability descriptor, strict argument model, accepted formats,
-capture/analysis semantics, and model-visible selection guidance. MCP projects each entry
-into a read-only analysis tool and, when a compatible capture provider exists, a separate executing
-capture tool. The generated callable closes over the stable capability ID; agents never pass a
-capability selector or a free-form analysis argument object.
+capture/analysis semantics, and model-visible selection guidance. MCP projects these entries
+into discriminated request variants for the read-only `analyze` tool and the executing
+`capture_and_analyze` tool. Agents select `request.capability_id`; its variant validates exact
+typed options, source cardinality, and compatible capture providers.
 
-Capture-provider contracts supply the discriminated provider variants for each compatible capture
-tool. Missing packages, executables, permissions, versions, or platforms do not change the catalog;
-the attempted tool returns typed remediation. The separately invoked CLI setup command or MCP
+Capture-provider contracts supply the discriminated provider variants for each compatible
+capability request. Missing packages, executables, permissions, versions, or platforms do not
+change the catalog; the attempted tool returns typed remediation. The CLI setup command or MCP
 `prepare_providers` tool resolves dependencies according to where they execute. CLI setup prepares
 the complete version-pinned server environment. MCP preparation can activate a pinned standalone
 py-spy collector in the existing session; server-import dependencies are checked against the active

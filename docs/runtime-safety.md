@@ -118,7 +118,7 @@ limits. The same explicit budget applies separately to each capture and oracle.
 Cancellation and cleanup remain mandatory.
 
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
-- result JSON is capped at 256 KiB by default;
+- pages retain complete selected rows and capture provenance without a response-byte ceiling;
 - continuations bind request arguments, limits, formats, and input digests;
 - capture argv, merged environment, explicitly selected timeout, full output, and durable
   provenance are bounded;
