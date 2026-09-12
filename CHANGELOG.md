@@ -2,6 +2,31 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.7] - 2026-09-12
+
+### Bug Fixes
+
+- **mcp:** Correct consolidated request guidance
+- **runtime:** Harden evidence and analysis contracts (#497) ([#497](https://github.com/morluto/flameox/pull/497))
+
+### Documentation
+
+- Clarify capture and test workflows
+- Remove historical investigation artifacts
+
+### Features
+
+- **ux:** Simplify capture and retain complete evidence
+- **ux:** Make evidence handoffs actionable (#498) ([#498](https://github.com/morluto/flameox/pull/498))
+- **runtime:** Make capture retention and workload budgets explicit (#476) ([#476](https://github.com/morluto/flameox/pull/476))
+
+### Refactoring
+
+- **mcp:** Consolidate SDK-owned tool contracts (#499) ([#499](https://github.com/morluto/flameox/pull/499))
+
+### Testing
+
+- **mcp:** Type-check server instruction contract
 ## [0.2.6] - 2026-09-06
 
 ### Bug Fixes
