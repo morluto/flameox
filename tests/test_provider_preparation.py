@@ -19,6 +19,25 @@ from flameox.runtime_contracts import PathSource, RuntimeFailure
 from flameox.setup import SetupFailure, active_provider_status
 
 
+@pytest.mark.integration
+def test_xctrace_preparation_returns_external_requirements_without_installing(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool("prepare_providers", {"provider_ids": ["xctrace"]})
+            assert not result.is_error
+            value = result.structured_content
+            assert value["preparation"]["status"] == "not_applicable"
+            assert value["prepared_managed_providers"] == []
+            assert value["external_requirements"][0]["provider_id"] == "xctrace"
+            assert "Xcode" in value["external_requirements"][0]["guidance"]
+            assert value["next_action"] is None
+
+    anyio.run(exercise)
+    assert not (tmp_path / "store").exists()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("release", "installed", "expected"),

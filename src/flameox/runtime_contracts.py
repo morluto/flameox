@@ -19,7 +19,6 @@ from flameox.environment_policy import blocked_environment_override
 
 MAX_INPUTS = 32
 MAX_ROWS = 1_000
-MAX_RESULT_BYTES = 256 * 1024
 MAX_SAFE_JSON_INTEGER = 2**53 - 1
 LOWERCASE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 SEMANTIC_ORACLE_STDOUT_ENV = "FLAMEOX_CAPTURE_STDOUT"
@@ -272,12 +271,6 @@ ArgumentModel = type[
 class RequestLimits(StrictModel):
     max_rows: int = Field(
         default=100, description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS
-    )
-    max_result_bytes: int = Field(
-        default=MAX_RESULT_BYTES,
-        description="Maximum serialized structured result size in bytes.",
-        ge=1024,
-        le=MAX_RESULT_BYTES,
     )
     max_input_bytes: int = Field(
         default=1024**3,
@@ -932,7 +925,7 @@ class Coverage(StrictModel):
 
 
 class Truncation(StrictModel):
-    reason: Literal["row_limit", "result_bytes", "provider_limit"] = Field(
+    reason: Literal["row_limit", "provider_limit"] = Field(
         description="Bound that prevented the complete result from being returned."
     )
     next_offset: int = Field(description="Zero-based offset of the next unread row.", ge=0)

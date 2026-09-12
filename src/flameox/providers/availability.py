@@ -20,6 +20,8 @@ SYSTEM_PROVIDER_GUIDANCE = {
     "perfetto": "Install Perfetto Trace Processor and make trace_processor_shell available.",
     "rocprofv3": "Install ROCProfiler SDK and make rocprofv3 available on PATH.",
     "triton": "Install Triton in the target Python environment and verify device access.",
+    "xctrace": "Install Xcode on macOS and select its developer directory so "
+    "xcrun xctrace is available.",
 }
 
 WORKLOAD_PYTHON_REQUIREMENTS = {

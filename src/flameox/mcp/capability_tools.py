@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from functools import reduce
 from operator import or_
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from pydantic import BeforeValidator, Field, create_model
+from pydantic import Field, create_model
 from pydantic.fields import FieldInfo
 
 from flameox.runtime_contracts import (
@@ -21,37 +20,6 @@ from flameox.runtime_contracts import (
     StrictModel,
     compatible_capture_providers,
 )
-
-
-class SingleExecution(StrictModel):
-    kind: Literal["single"] = Field(
-        default="single", description="Execute the target once without a paired experiment."
-    )
-
-
-class ExperimentExecution(StrictModel):
-    kind: Literal["experiment"] = Field(description="Execute a randomized paired experiment.")
-    design: ExperimentDesign = Field(description="Paired experiment design and decision rule.")
-
-
-def _normalize_execution_kind(value: Any) -> Any:
-    """Inject the advertised default ``kind`` when an execution omits the discriminator.
-
-    ``SingleExecution.kind`` defaults to ``"single"`` in the public schema, so a request
-    that omits ``kind`` is admitted by the contract and must select the single member. An
-    explicit ``kind`` is left untouched, so unknown values keep failing validation.
-    """
-    if isinstance(value, Mapping) and "kind" not in value:
-        value = dict(value)
-        value["kind"] = "experiment" if "design" in value else "single"
-    return value
-
-
-Execution = Annotated[
-    SingleExecution | ExperimentExecution,
-    Field(discriminator="kind"),
-    BeforeValidator(_normalize_execution_kind),
-]
 
 
 def _provider_model(contract: CaptureProviderContract) -> type[StrictModel]:
@@ -141,7 +109,15 @@ def _analysis_request_model(capability: Capability) -> type[StrictModel]:
 
 
 def _capture_request_model(capability: Capability, provider_type: Any) -> type[StrictModel]:
-    execution_type = Execution if capability.maximum_sources > 1 else SingleExecution
+    experiment_field: dict[str, Any] = {}
+    if capability.maximum_sources > 1:
+        experiment_field["experiment"] = (
+            ExperimentDesign | None,
+            Field(
+                default=None,
+                description="Optional paired experiment design; omit to execute the target once.",
+            ),
+        )
     return create_model(
         _model_name("Capture", capability),
         __base__=StrictModel,
@@ -158,16 +134,6 @@ def _capture_request_model(capability: Capability, provider_type: Any) -> type[S
             provider_type,
             Field(description="Compatible capture provider and its typed settings."),
         ),
-        execution=(
-            execution_type,
-            Field(
-                description=(
-                    "Run once or execute a randomized paired experiment."
-                    if capability.maximum_sources > 1
-                    else "Run once; this analysis accepts exactly one captured artifact."
-                )
-            ),
-        ),
         options=(capability.model, _options_field(capability)),
         preserve=(
             bool,
@@ -176,6 +142,7 @@ def _capture_request_model(capability: Capability, provider_type: Any) -> type[S
                 description="Preserve the result and native artifacts as immutable evidence.",
             ),
         ),
+        **experiment_field,
     )
 
 
@@ -190,7 +157,7 @@ class CaptureRequestBase(StrictModel):
     capability_id: str
     target: DirectTarget
     provider: Any
-    execution: SingleExecution | ExperimentExecution
+    experiment: ExperimentDesign | None = None
     options: StrictModel
     preserve: bool = False
 

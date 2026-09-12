@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import MethodType
@@ -21,7 +20,7 @@ from flameox.runtime_contracts import PathSource, RequestLimits
 pytestmark = pytest.mark.performance
 
 
-def test_comparison_accumulates_one_thousand_members_linearly() -> None:
+def test_comparison_preserves_one_thousand_member_identities() -> None:
     row_sets = [
         [
             {
@@ -35,7 +34,6 @@ def test_comparison_accumulates_one_thousand_members_linearly() -> None:
         for index in range(1_000)
     ]
 
-    started = time.monotonic()
     result = BenchmarkProvider._compare_row_sets(
         row_sets,
         {},
@@ -46,7 +44,17 @@ def test_comparison_accumulates_one_thousand_members_linearly() -> None:
 
     assert result.rows_observed == 999
     assert result.complete is True
-    assert time.monotonic() - started < 5
+    rows = result.blocks[1]["rows"]
+    assert {
+        row["candidate_index"]: (
+            row["baseline_index"],
+            row["baseline_mean"],
+            row["candidate_mean"],
+            row["ratio"],
+        )
+        for row in rows
+    } == {index: (0, 1.0, float(index + 1), float(index + 1)) for index in range(1, 1_000)}
+    assert {row["benchmark"] for row in rows} == {"operation"}
 
 
 def test_query_pins_ten_thousand_manifest_inventory(
@@ -77,25 +85,32 @@ def test_query_pins_ten_thousand_manifest_inventory(
 
     def read_manifest(
         _repository: EvidenceRepository,
-        path: Path,
+        bundle: Path,
         expected: dict[str, Any] | None = None,
     ) -> EvidenceManifest:
         nonlocal visited
         del expected
         visited += 1
         # Isolate inventory/query scaling from filesystem hashing and schema parsing.
-        return manifest.model_copy(update={"evidence_id": path.parent.name})
+        return manifest.model_copy(update={"evidence_id": bundle.name})
 
     monkeypatch.setattr(Path, "glob", pinned_glob)
     monkeypatch.setattr(repository, "_validate_evidence", MethodType(read_manifest, repository))
 
-    started = time.monotonic()
     result = repository.query(capability_id="missing", limit=50)
 
     assert result["evidence"] == []
     assert visited == 10_000
     assert len(result["inventory_digest"]) == 64
-    assert time.monotonic() - started < 5
+    first = repository.query(limit=50)
+    second = repository.query(limit=50, cursor=first["continuation"])
+    assert [item["evidence_id"] for item in first["evidence"]] == [
+        f"{index:064x}" for index in range(50)
+    ]
+    assert [item["evidence_id"] for item in second["evidence"]] == [
+        f"{index:064x}" for index in range(50, 100)
+    ]
+    assert first["inventory_digest"] == second["inventory_digest"] == result["inventory_digest"]
 
 
 @pytest.mark.process

@@ -8,7 +8,6 @@ from contextlib import suppress
 from pathlib import Path
 
 import anyio
-import psutil
 import pytest
 from pydantic import ValidationError
 
@@ -19,6 +18,7 @@ from flameox.execution import (
     SubprocessBroker,
 )
 from flameox.process_models import ProcessCancellationCause
+from tests.support.processes import process_is_alive, wait_for_pid_file
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
@@ -36,14 +36,6 @@ def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRe
     }
     values.update(overrides)
     return ExecutionRequest.model_validate(values)
-
-
-def process_is_alive(pid: int) -> bool:
-    try:
-        process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-    except psutil.Error:
-        return False
 
 
 def test_optional_deadline_is_unbounded_only_when_explicitly_none(tmp_path: Path) -> None:
@@ -86,10 +78,7 @@ async def test_raw_task_cancel_with_no_deadline_settles_inherited_pipe_writer(
         )
     )
     try:
-        for _ in range(200):
-            if child_pid_path.exists():
-                break
-            await asyncio.sleep(0.01)
+        await wait_for_pid_file(child_pid_path)
         assert child_pid_path.exists()
         child_pid = int(child_pid_path.read_text())
         task.cancel()
@@ -117,8 +106,7 @@ async def test_observed_no_deadline_cancellation_keeps_cleanup_contract(tmp_path
     with anyio.fail_after(5), anyio.CancelScope() as scope:
 
         async def cancel_started_child() -> None:
-            while not pid_path.exists():
-                await anyio.sleep(0.01)
+            await wait_for_pid_file(pid_path)
             scope.cancel()
 
         async with anyio.create_task_group() as group:

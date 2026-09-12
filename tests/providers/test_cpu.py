@@ -3,6 +3,7 @@ from __future__ import annotations
 import cProfile
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,13 @@ import anyio
 import pytest
 
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import CaptureTarget, PathSource, RuntimeFailure
-from flameox.source_files import sha256_file
+from flameox.runtime_contracts import (
+    CaptureTarget,
+    PathSource,
+    RequestLimits,
+    RuntimeFailure,
+)
+from flameox.source_files import NativeSource, sha256_file
 
 
 def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) -> None:
@@ -526,3 +532,163 @@ name = next(
     provider = result["provider"]
     assert isinstance(provider, dict)
     assert provider["id"] == "v8-cpu-profile"
+
+
+@pytest.mark.process
+def test_perf_conversion_preserves_demangled_and_unknown_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "print('app 1 [000] 1.000: cycles:')\n"
+        "print('        7f01 void alpha<int>(int, int)+0x10/0x40 (/opt/app)')\n"
+        "print()\n"
+        "print('app 1 [000] 1.001: cycles:')\n"
+        "print('        7f02 [unknown] ([unknown])')\n"
+        "print('        7f03 parent function()+0x20 (/opt/app)')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        collapsed, _ = runtime._perf_collapsed(source, RequestLimits())
+        lines = collapsed.read_text().splitlines()
+    finally:
+        runtime.close()
+
+    assert "void alpha<int>(int, int) 1" in lines
+    assert "parent function();[unknown] 1" in lines
+
+
+@pytest.mark.process
+def test_perf_conversion_rejects_and_does_not_cache_failed_decoder_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('app 1 [000] 1.000: cycles:')\n"
+        "print('        7f01 leaf+0x10 (/opt/app)')\n"
+        "print('decoder failed', file=sys.stderr)\n"
+        "raise SystemExit(7)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime._perf_collapsed(source, RequestLimits())
+        assert failure.value.code == "DECODE_FAILURE"
+        assert failure.value.details["decoder_exit_code"] == 7
+        assert failure.value.details["decoder_stderr"] == "decoder failed\n"
+        assert failure.value.details["decoder_stderr_retained_bytes"] == 15
+        assert failure.value.details["decoder_stderr_omitted_bytes"] == 0
+        assert not list((runtime.scratch / "conversions").glob("*.folded"))
+        assert runtime.scratch_artifacts == {}
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+def test_perf_conversion_reports_signalled_decoder_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "perf"
+    executable.parent.mkdir()
+    executable.write_text(
+        f"#!{sys.executable}\nimport os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native")
+    digest, size = sha256_file(native)
+    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime._perf_collapsed(source, RequestLimits())
+        assert failure.value.details["decoder_exit_code"] is None
+        assert failure.value.details["decoder_termination"] == {
+            "kind": "signalled",
+            "signal": signal.SIGTERM,
+        }
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("subprocesses", "expected_enabled"),
+    [(True, True), ("false", False)],
+)
+def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocesses: bool | str,
+    expected_enabled: bool,
+) -> None:
+    workload_python = sys.executable
+    managed_bin = tmp_path / "managed" / "bin"
+    managed_bin.mkdir(parents=True)
+    managed_python = managed_bin / "python"
+    managed_python.symlink_to(workload_python)
+    managed_pyspy = managed_bin / "py-spy"
+    managed_pyspy.write_text(
+        f"#!{workload_python}\n"
+        "import json, sys\n"
+        "output = sys.argv[sys.argv.index('--output') + 1]\n"
+        "document = {\n"
+        "    'shared': {'frames': [{'name': 'work', 'file': 'work.py', 'line': 1}]},\n"
+        "    'profiles': [{'type': 'sampled', 'samples': [[0]], 'weights': [1.0]}],\n"
+        "}\n"
+        "with open(output, 'w') as stream:\n"
+        "    json.dump(document, stream)\n"
+    )
+    managed_pyspy.chmod(0o755)
+    monkeypatch.setattr("flameox.runtime.sys.executable", str(managed_python))
+
+    async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[workload_python, "-c", "sum(range(100))"],
+                    environment={"PATH": ""},
+                    cwd=str(tmp_path),
+                    provider_id="py-spy",
+                    capture_arguments={"subprocesses": subprocesses},
+                ),
+                "cpu.hotspots",
+                preserve=True,
+            )
+            manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
+            return result, manifest
+        finally:
+            runtime.close()
+
+    result, manifest = anyio.run(exercise)
+    execution = result["capture"]["executions"][0]
+    assert execution["capture_argv"][0] == str(managed_pyspy)
+    assert ("--subprocesses" in execution["capture_argv"]) is expected_enabled
+    assert execution["status"] == "succeeded"
+    assert result["provider"]["id"] == "py-spy-speedscope"
+    expected_scope = (
+        "newly created Python subprocesses" if expected_enabled else "target process only"
+    )
+    assert any(expected_scope in item for item in result["limitations"])
+    assert manifest["body"]["capture_request"]["target"]["capture_arguments"] == {
+        "subprocesses": subprocesses
+    }

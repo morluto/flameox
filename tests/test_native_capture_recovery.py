@@ -106,7 +106,6 @@ def test_mcp_native_analysis_failure_exposes_preservable_partial_evidence(
                             "kind": "coverage",
                             "options": target.capture_arguments,
                         },
-                        "execution": {"kind": "single"},
                         "preserve": True,
                     }
                 },

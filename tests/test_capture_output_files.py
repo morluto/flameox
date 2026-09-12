@@ -117,7 +117,6 @@ def test_semantic_oracle_reads_full_capture_and_preserves_its_large_logs(tmp_pat
                 ),
                 "artifact.preview",
                 experiment=_experiment(oracle),
-                mode="experiment",
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,
             )
@@ -179,10 +178,17 @@ def test_capture_failure_preserves_stream_prefix_and_marks_sink_incomplete(
                 "EXECUTION_TIMEOUT" if failure == "timeout" else "LIMIT_EXCEEDED"
             )
             streams = execution["output_streams"]
-            assert streams["stdout_bytes"] == len(prefix)
+            retained = streams["stdout_bytes"]
+            if failure == "output_limit":
+                assert retained == len(prefix)
+            else:
+                # A deadline can interrupt collection partway through a write.
+                # Verify the exact retained prefix after reopening, not bytes
+                # the workload intended to emit before the deadline.
+                assert 0 <= retained <= len(prefix)
             assert streams["stdout_complete"] is False
             assert streams["stderr_complete"] is False
-            return result["preserved"]["evidence_id"], prefix
+            return result["preserved"]["evidence_id"], prefix[:retained]
         finally:
             runtime.close()
 

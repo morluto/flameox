@@ -384,9 +384,12 @@ def analyze(
         runtime.close()
 
 
-@app.command("capture", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("capture")
 def capture(
-    ctx: typer.Context,
+    argv: Annotated[
+        list[str],
+        typer.Argument(help="Target executable and arguments; put -- before the executable."),
+    ],
     provider_id: Annotated[
         str,
         typer.Option(
@@ -436,11 +439,6 @@ def capture(
     ] = None,
 ) -> None:
     """Capture a typed argv target after `--` and immediately analyze its output."""
-    argv = list(ctx.args)
-    if argv and argv[0] == "--":
-        argv.pop(0)
-    if not argv:
-        raise typer.BadParameter("capture requires an argv after --")
     try:
         experiment = (
             ExperimentDesign.model_validate(_json_object(experiment_json, option="--experiment"))
@@ -455,7 +453,7 @@ def capture(
             console_output=TypeAdapter(Literal["diagnostics", "full"]).validate_python(
                 console_output
             ),
-            cwd=str(cwd.resolve(strict=True)),
+            cwd=str(cwd.absolute()),
             provider_id=provider_id,
             capture_arguments=_json_object(capture_arguments, option="--capture-arguments"),
             analysis_arguments=_json_object(analysis_arguments, option="--analysis-arguments"),
@@ -473,7 +471,6 @@ def capture(
         return await runtime.capture_and_analyze(
             target,
             capability_id,
-            mode="experiment" if experiment is not None else "single",
             experiment=experiment,
             preserve=preserve and rescue_destination is None,
         )
@@ -679,11 +676,16 @@ def _cli_analysis_sources(
     if paths and evidence_id is not None:
         raise RuntimeFailure("INVALID_INPUT", "Use either artifact paths or --evidence, not both.")
     if evidence_id is not None:
+        if format_name is not None:
+            raise RuntimeFailure(
+                "INVALID_INPUT",
+                "--format applies to artifact paths; preserved evidence retains its format.",
+            )
         projection = runtime.read_evidence_agent_projection(evidence_id)
         return [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]]
     if not paths:
         raise RuntimeFailure("INVALID_INPUT", "Provide artifact paths or --evidence EVIDENCE_ID.")
-    return [PathSource(path=str(path.resolve()), format=format_name) for path in paths]
+    return [PathSource(path=str(path.absolute()), format=format_name) for path in paths]
 
 
 def _finalize_cli_capture_continuation(

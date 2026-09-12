@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import anyio
 import ijson
@@ -531,7 +531,7 @@ class AnalysisRuntime:
                     selected_limits.max_rows,
                     text_fragment_chars=text_fragment_chars,
                 )
-            except (ijson.JSONError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            except (ijson.JSONError, OSError, ValueError) as error:
                 raise RuntimeFailure(
                     "DECODE_FAILURE", "Artifact preview could not decode the input."
                 ) from error
@@ -606,7 +606,6 @@ class AnalysisRuntime:
                 "reason": truncation_reason,
                 "next_offset": offset + len(rows),
             }
-        self._shrink_result(result, selected_limits.max_result_bytes, identity, offset)
         body = {
             "evidence_kind": "analysis",
             "capability_id": capability_id,
@@ -701,7 +700,6 @@ class AnalysisRuntime:
         target: CaptureTarget,
         capability_id: str,
         *,
-        mode: Literal["single", "experiment"],
         experiment: ExperimentDesign | None,
         limits: RequestLimits | None,
     ) -> ValidatedCaptureRequest:
@@ -721,10 +719,6 @@ class AnalysisRuntime:
             target.provider_id, target.capture_arguments, capability_id=capability_id
         )
         TypeAdapter(capability.model).validate_python(target.analysis_arguments)
-        if (mode == "experiment") != (experiment is not None):
-            raise RuntimeFailure(
-                "INVALID_INPUT", "experiment mode and design must be supplied together"
-            )
         output_formats = set(self._capture_output_formats(target.provider_id))
         compatible_provider_ids = [
             contract.id for contract in compatible_capture_providers(capability)
@@ -777,7 +771,6 @@ class AnalysisRuntime:
         target: CaptureTarget,
         capability_id: str,
         *,
-        mode: Literal["single", "experiment"] = "single",
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
         progress: Any | None = None,
@@ -786,7 +779,6 @@ class AnalysisRuntime:
         result, _ = await self._capture_analysis_page(
             target,
             capability_id,
-            mode=mode,
             experiment=experiment,
             limits=limits,
             progress=progress,
@@ -800,7 +792,6 @@ class AnalysisRuntime:
         target: CaptureTarget,
         capability_id: str,
         *,
-        mode: Literal["single", "experiment"] = "single",
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
         progress: Any | None = None,
@@ -811,7 +802,6 @@ class AnalysisRuntime:
         return await self._capture_analysis_page(
             target,
             capability_id,
-            mode=mode,
             experiment=experiment,
             limits=limits,
             progress=progress,
@@ -824,7 +814,6 @@ class AnalysisRuntime:
         target: CaptureTarget,
         capability_id: str,
         *,
-        mode: Literal["single", "experiment"] = "single",
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
         progress: Any | None = None,
@@ -832,8 +821,9 @@ class AnalysisRuntime:
         include_next_request: bool,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         validated_capture = self._validate_capture_request(
-            target, capability_id, mode=mode, experiment=experiment, limits=limits
+            target, capability_id, experiment=experiment, limits=limits
         )
+        mode = "experiment" if experiment is not None else "single"
         selected_limits = validated_capture.limits
         capture_arguments = validated_capture.capture_arguments
         cases = validated_capture.cases
@@ -1286,7 +1276,6 @@ class AnalysisRuntime:
                     mode=mode,
                     experiment=experiment,
                     executions=executions,
-                    max_result_bytes=selected_limits.max_result_bytes,
                 )
                 if preserve:
                     result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
@@ -1413,7 +1402,6 @@ class AnalysisRuntime:
             },
             "analysis_failure": failure_body,
         }
-        self._bound_capture_result(result, limits.max_result_bytes, analysis_request, 0)
         validated = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
@@ -1448,7 +1436,6 @@ class AnalysisRuntime:
         mode: str,
         experiment: ExperimentDesign | None,
         executions: list[dict[str, Any]],
-        max_result_bytes: int,
     ) -> dict[str, Any]:
         result["capture"] = {
             "mode": mode,
@@ -1462,16 +1449,6 @@ class AnalysisRuntime:
             )
             result["blocks"].extend(experiment_blocks)
             result["limitations"].extend(experiment_limitations)
-        analysis_request = cached.manifest_body["analysis_request"]
-        continuation_identity = {
-            key: value for key, value in analysis_request.items() if key != "offset"
-        }
-        self._bound_capture_result(
-            result,
-            max_result_bytes,
-            continuation_identity,
-            int(analysis_request["offset"]),
-        )
         validated_result = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
@@ -2301,9 +2278,9 @@ class AnalysisRuntime:
                     )
                 try:
                     path = path.resolve(strict=True)
-                except OSError as exc:
+                except (OSError, RuntimeError) as exc:
                     raise RuntimeFailure(
-                        "MISSING_OR_CHANGED_INPUT", f"Source is missing: {source.path}"
+                        "MISSING_OR_CHANGED_INPUT", f"Source could not be resolved: {source.path}"
                     ) from exc
                 digest, size, file_count = hash_path(
                     path,
@@ -2960,96 +2937,6 @@ class AnalysisRuntime:
                 for number, line in enumerate(stream, 1):
                     yield {"line": number, "text": line.rstrip("\n")}
 
-    def _shrink_result(
-        self, result: dict[str, Any], limit: int, identity: Mapping[str, Any], offset: int
-    ) -> None:
-        rows = result["blocks"][1]["rows"]
-        had_rows = bool(rows)
-        while len(canonical_bytes(result)) > limit and rows:
-            rows.pop()
-            result["coverage"].update(rows_returned=len(rows), complete=False)
-            result["truncation"] = {"reason": "result_bytes", "next_offset": offset + len(rows)}
-            result["continuation"] = self._encode_continuation(identity, offset + len(rows))
-        if had_rows and not rows:
-            recovery: dict[str, Any] = {}
-            if identity.get("capability_id") == "artifact.preview" and all(
-                item["format"] == "text" for item in identity.get("inputs", [])
-            ):
-                fragment_chars = identity.get("arguments", {}).get("text_fragment_chars")
-                if fragment_chars == 1:
-                    recovery = {
-                        "recovery": (
-                            "A single-character fragment and result metadata do not fit. "
-                            "Use a larger max_result_bytes within server limits."
-                        )
-                    }
-                else:
-                    suggested = 128 if fragment_chars is None else max(1, fragment_chars // 2)
-                    recovery = {
-                        "recovery": (
-                            f"Retry artifact.preview analysis with text_fragment_chars={suggested} "
-                            "and start a fresh page. Fragment offsets differ from line offsets. "
-                            "If metadata still cannot fit, use a larger max_result_bytes "
-                            "within server limits."
-                        )
-                    }
-            raise RuntimeFailure(
-                "LIMIT_EXCEEDED",
-                "A result row exceeds max_result_bytes and cannot form an advancing page",
-                details=recovery,
-            )
-        if len(canonical_bytes(result)) > limit:
-            raise RuntimeFailure("LIMIT_EXCEEDED", "Result metadata exceeds max_result_bytes")
-
-    def _bound_capture_result(
-        self, result: dict[str, Any], limit: int, identity: Mapping[str, Any], offset: int
-    ) -> None:
-        capture = cast(dict[str, Any], result["capture"])
-        executions = cast(list[dict[str, Any]], capture["executions"])
-        if len(canonical_bytes(result)) <= limit:
-            return
-        compact = [
-            {
-                "case": item["case"],
-                "block": item["block"],
-                "returncode": item["returncode"],
-                "executable_sha256": item.get("executable_sha256"),
-                "collector_executable_sha256": item.get("collector_executable_sha256"),
-                "workload_executable_sha256": item.get("workload_executable_sha256"),
-                "returncode_scope": item.get("returncode_scope", "unknown"),
-                "workload_returncode": item.get("workload_returncode"),
-                "status": item["status"],
-                "failure_code": item["failure_code"],
-                "wall_time_ns": item["wall_time_ns"],
-                "containment": item["containment"],
-                "limit": item["limit"],
-                "semantic_oracle": (
-                    {
-                        "status": item["semantic_oracle"]["status"],
-                        "returncode": item["semantic_oracle"]["returncode"],
-                        "failure_code": item["semantic_oracle"]["failure_code"],
-                        "limit": item["semantic_oracle"].get("limit"),
-                    }
-                    if item["semantic_oracle"] is not None
-                    else None
-                ),
-            }
-            for item in executions
-        ]
-        capture["execution_count"] = len(compact)
-        capture["executions"] = compact
-        capture["executions_truncated"] = 0
-        limitation = (
-            "Inline capture provenance was compacted by max_result_bytes; full provenance "
-            "remains available if this analysis is preserved."
-        )
-        result["limitations"].append(limitation)
-        while compact and len(canonical_bytes(result)) > limit:
-            compact.pop()
-            capture["executions_truncated"] += 1
-        if len(canonical_bytes(result)) > limit:
-            self._shrink_result(result, limit, identity, offset)
-
     @staticmethod
     def _capture_outcome(executions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         succeeded = sum(item["status"] == "succeeded" for item in executions)
@@ -3225,7 +3112,7 @@ class AnalysisRuntime:
         candidate = Path(value)
         try:
             resolved = candidate.resolve(strict=True)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             raise RuntimeFailure("INVALID_INPUT", "cwd must be an existing directory") from exc
         if not resolved.is_dir():
             raise RuntimeFailure("INVALID_INPUT", "cwd must be a directory")

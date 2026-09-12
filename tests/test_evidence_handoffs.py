@@ -5,7 +5,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
@@ -292,97 +291,6 @@ def test_preserved_capture_continuation_uses_discovered_sources(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failed_index", [0, 15])
-@pytest.mark.parametrize("text_width", [140, 170])
-def test_capture_summary_survives_diagnostic_truncation(failed_index: int, text_width: int) -> None:
-    executions = [
-        dict(
-            case=f"case-{i}",
-            block=1,
-            returncode=int(i == failed_index),
-            status="failed" if i == failed_index else "succeeded",
-            failure_code=None,
-            wall_time_ns=100,
-            containment="process_group",
-            limit=None,
-            semantic_oracle=None,
-        )
-        for i in range(16)
-    ]
-    result: dict[str, Any] = dict(
-        analysis_id="a" * 64,
-        capability_id="artifact.preview",
-        coverage=dict(complete=True, rows_returned=100, rows_observed=100),
-        blocks=[
-            dict(type="metrics", values={}),
-            dict(type="table", rows=[dict(text="x" * text_width) for _ in range(100)]),
-        ],
-        limitations=[],
-        continuation=None,
-        capture=dict(executions=executions, outcome=AnalysisRuntime._capture_outcome(executions)),
-    )
-    runtime = object.__new__(AnalysisRuntime)
-    runtime._bound_capture_result(result, 16384, {}, 0)
-    assert result["capture"]["outcome"] == {
-        "status": "failed",
-        "execution_count": 16,
-        "succeeded_count": 15,
-        "failed_count": 1,
-    }
-    assert len(canonical_bytes(result)) <= 16384
-    if text_width == 170:
-        assert result["capture"]["executions"] == []
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("failure_code", [None, "SEMANTIC_ORACLE_FAILED"])
-def test_mcp_uses_capture_outcome_when_execution_diagnostics_are_empty(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_code: str | None,
-) -> None:
-    executions = [{"status": "failed", "failure_code": failure_code} for _ in range(16)]
-
-    original = AnalysisRuntime.capture_analysis_page
-
-    async def capture(
-        self: AnalysisRuntime, *args: Any, **kwargs: Any
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        result, next_request = await original(self, *args, **kwargs)
-        result["capture"].update(
-            outcome=self._capture_outcome(executions),
-            executions=[],
-            executions_truncated=16,
-        )
-        return result, next_request
-
-    monkeypatch.setattr(AnalysisRuntime, "capture_analysis_page", capture)
-
-    async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
-            result = await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [sys.executable, "-c", "pass"],
-                            "cwd": str(tmp_path),
-                        },
-                        "provider": {"kind": "direct"},
-                        "execution": {"kind": "single"},
-                    }
-                },
-            )
-            assert result.is_error
-            assert result.structured_content["code"] == "EXECUTION_FAILURE"
-            outcome = result.structured_content["details"]["partial_evidence"]["capture"]["outcome"]
-            assert outcome["failed_count"] == 16
-
-    anyio.run(exercise)
-
-
-@pytest.mark.unit
 def test_experiment_classification_explicitly_describes_point_estimate() -> None:
     design = ExperimentDesign(
         cases=[ExperimentCase(name="base"), ExperimentCase(name="candidate")],
@@ -461,7 +369,6 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
                             **({"console_output": "full"} if full_output else {}),
                         },
                         "provider": {"kind": "py-spy"},
-                        "execution": {"kind": "single"},
                         "preserve": True,
                     }
                 },

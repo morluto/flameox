@@ -67,7 +67,6 @@ def test_zero_exit_output_limit_is_preserved_as_failed_capture(
                 "artifact.preview",
                 limits=RequestLimits(max_output_bytes=1024),
                 preserve=True,
-                mode="experiment",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
                     blocks=1,

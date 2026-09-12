@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-import psutil
 import pytest
 
 from flameox.runtime import AnalysisRuntime
@@ -17,6 +16,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     WorkloadBudget,
 )
+from tests.support.processes import process_is_alive, wait_for_pid_file
 
 
 def _target(
@@ -138,9 +138,8 @@ def test_workload_budget_also_bounds_semantic_oracle(tmp_path: Path) -> None:
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
         try:
             result = await runtime.capture_and_analyze(
-                _target(tmp_path, "print('workload')", budget=WorkloadBudget(timeout_seconds=0.2)),
+                _target(tmp_path, "print('workload')", budget=WorkloadBudget(timeout_seconds=2)),
                 "artifact.preview",
-                mode="experiment",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
                     blocks=1,
@@ -151,7 +150,7 @@ def test_workload_budget_also_bounds_semantic_oracle(tmp_path: Path) -> None:
                     semantic_oracle=[
                         sys.executable,
                         "-c",
-                        "import time; time.sleep(2)",
+                        "import time; time.sleep(20)",
                     ],
                 ),
             )
@@ -166,7 +165,7 @@ def test_workload_budget_also_bounds_semantic_oracle(tmp_path: Path) -> None:
     assert oracle["status"] == "failed"
     assert oracle["failure_code"] == "EXECUTION_TIMEOUT"
     assert oracle["limit"]["kind"] == "timeout"
-    assert oracle["limit"]["configured"] == 0.2
+    assert oracle["limit"]["configured"] == 2
     assert oracle["limit"]["unit"] == "seconds"
 
 
@@ -225,31 +224,15 @@ def test_unbudgeted_capture_cancellation_cleans_child_and_scratch(tmp_path: Path
             )
         )
         try:
-            for _ in range(200):
-                if child_pid_file.is_file():
-                    break
-                await asyncio.sleep(0.01)
-            assert child_pid_file.is_file()
-            child_pid = int(child_pid_file.read_text())
+            child_pid = await wait_for_pid_file(child_pid_file)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            for _ in range(200):
-                if not psutil.pid_exists(child_pid):
-                    break
-                try:
-                    if psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE:
-                        break
-                except psutil.NoSuchProcess:
-                    break
-                await asyncio.sleep(0.01)
-            assert not psutil.pid_exists(child_pid) or (
-                psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
-            )
+            assert not process_is_alive(child_pid)
             assert list(runtime.scratch.glob("capture-*")) == []
         finally:
-            if not task.done():
-                task.cancel()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             runtime.close()
 
     anyio.run(exercise)

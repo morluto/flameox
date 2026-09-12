@@ -18,8 +18,7 @@ from pydantic import Field
 
 import flameox.providers.environment as provider_setup
 from flameox import __version__
-from flameox.canonical import canonical_bytes
-from flameox.mcp.capability_tools import AnalysisRequest, CaptureRequest, ExperimentExecution
+from flameox.mcp.capability_tools import AnalysisRequest, CaptureRequest
 from flameox.mcp.result_contracts import (
     AnalysisEnvelope,
     AnalysisOutcome,
@@ -64,7 +63,6 @@ def _analysis_summary(value: dict[str, Any], *, resource: ResourceLink | None) -
     state = "complete" if coverage["complete"] is True else "bounded or incomplete"
     truncation = value.get("truncation")
     provider_limited = isinstance(truncation, dict) and truncation.get("reason") == "provider_limit"
-    result_limited = isinstance(truncation, dict) and truncation.get("reason") == "result_bytes"
     if isinstance(value.get("next_page"), dict):
         next_action = "call analyze with the exact next_page arguments"
         if value.get("capture") is not None:
@@ -73,8 +71,6 @@ def _analysis_summary(value: dict[str, Any], *, resource: ResourceLink | None) -
         next_action = "follow the returned evidence resource"
     elif provider_limited:
         next_action = "narrow the semantic query or recapture; no continuation is available"
-    elif result_limited:
-        next_action = "use a smaller page or simpler options and restart the analysis"
     else:
         next_action = "preserve the session analysis if durable evidence is needed"
     return (
@@ -135,8 +131,17 @@ def _success(
 
 def _failure(error: RuntimeFailure, *, resource: ResourceLink | None = None) -> CallToolResult:
     detail = {"code": error.code, "message": error.message, "details": error.details}
+    partial = error.details.get("partial_evidence")
+    recovery = (
+        _analysis_summary(partial, resource=resource)
+        if isinstance(partial, dict)
+        else "Full failure details are in structuredContent."
+    )
     content: list[ContentBlock] = [
-        TextContent(type="text", text=json.dumps(detail, sort_keys=True))
+        TextContent(
+            type="text",
+            text=f"{error.code}: {error.message} {recovery}",
+        )
     ]
     if resource is not None:
         content.append(resource)
@@ -150,10 +155,8 @@ def _failure(error: RuntimeFailure, *, resource: ResourceLink | None = None) -> 
 def _attach_next_page(
     value: dict[str, Any],
     request: dict[str, Any] | None,
-    *,
-    max_result_bytes: int,
 ) -> None:
-    """Project an internal continuation into one bounded, executable MCP call."""
+    """Project an internal continuation into an executable MCP call."""
 
     if request is None:
         return
@@ -164,16 +167,6 @@ def _attach_next_page(
         "tool": "analyze",
         "arguments": {"request": request, "page_size": limits["max_rows"]},
     }
-    if len(canonical_bytes(value)) <= max_result_bytes:
-        return
-
-    # The runtime bounded the evidence before the transport-only handoff existed. If the
-    # complete request cannot fit, preserve the evidence bound and report a non-resumable
-    # byte truncation instead of returning an oversized or partial invocation.
-    value["next_page"] = None
-    truncation = value.get("truncation")
-    next_offset = truncation.get("next_offset", 0) if isinstance(truncation, dict) else 0
-    value["truncation"] = {"reason": "result_bytes", "next_offset": next_offset}
 
 
 def create_server(
@@ -205,7 +198,7 @@ def create_server(
             "session-local unless preserve_evidence is called. If a capture reports a missing "
             "Flameox-managed provider, call prepare_providers with the complete desired provider "
             "set and reconnect with its returned launcher. Profiles are exploratory: use "
-            "capture_and_analyze with request.execution.kind=experiment for baseline/candidate "
+            "capture_and_analyze with request.experiment for baseline/candidate "
             "cases "
             "measured in "
             "randomized paired blocks with a wall-clock effect and semantic oracle. Use "
@@ -316,9 +309,7 @@ def create_server(
                     continuation=request.continuation,
                 )
             )
-            _attach_next_page(
-                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
-            )
+            _attach_next_page(value, next_request)
             return _success(value, summary=_analysis_summary(value, resource=None))
         except RuntimeFailure as error:
             return _failure(error)
@@ -342,7 +333,7 @@ def create_server(
             Field(description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS),
         ] = 100,
     ) -> Annotated[CallToolResult, AnalysisOutcome]:
-        """Execute a typed target, capture native artifacts, and analyze them."""
+        """Capture a target once, or supply an experiment design for paired cases."""
 
         async def progress(current: int, total: int, message: str) -> None:
             await ctx.report_progress(float(current), float(total), message)
@@ -353,25 +344,16 @@ def create_server(
             capture_arguments=request.provider.options.model_dump(),
             analysis_arguments=request.options.model_dump(),
         )
-        experiment = (
-            request.execution.design if isinstance(request.execution, ExperimentExecution) else None
-        )
         try:
             value, next_request = await runtime(ctx).capture_analysis_page(
                 target,
                 request.capability_id,
-                mode=request.execution.kind,
-                experiment=experiment,
+                experiment=getattr(request, "experiment", None),
                 limits=RequestLimits(max_rows=page_size),
                 progress=progress,
                 preserve=request.preserve,
             )
-            _attach_next_page(
-                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
-            )
-            failed = [
-                item for item in value["capture"]["executions"] if item["status"] != "succeeded"
-            ]
+            _attach_next_page(value, next_request)
             preserved = value.get("preserved")
             link = None
             if isinstance(preserved, dict):
@@ -390,7 +372,6 @@ def create_server(
                         "and preserved diagnostics before inferring workload failure.",
                         details={
                             "partial_evidence": partial_evidence,
-                            "failed_executions": failed,
                         },
                     ),
                     resource=link,
@@ -440,9 +421,7 @@ def create_server(
             value, next_request = await runtime(ctx).run_in_request(
                 partial(runtime(ctx).preserve_evidence_page, analysis_id)
             )
-            _attach_next_page(
-                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
-            )
+            _attach_next_page(value, next_request)
             link = ResourceLink(
                 type="resource_link",
                 uri=value["uri"],
@@ -481,9 +460,7 @@ def create_server(
             value, next_request = await runtime(ctx).run_in_request(
                 partial(runtime(ctx).rescue_evidence_page, analysis_id, destination)
             )
-            _attach_next_page(
-                value, next_request, max_result_bytes=runtime(ctx).limits.max_result_bytes
-            )
+            _attach_next_page(value, next_request)
             return _success(value, summary=_evidence_summary(value, rescued=True))
         except RuntimeFailure as error:
             return _failure(error)

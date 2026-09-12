@@ -46,16 +46,15 @@ def test_text_fragments_preserve_native_bytes_and_resume_after_restart(tmp_path:
     assert path.read_bytes() == content
 
 
-def test_oversized_line_can_be_recovered_without_changing_default_offsets(tmp_path: Path) -> None:
+def test_large_line_and_optional_fragments_keep_distinct_offsets(tmp_path: Path) -> None:
     path = tmp_path / "long.log"
     path.write_bytes(b"x" * 300_000 + b"\nshort\n")
     runtime = AnalysisRuntime()
     sources = [PathSource(path=str(path), format="text")]
     try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("artifact.preview", sources, {})
-        assert failure.value.code == "LIMIT_EXCEEDED"
-        assert "text_fragment_chars" in failure.value.details["recovery"]
+        complete = runtime.analyze("artifact.preview", sources, {})
+        assert complete["blocks"][1]["rows"][0]["text"] == "x" * 300_000
+        assert complete["coverage"]["complete"] is True
         ordinary = runtime.analyze("artifact.preview", sources, {"offset": 1})
         assert ordinary["blocks"][1]["rows"][0]["text"] == "short"
         recovered = runtime.analyze("artifact.preview", sources, {"text_fragment_chars": 1024})
@@ -107,25 +106,7 @@ def test_fragment_option_rejects_nontext_sources(tmp_path: Path) -> None:
         runtime.close()
 
 
-def test_minimal_fragment_reports_result_envelope_limit(tmp_path: Path) -> None:
-    path = tmp_path / "output.log"
-    path.write_text("abc")
-    runtime = AnalysisRuntime()
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(
-                "artifact.preview",
-                [PathSource(path=str(path), format="text")],
-                {"text_fragment_chars": 1},
-                limits=RequestLimits(max_result_bytes=1024),
-            )
-        assert "larger max_result_bytes" in failure.value.details["recovery"]
-        assert "text_fragment_chars=128" not in failure.value.details["recovery"]
-    finally:
-        runtime.close()
-
-
-def test_mcp_exposes_and_executes_text_fragment_recovery(tmp_path: Path) -> None:
+def test_mcp_exposes_and_executes_optional_text_fragments(tmp_path: Path) -> None:
     path = tmp_path / "output.log"
     path.write_text("x" * 300_000)
 

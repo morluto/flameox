@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import PathSource, RequestLimits, RuntimeFailure
+from flameox.runtime_contracts import (
+    PathSource,
+    RequestLimits,
+    RuntimeFailure,
+)
 
 
 def _vllm_payload(*, throughput: float = 5.0) -> dict[str, object]:
@@ -271,3 +275,51 @@ def test_mooncake_summary_aggregates_beyond_returned_rows(tmp_path: Path) -> Non
     assert result["blocks"][0]["values"]["request_count"] == 3
     assert result["blocks"][0]["values"]["max_input_length"] == 999
     assert result["coverage"]["complete"] is False
+
+
+@pytest.mark.process
+def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path) -> None:
+    pytest.importorskip("aiperf")
+    export = tmp_path / "profile_export.jsonl"
+    export.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "session_num": 7,
+                    "x_request_id": "request-7",
+                    "conversation_id": "conversation-a",
+                    "turn_index": 2,
+                    "request_start_ns": 125,
+                    "request_end_ns": 10_000_125,
+                    "worker_id": "worker-0",
+                    "record_processor_id": "processor-0",
+                    "benchmark_phase": "profiling",
+                    "was_cancelled": False,
+                },
+                "metrics": {
+                    "input_sequence_length": {"value": 20, "unit": "tokens"},
+                    "output_sequence_length": {"value": 3, "unit": "tokens"},
+                    "time_to_first_token": {"value": 2, "unit": "ms"},
+                    "request_latency": {"value": 10, "unit": "ms"},
+                },
+                "error": None,
+                "raw_prompt": "must never leave the isolated reader",
+            }
+        )
+        + "\n"
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "inference.summary",
+            [PathSource(path=str(export), format="aiperf", producer="aiperf")],
+            {},
+        )
+    finally:
+        runtime.close()
+
+    assert result["provider"]["id"] == "aiperf"
+    assert result["blocks"][0]["values"]["median_ttft_ns"] == 2_000_000
+    assert result["blocks"][1]["rows"][0]["source_request_id"] == "conversation-a:2"
+    assert "raw_prompt" not in json.dumps(result)
+    assert not (tmp_path / ".flameox").exists()

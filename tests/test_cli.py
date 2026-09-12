@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from click import unstyle
 from typer.testing import CliRunner
@@ -46,7 +48,9 @@ def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> N
     assert summary_result.exit_code == 0, summary_result.output
     summary = json.loads(summary_result.output)
     assert summary["tool_count"] == 6
-    assert len(summary_result.output) < 30_000
+    assert all(
+        "input_schema" not in tool and "output_schema" not in tool for tool in summary["tools"]
+    )
     hotspot_capability = next(
         item for item in summary["capabilities"] if item["id"] == "cpu.hotspots"
     )
@@ -54,7 +58,6 @@ def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> N
     capture = next(tool for tool in summary["tools"] if tool["name"] == "capture_and_analyze")
     assert capture["annotations"]["destructive_hint"] is True
     assert capture["required_inputs"] == ["request"]
-    assert "input_schema" not in capture
 
     assert exact_result.exit_code == 0, exact_result.output
     exact = json.loads(exact_result.output)
@@ -964,3 +967,89 @@ def test_setup_interactive_cancellation_makes_no_changes(
     assert result.exit_code == 0, result.output
     assert "cancelled. No changes were made" in result.output
     assert not (tmp_path / ".codex").exists()
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "file", "loop"])
+def test_cli_capture_reports_invalid_working_directory_without_traceback(
+    tmp_path: Path, path_kind: str
+) -> None:
+    cwd = tmp_path / "cwd"
+    if path_kind == "file":
+        cwd.write_text("not a directory")
+    elif path_kind == "loop":
+        cwd.symlink_to(cwd.name)
+    result = CliRunner().invoke(
+        app,
+        ["capture", "--provider", "direct", "--cwd", str(cwd), "--", sys.executable, "-c", "pass"],
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["code"] == "INVALID_INPUT"
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("input_kind", ["parquet", "parquet_body", "loop"])
+def test_cli_preview_reports_unreadable_artifacts_without_traceback(
+    tmp_path: Path, input_kind: str
+) -> None:
+    source = tmp_path / ("input.parquet" if input_kind.startswith("parquet") else "input.loop")
+    if input_kind == "parquet":
+        source.write_bytes(b"PAR1bad")
+    elif input_kind == "parquet_body":
+        pq.write_table(pa.table({"value": list(range(1_000))}), source, compression="snappy")
+        offset = pq.ParquetFile(source).metadata.row_group(0).column(0).data_page_offset
+        with source.open("r+b") as stream:
+            stream.seek(offset + 20)
+            stream.write(b"\xff" * 100)
+    else:
+        source.symlink_to(source.name)
+    result = CliRunner().invoke(app, ["analyze", "artifact.preview", str(source)])
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["code"] == (
+        "MISSING_OR_CHANGED_INPUT" if input_kind == "loop" else "DECODE_FAILURE"
+    )
+    assert "Traceback" not in result.output
+
+
+def test_cli_rejects_misspelled_capture_option_before_resolving_the_workload() -> None:
+    result = CliRunner().invoke(
+        app, ["capture", "--provider", "direct", "--presrve", "--", sys.executable, "-c", "pass"]
+    )
+    assert result.exit_code == 2
+    message = " ".join(unstyle(result.stderr).split())
+    assert "No such option" in message
+    assert "--presrve" in message
+    assert "Executable" not in message
+
+
+def test_cli_rejects_format_override_for_preserved_evidence_before_reading_store() -> None:
+    result = CliRunner().invoke(
+        app, ["analyze", "artifact.preview", "--evidence", "a" * 64, "--format", "text"]
+    )
+    assert result.exit_code == 1
+    failure = json.loads(result.stderr)
+    assert failure["code"] == "INVALID_INPUT"
+    assert "--format" in failure["message"]
+
+
+@pytest.mark.process
+def test_cli_forwards_target_options_and_empty_arguments_after_separator(tmp_path: Path) -> None:
+    arguments = ["--provider", "target-owned", "--help", "--preserve", "", "two words", "--"]
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--",
+            sys.executable,
+            "-c",
+            "import json,sys; print(json.dumps(sys.argv[1:]))",
+            *arguments,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    value = json.loads(result.stdout)
+    assert json.loads(value["blocks"][1]["rows"][0]["text"]) == arguments
+    assert value["capture"]["executions"][0]["argv"][3:] == arguments

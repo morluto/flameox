@@ -205,7 +205,6 @@ def test_written_capture_output_consumes_its_existing_reservation(
             runtime.capture_and_analyze(
                 target,
                 "artifact.preview",
-                mode="experiment",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
                     blocks=1,

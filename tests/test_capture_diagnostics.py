@@ -191,7 +191,6 @@ def test_capture_oracle_gets_full_workload_logs_but_keeps_its_own_diagnostics(
                     provider_id="direct",
                 ),
                 "artifact.preview",
-                mode="experiment",
                 experiment=experiment,
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,

@@ -8,7 +8,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +29,7 @@ from flameox.execution import (
 )
 from flameox.process_models import ExitedProcessTermination, ProcessCancellationCause
 from flameox.runtime_errors import DomainError, ErrorCode
+from tests.support.processes import process_is_alive, wait_for_pid_file
 
 pytestmark = [pytest.mark.integration, pytest.mark.process, pytest.mark.serial]
 
@@ -48,14 +48,6 @@ def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRe
     }
     values.update(overrides)
     return ExecutionRequest.model_validate(values)
-
-
-def _process_is_alive(pid: int) -> bool:
-    try:
-        process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-    except psutil.Error:
-        return False
 
 
 @pytest.mark.anyio
@@ -109,10 +101,10 @@ async def test_startup_cancellation_retains_receipt_and_settles_acquired_process
         assert receipts[0].process.cleanup_complete is True
         assert receipts[0].process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED
         assert len(pids) == (0 if phase == "before_start" else 1)
-        assert all(not _process_is_alive(pid) for pid in pids)
+        assert all(not process_is_alive(pid) for pid in pids)
     finally:
         for pid in pids:
-            if _process_is_alive(pid):
+            if process_is_alive(pid):
                 os.kill(pid, signal.SIGKILL)
         await anyio.sleep(0.1)
 
@@ -143,8 +135,7 @@ async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt
     with anyio.fail_after(6), anyio.CancelScope() as scope:
 
         async def cancel_started_child() -> None:
-            while not pid_path.exists():
-                await anyio.sleep(0.01)
+            await wait_for_pid_file(pid_path)
             scope.cancel()
 
         async with anyio.create_task_group() as group:
@@ -155,7 +146,7 @@ async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt
     assert receipts[0].stdout == b"before cancellation\n"
     assert receipts[0].process.cleanup_complete
     assert receipts[0].process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED
-    assert not _process_is_alive(int(pid_path.read_text()))
+    assert not process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio
@@ -164,7 +155,7 @@ async def test_sync_worker_bridge_callbacks_run_on_owning_loop(tmp_path: Path) -
     callback_loops: list[asyncio.AbstractEventLoop] = []
 
     async def on_started(pid: int) -> None:
-        assert _process_is_alive(pid)
+        assert process_is_alive(pid)
         callback_loops.append(asyncio.get_running_loop())
 
     def execute() -> bytes:
@@ -193,46 +184,59 @@ async def test_sync_worker_bridge_does_not_retry_callback_failure(tmp_path: Path
     with pytest.raises(RuntimeError, match="callback failure"):
         await anyio.to_thread.run_sync(execute)
     assert len(started_pids) == 1
-    assert not _process_is_alive(started_pids[0])
+    assert not process_is_alive(started_pids[0])
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("inherited_pipes", [False, True])
 async def test_output_limit_wakes_resource_observer_before_its_next_sample(
-    tmp_path: Path, inherited_pipes: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inherited_pipes: bool
 ) -> None:
     child_pid_path = tmp_path / "writer.pid"
-    writer = "import time; time.sleep(0.3); print('x' * 2000, flush=True); time.sleep(30)"
+    original_disk_usage = shutil.disk_usage
+
+    def signal_first_sample(path: Any) -> Any:
+        usage = original_disk_usage(path)
+        (tmp_path / "emit").touch()
+        return usage
+
+    monkeypatch.setattr(shutil, "disk_usage", signal_first_sample)
+    writer = (
+        "import pathlib,time\n"
+        "while not pathlib.Path('emit').exists(): time.sleep(0.01)\n"
+        "print('x' * 2000, flush=True); time.sleep(30)"
+    )
     code = writer
     if inherited_pipes:
         code = (
-            "import pathlib, subprocess, sys, time; time.sleep(0.1); "
+            "import pathlib, subprocess, sys; "
             f"child = subprocess.Popen([sys.executable, '-c', {writer!r}], "
             "start_new_session=True); "
             "pathlib.Path('writer.pid').write_text(str(child.pid))"
         )
-    started = time.monotonic()
     try:
-        with pytest.raises(ProcessExecutionError) as failure:
+        # The observer's next sample is ten seconds away. Output completion
+        # must wake it, even with no workload deadline to end the observation.
+        with anyio.fail_after(5), pytest.raises(ProcessExecutionError) as failure:
             await SubprocessBroker().run(
                 request(
                     tmp_path,
                     "-c",
                     code,
+                    timeout_seconds=None,
                     resource_policy=ResourcePolicy(
                         filesystem_path=tmp_path,
-                        sampling_interval_ms=3000,
+                        sampling_interval_ms=10_000,
                         minimum_free_bytes=0,
                     ),
                 )
             )
         assert failure.value.code is ErrorCode.LIMIT_EXCEEDED
         assert failure.value.process.resources is not None
-        assert time.monotonic() - started < 2
     finally:
         if child_pid_path.exists():
             child_pid = int(child_pid_path.read_text())
-            if _process_is_alive(child_pid):
+            if process_is_alive(child_pid):
                 os.kill(child_pid, signal.SIGKILL)
             await asyncio.sleep(0.1)
 
@@ -249,8 +253,7 @@ async def test_observed_level_cancellation_settles_thread_and_cleanup(tmp_path: 
     with anyio.fail_after(5), anyio.CancelScope() as scope:
 
         async def cancel_started_child() -> None:
-            while not pid_path.exists():
-                await anyio.sleep(0.01)
+            await wait_for_pid_file(pid_path)
             scope.cancel()
 
         async with anyio.create_task_group() as group:
@@ -266,7 +269,7 @@ async def test_observed_level_cancellation_settles_thread_and_cleanup(tmp_path: 
                 on_cleanup=on_cleanup,
             )
     assert cleanup == [True]
-    assert not _process_is_alive(int(pid_path.read_text()))
+    assert not process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio
@@ -277,27 +280,25 @@ async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_p
     code = (
         "import pathlib, subprocess, sys, time; "
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "sys.stdout.buffer.write(b'\\xffbefore cancel'); sys.stdout.flush(); time.sleep(60)"
+        "sys.stdout.buffer.write(b'\\xffbefore cancel'); sys.stdout.flush(); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(60)"
     )
     task = asyncio.create_task(
         SubprocessBroker().run(request(tmp_path, "-c", code, str(child_pid_path)))
     )
-    for _ in range(100):
-        if child_pid_path.exists():
-            break
-        await asyncio.sleep(0.01)
-    child_pid = int(child_pid_path.read_text())
-
-    task.cancel()
+    child_pid: int | None = None
     try:
+        child_pid = await wait_for_pid_file(child_pid_path)
+        task.cancel()
         with pytest.raises(ProcessCancelledError) as cancelled:
             await asyncio.wait_for(task, timeout=2)
         assert cancelled.value.stdout == b"\xffbefore cancel"
         assert cancelled.value.process.cleanup_complete is True
-        assert not _process_is_alive(child_pid)
+        assert not process_is_alive(child_pid)
     finally:
-        if _process_is_alive(child_pid):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if child_pid is not None and process_is_alive(child_pid):
             os.kill(child_pid, signal.SIGKILL)
 
 
@@ -339,8 +340,7 @@ async def test_broker_passes_bounded_stdin_to_jsonc_style_helpers(tmp_path: Path
 
 @pytest.mark.anyio
 async def test_broker_bounds_stdin_transfer_when_child_does_not_read(tmp_path: Path) -> None:
-    started = time.monotonic()
-    with pytest.raises(DomainError) as error:
+    with anyio.fail_after(5), pytest.raises(ProcessExecutionError) as error:
         await SubprocessBroker().run(
             request(
                 tmp_path,
@@ -352,7 +352,7 @@ async def test_broker_bounds_stdin_transfer_when_child_does_not_read(tmp_path: P
         )
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-    assert time.monotonic() - started < 2
+    assert error.value.process.cleanup_complete is True
 
 
 def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path) -> None:
@@ -427,14 +427,13 @@ def test_observed_output_budget_stops_a_burst_before_it_completes(tmp_path: Path
 
 
 def test_observed_timeout_includes_large_stdin_transfer(tmp_path: Path) -> None:
-    started = time.monotonic()
-
-    with pytest.raises(DomainError) as error:
+    with pytest.raises(ProcessExecutionError) as error:
         SubprocessBroker().run_sync(
             request(
                 tmp_path,
                 "-c",
-                "import sys, time; time.sleep(0.5); sys.stdin.buffer.read()",
+                "import pathlib, sys, time; time.sleep(30); "
+                "pathlib.Path('stdin-read-started').touch(); sys.stdin.buffer.read()",
                 stdin_bytes=b"x" * (2 * 1024 * 1024),
                 observation="child_peak_rss",
                 timeout_seconds=0.05,
@@ -442,7 +441,8 @@ def test_observed_timeout_includes_large_stdin_transfer(tmp_path: Path) -> None:
         )
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-    assert time.monotonic() - started < 0.5
+    assert error.value.process.cleanup_complete is True
+    assert not (tmp_path / "stdin-read-started").exists()
 
 
 def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
@@ -462,7 +462,7 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
                 code,
                 str(pid_path),
                 observation="child_peak_rss",
-                timeout_seconds=0.1,
+                timeout_seconds=2,
             )
         )
 
@@ -484,11 +484,7 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     )
     assert pid_path.is_file()
     child_pid = int(pid_path.read_text())
-    for _ in range(100):
-        if not _process_is_alive(child_pid):
-            break
-        time.sleep(0.01)
-    assert not _process_is_alive(child_pid)
+    assert not process_is_alive(child_pid)
 
 
 def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -> None:
@@ -506,11 +502,7 @@ def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -
     assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
     assert pid_path.is_file()
     child_pid = int(pid_path.read_text())
-    for _ in range(100):
-        if not _process_is_alive(child_pid):
-            break
-        time.sleep(0.01)
-    assert not _process_is_alive(child_pid)
+    assert not process_is_alive(child_pid)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process sessions")
@@ -519,12 +511,10 @@ def test_observed_run_does_not_wait_for_an_escaped_output_writer(tmp_path: Path)
     code = (
         "import pathlib, subprocess, sys, time; "
         "child = subprocess.Popen("
-        "[sys.executable, '-c', 'import time; time.sleep(0.75)'], "
+        "[sys.executable, '-c', 'import time; time.sleep(30)'], "
         "start_new_session=True); "
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(0.15)"
     )
-    started = time.monotonic()
-
     child_pid: int | None = None
     try:
         outcome = SubprocessBroker().run_sync(
@@ -533,11 +523,15 @@ def test_observed_run_does_not_wait_for_an_escaped_output_writer(tmp_path: Path)
         child_pid = int(pid_path.read_text())
 
         assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
-        assert time.monotonic() - started < 0.7
+        # Returning while the escaped writer still owns the pipe proves that
+        # completion did not wait for its EOF, independently of host startup time.
+        assert process_is_alive(child_pid)
         assert not any(
             thread.name.startswith("flameox-observed-") for thread in threading.enumerate()
         )
     finally:
+        if child_pid is None and pid_path.exists():
+            child_pid = int(pid_path.read_text())
         if child_pid is not None:
             with suppress(ProcessLookupError):
                 os.killpg(child_pid, signal.SIGKILL)
@@ -564,44 +558,41 @@ async def test_observed_cancellation_cleans_up_before_propagating(
             )
         )
     )
-    for _ in range(100):
-        if pid_path.is_file():
-            break
-        await asyncio.sleep(0.01)
-    assert pid_path.is_file()
-    process_pid = int(pid_path.read_text())
+    process_pid = await wait_for_pid_file(pid_path)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    for _ in range(100):
-        if not _process_is_alive(process_pid):
-            break
-        await asyncio.sleep(0.01)
-    assert not _process_is_alive(process_pid)
+    assert not process_is_alive(process_pid)
 
 
 @pytest.mark.anyio
 async def test_observed_cancellation_interrupts_blocked_stdin(tmp_path: Path) -> None:
+    pid_path = tmp_path / "stdin-writer.pid"
     task = asyncio.create_task(
         SubprocessBroker().run(
             request(
                 tmp_path,
                 "-c",
-                "import sys, time; time.sleep(0.75); sys.stdin.buffer.read()",
+                "import os, pathlib, sys, time; "
+                "pathlib.Path('stdin-writer.pid').write_text(str(os.getpid())); "
+                "time.sleep(30); sys.stdin.buffer.read()",
                 stdin_bytes=b"x" * (2 * 1024 * 1024),
                 observation="child_peak_rss",
             )
         )
     )
-    await asyncio.sleep(0.05)
-    started = time.monotonic()
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert time.monotonic() - started < 0.5
+    try:
+        process_pid = await wait_for_pid_file(pid_path)
+        assert process_is_alive(process_pid)
+        task.cancel()
+        with anyio.fail_after(5), pytest.raises(ProcessCancelledError) as cancelled:
+            await task
+        assert cancelled.value.process.cleanup_complete is True
+        assert not process_is_alive(process_pid)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -728,7 +719,7 @@ async def test_timeout_terminates_descendants_outside_the_root_process_group(
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert pid_path.is_file()
-    assert not _process_is_alive(int(pid_path.read_text()))
+    assert not process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio
@@ -757,7 +748,7 @@ async def test_timeout_terminates_observed_descendant_after_parent_exits(
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
     assert pid_path.is_file()
-    assert not _process_is_alive(int(pid_path.read_text()))
+    assert not process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio
@@ -767,10 +758,11 @@ async def test_timeout_includes_startup_callback_and_cleans_up_child(tmp_path: P
     async def slow_started(pid: int) -> None:
         nonlocal child_pid
         child_pid = pid
-        await asyncio.sleep(0.25)
+        await anyio.sleep_forever()
 
-    started = time.monotonic()
-    with pytest.raises(DomainError) as error:
+    # Prove that the workload deadline interrupts startup, independently of the
+    # host time needed to acquire the process and finish descendant cleanup.
+    with anyio.fail_after(5), pytest.raises(DomainError) as error:
         await SubprocessBroker().run(
             request(
                 tmp_path,
@@ -782,9 +774,8 @@ async def test_timeout_includes_startup_callback_and_cleans_up_child(tmp_path: P
         )
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-    assert time.monotonic() - started < 0.2
     assert child_pid is not None
-    assert not _process_is_alive(child_pid)
+    assert not process_is_alive(child_pid)
 
 
 @pytest.mark.anyio
@@ -798,15 +789,10 @@ async def test_timeout_does_not_reawait_a_stalled_subprocess_spawn(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", stalled_spawn)
 
-    started = time.monotonic()
-    with pytest.raises(DomainError) as error:
-        await asyncio.wait_for(
-            SubprocessBroker().run(request(tmp_path, "-c", "pass", timeout_seconds=0.05)),
-            timeout=0.2,
-        )
+    with anyio.fail_after(5), pytest.raises(DomainError) as error:
+        await SubprocessBroker().run(request(tmp_path, "-c", "pass", timeout_seconds=0.05))
 
     assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-    assert time.monotonic() - started < 0.2
 
 
 @pytest.mark.anyio
@@ -903,8 +889,26 @@ async def test_async_output_sink_marks_partial_prefix_on_limit(tmp_path: Path) -
     assert failure.value.output_sink is not None
     assert failure.value.output_sink.complete is False
     assert failure.value.output_sink.stdout_bytes + failure.value.output_sink.stderr_bytes == 1_000
-    assert failure.value.output_sink.stdout_path.read_bytes() == failure.value.stdout
-    assert failure.value.output_sink.stderr_path.read_bytes() == failure.value.stderr
+    sink_metadata = failure.value.output_sink
+    for path, byte_count, preview, preview_count in (
+        (
+            sink_metadata.stdout_path,
+            sink_metadata.stdout_bytes,
+            failure.value.stdout,
+            sink_metadata.stdout_preview_bytes,
+        ),
+        (
+            sink_metadata.stderr_path,
+            sink_metadata.stderr_bytes,
+            failure.value.stderr,
+            sink_metadata.stderr_preview_bytes,
+        ),
+    ):
+        native = path.read_bytes()
+        assert len(native) == byte_count
+        assert preview is not None
+        assert native.startswith(preview)
+        assert len(preview) == preview_count
     assert failure.value.details["output_sink"]["complete"] is False
 
 
@@ -915,8 +919,8 @@ async def test_async_output_sink_settles_inherited_writer_on_cancellation(tmp_pa
     code = (
         "import pathlib, subprocess, sys, time; "
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "sys.stdout.write('before cancel'); sys.stdout.flush(); time.sleep(60)"
+        "sys.stdout.write('before cancel'); sys.stdout.flush(); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(60)"
     )
     task = asyncio.create_task(
         SubprocessBroker().run(
@@ -930,18 +934,21 @@ async def test_async_output_sink_settles_inherited_writer_on_cancellation(tmp_pa
             )
         )
     )
-    for _ in range(100):
-        if child_pid_path.exists():
-            break
-        await asyncio.sleep(0.01)
-    child_pid = int(child_pid_path.read_text())
-    task.cancel()
-    with pytest.raises(ProcessCancelledError) as cancelled:
-        await asyncio.wait_for(task, timeout=3)
-    assert cancelled.value.output_sink is not None
-    assert cancelled.value.output_sink.complete is False
-    assert cancelled.value.output_sink.stdout_path.read_bytes() == b"before cancel"
-    assert not _process_is_alive(child_pid)
+    child_pid: int | None = None
+    try:
+        child_pid = await wait_for_pid_file(child_pid_path)
+        task.cancel()
+        with pytest.raises(ProcessCancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=3)
+        assert cancelled.value.output_sink is not None
+        assert cancelled.value.output_sink.complete is False
+        assert cancelled.value.output_sink.stdout_path.read_bytes() == b"before cancel"
+        assert not process_is_alive(child_pid)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if child_pid is not None and process_is_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.anyio
@@ -990,7 +997,9 @@ async def test_async_output_sink_cancellation_waits_for_blocked_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sink = tmp_path / "sink"
-    entered = threading.Event()
+    entered = asyncio.Event()
+    cleaned = asyncio.Event()
+    loop = asyncio.get_running_loop()
     release = threading.Event()
     original = execution_module._AsyncOutputSink.write
 
@@ -999,9 +1008,13 @@ async def test_async_output_sink_cancellation_waits_for_blocked_write(
         stream: Literal["stdout", "stderr"],
         content: bytes,
     ) -> None:
-        entered.set()
-        release.wait(2)
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(10), "Test did not release the blocked output write"
         original(output_sink, stream, content)
+
+    async def on_cleanup(complete: bool) -> None:
+        assert complete
+        cleaned.set()
 
     monkeypatch.setattr(execution_module._AsyncOutputSink, "write", blocked_write)
     task = asyncio.create_task(
@@ -1012,20 +1025,27 @@ async def test_async_output_sink_cancellation_waits_for_blocked_write(
                 "import sys, time; print('blocked', flush=True); time.sleep(30)",
                 output_directory=sink,
                 output_root=tmp_path,
-            )
+            ),
+            on_cleanup=on_cleanup,
         )
     )
-    for _ in range(100):
-        if entered.is_set():
-            break
-        await asyncio.sleep(0.01)
-    assert entered.is_set()
-    task.cancel()
-    await asyncio.sleep(0.05)
-    assert not task.done()
-    release.set()
-    with pytest.raises(ProcessCancelledError):
-        await asyncio.wait_for(task, timeout=3)
+    try:
+        with anyio.fail_after(5):
+            await entered.wait()
+            task.cancel()
+            await cleaned.wait()
+            await anyio.wait_all_tasks_blocked()
+            assert not task.done()
+            release.set()
+            with pytest.raises(ProcessCancelledError) as cancelled:
+                await task
+        assert cancelled.value.output_sink is not None
+        assert cancelled.value.output_sink.stdout_path.read_bytes() == b"blocked\n"
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -1129,7 +1149,7 @@ async def test_cancellation_performs_cleanup_before_propagating(
 
     assert cleanup == [True]
     assert len(process_ids) == 1
-    assert not _process_is_alive(process_ids[0])
+    assert not process_is_alive(process_ids[0])
 
 
 @pytest.mark.anyio
@@ -1154,10 +1174,10 @@ async def test_level_cancellation_waits_for_broker_cleanup(tmp_path: Path) -> No
                 on_cleanup=cleaned,
             )
         assert cleanup == [True]
-        assert not _process_is_alive(process_ids[0])
+        assert not process_is_alive(process_ids[0])
     finally:
         for pid in process_ids:
-            if _process_is_alive(pid):
+            if process_is_alive(pid):
                 os.kill(pid, signal.SIGKILL)
         await asyncio.sleep(0.1)
 
@@ -1272,18 +1292,36 @@ async def test_writable_growth_baseline_precedes_subprocess_execution(
 
 
 @pytest.mark.anyio
-async def test_final_resource_sample_retains_observed_rss_availability(tmp_path: Path) -> None:
+async def test_final_resource_sample_retains_observed_rss_availability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sampled = anyio.Event()
+    original = shutil.disk_usage
+
+    def sample_disk(path: Any) -> Any:
+        result = original(path)
+        sampled.set()
+        return result
+
+    async def release_after_sample(_pid: int) -> None:
+        # The resource observer samples RSS before yielding after disk_usage.
+        # Keep the child alive until that first observation has happened.
+        await sampled.wait()
+        (tmp_path / "finish").touch()
+
+    monkeypatch.setattr(shutil, "disk_usage", sample_disk)
     outcome = await SubprocessBroker().run(
         request(
             tmp_path,
             "-c",
-            "import time; time.sleep(0.2)",
+            "import pathlib,time\nwhile not pathlib.Path('finish').exists(): time.sleep(0.01)\n",
             resource_policy=ResourcePolicy(
                 filesystem_path=tmp_path,
                 minimum_free_bytes=0,
                 sampling_interval_ms=25,
             ),
-        )
+        ),
+        on_started=release_after_sample,
     )
     assert outcome.process.resources is not None
     assert outcome.process.resources.peak_rss_bytes is not None
