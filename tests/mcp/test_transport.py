@@ -177,6 +177,10 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         assert result.structured_content["preparation"]["status"] == "prepared"
         assert result.structured_content["next_action"]["kind"] == "reconnect_mcp"
         assert result.structured_content["next_action"]["necessity"] == "conditional"
+        assert result.structured_content["next_action"]["launcher"] == {
+            "command": "uvx",
+            "args": result.structured_content["launcher"]["args"],
+        }
         assert "Preserve" in result.structured_content["next_action"]["message"]
         assert "external requirements" in result.content[0].text
         assert result.structured_content["launcher"]["args"][3] == (
@@ -191,7 +195,9 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         assert host_only.structured_content["next_action"] is None
 
         assert invalid.is_error is True
-        assert invalid.structured_content["code"] == "INVALID_INPUT"
+        assert invalid.structured_content["code"] == "INVALID_REQUEST"
+        assert invalid.structured_content["field_path"] == ["provider_ids", 0]
+        assert "py-spy" in invalid.structured_content["accepted_values"]
 
     anyio.run(exercise)
     assert preparation_calls == [
@@ -258,7 +264,8 @@ def test_real_stdio_initialize_and_catalog_match_the_runtime_contract(tmp_path: 
             await session.validate_tool_result("capture_and_analyze", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 6
+        assert len(tools.tools) == 7
+        assert "inspect_capabilities" in [tool.name for tool in tools.tools]
         assert "analyze" in [tool.name for tool in tools.tools]
         assert "capture_and_analyze" in [tool.name for tool in tools.tools]
         assert all(tool.output_schema is not None for tool in tools.tools)

@@ -34,8 +34,12 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
                 },
             )
             assert invalid.is_error is True
-            # MCP SDK 2.0 rejects schema-invalid input before invoking the tool.
-            assert invalid.structured_content is None
+            assert invalid.structured_content["code"] == "INVALID_REQUEST"
+            assert invalid.structured_content["field_path"] == [
+                "request",
+                "options",
+                "unexpected",
+            ]
 
             for arguments in (
                 {"page_size": 0},
@@ -44,7 +48,7 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             ):
                 invalid_query = await client.call_tool("query_evidence", arguments)
                 assert invalid_query.is_error is True
-                assert invalid_query.structured_content is None
+                assert invalid_query.structured_content["code"] == "INVALID_REQUEST"
             for limit in (1, 200):
                 valid_query = await client.call_tool("query_evidence", {"page_size": limit})
                 assert valid_query.is_error is False
@@ -70,13 +74,16 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
                     }
                 },
             )
-            assert unavailable.is_error is True
+            assert unavailable.is_error is False
+            assert unavailable.structured_content["status"] == "retryable"
             assert unavailable.structured_content["code"] == "UNAVAILABLE_CAPABILITY"
             assert unavailable.structured_content["details"] == {
                 "provider_id": "py-spy",
-                "preparation_tool": "prepare_providers",
-                "provider_ids": ["py-spy"],
             }
+            next_action = unavailable.structured_content["next_action"]
+            assert next_action["tool"] == "prepare_providers"
+            assert next_action["arguments"] == {"provider_ids": ["py-spy"]}
+            assert next_action["then_retry"] == "capture_and_analyze"
 
             failed = await client.call_tool(
                 "capture_and_analyze",
@@ -92,11 +99,10 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
                     }
                 },
             )
-            assert failed.is_error is True
-            assert failed.structured_content["code"] == "EXECUTION_FAILURE"
-            partial = failed.structured_content["details"]["partial_evidence"]
-            assert partial["analysis_id"]
-            assert partial["capture"]["executions"][0]["returncode"] == 7
+            assert failed.is_error is False
+            assert failed.structured_content["status"] == "partial"
+            assert failed.structured_content["analysis_id"]
+            assert failed.structured_content["capture"]["executions"][0]["returncode"] == 7
 
     anyio.run(exercise)
 
@@ -122,18 +128,18 @@ def test_mcp_one_run_capture_needs_no_execution_choice_and_exposes_its_handle(
                     }
                 },
             )
-            assert result.is_error is (exit_code != 0)
+            assert result.is_error is False
             value = result.structured_content
-            partial = value["details"]["partial_evidence"] if exit_code else value
-            assert partial["capture"]["mode"] == "single"
-            assert len(partial["capture"]["executions"]) == 1
-            assert partial["capture"]["executions"][0]["returncode"] == exit_code
+            assert value["status"] == ("partial" if exit_code else "complete")
+            assert value["capture"]["mode"] == "single"
+            assert len(value["capture"]["executions"]) == 1
+            assert value["capture"]["executions"][0]["returncode"] == exit_code
             summary = result.content[0]
             assert isinstance(summary, TextContent)
-            assert partial["analysis_id"] in summary.text
+            assert value["analysis_id"] in summary.text
             assert "preserve" in summary.text
             preserved = await client.call_tool(
-                "preserve_evidence", {"analysis_id": partial["analysis_id"]}
+                "preserve_evidence", {"analysis_id": value["analysis_id"]}
             )
             assert not preserved.is_error
 
@@ -235,20 +241,16 @@ def test_failed_capture_returns_full_provenance_once(tmp_path: Path, argument_co
                     }
                 },
             )
-            assert result.is_error
+            assert not result.is_error
             value = result.structured_content
             assert value is not None, result.content
-            assert value["code"] == "EXECUTION_FAILURE"
+            assert value["status"] == "partial"
             summary = result.content[0]
             assert isinstance(summary, TextContent)
             assert "native-argument-" not in summary.text
-            assert "structuredContent" in summary.text
-            details = value["details"]
-            assert "failed_executions" not in details
-            analysis = details["partial_evidence"]
-            assert analysis["capture"]["executions"][0]["argv"][3:] == arguments
+            assert value["capture"]["executions"][0]["argv"][3:] == arguments
             preserved = await client.call_tool(
-                "preserve_evidence", {"analysis_id": analysis["analysis_id"]}
+                "preserve_evidence", {"analysis_id": value["analysis_id"]}
             )
             assert not preserved.is_error
             return str(preserved.structured_content["evidence_id"])

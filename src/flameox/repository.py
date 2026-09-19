@@ -590,7 +590,14 @@ class EvidenceRepository:
         ):
             raise RepositoryError("INVALID_INPUT", "created_after must not exceed created_before")
         if not self._require_metadata_or_absent():
-            return {"evidence": [], "continuation": None, "inventory_digest": _empty_digest()}
+            return {
+                "evidence": [],
+                "continuation": None,
+                "inventory_digest": _empty_digest(),
+                "inventory_status": "absent",
+                "inventory_size": 0,
+                "match_status": "no_matches",
+            }
         self._validate_repository()
         evidence_root = self.root / "evidence" / "sha256"
         self._validate_inventory_layout(evidence_root)
@@ -638,6 +645,9 @@ class EvidenceRepository:
             "evidence": matches,
             "continuation": continuation,
             "inventory_digest": inventory_digest,
+            "inventory_status": "available" if inventory else "empty",
+            "inventory_size": len(inventory),
+            "match_status": "matched" if matches else "no_matches",
         }
 
     def cleanup_abandoned_staging(self) -> None:

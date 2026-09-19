@@ -62,7 +62,11 @@ class ProviderDependencies:
         return RuntimeFailure(
             "UNAVAILABLE_CAPABILITY",
             "The prepared collector is missing or changed; prepare py-spy again before capture.",
-            details={"preparation_tool": "prepare_providers", "provider_ids": ["py-spy"]},
+            retryable=True,
+            details={"provider_id": "py-spy"},
+            remediation=(
+                "Prepare py-spy again, reconnect if directed, then retry capture.",
+            ),
         )
 
     def verify_capture_binding(self, provider_id: str, binding: ResolvedExecutable) -> None:

@@ -82,7 +82,7 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
 
 
 @pytest.mark.process
-def test_mcp_native_analysis_failure_exposes_preservable_partial_evidence(
+def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -111,8 +111,9 @@ def test_mcp_native_analysis_failure_exposes_preservable_partial_evidence(
                 },
             )
 
-            assert response.is_error
-            partial = response.structured_content["details"]["partial_evidence"]
+            assert response.is_error is False
+            partial = response.structured_content
+            assert partial["status"] == "partial"
             assert partial["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
             assert partial["analysis_id"]
             preserved = partial["preserved"]

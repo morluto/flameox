@@ -260,11 +260,12 @@ def test_mcp_failed_capture_retains_an_executable_preserved_handoff(tmp_path: Pa
                     "page_size": 1,
                 },
             )
-            partial = failed.structured_content["details"]["partial_evidence"]
+            partial = failed.structured_content
             next_page = partial["next_page"]
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
 
-        assert failed.is_error is True
+        assert failed.is_error is False
+        assert partial["status"] == "partial"
         assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
         assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
 

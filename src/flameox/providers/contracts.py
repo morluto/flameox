@@ -19,11 +19,21 @@ class ProviderAnalysis:
 
 
 class ProviderFailure(RuntimeError):
-    def __init__(self, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+        remediation: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.retryable = retryable
         self.details = details or {}
+        self.remediation = remediation
 
 
 def canonical_provider_projection(analysis: ProviderAnalysis | None) -> ProviderAnalysis | None:

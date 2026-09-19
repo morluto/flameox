@@ -425,7 +425,7 @@ class AnalysisRuntime:
         finally:
             self._protected_sources = protected
 
-    def _analyze(
+    def _analyze(  # noqa: C901 - validation and bounded projection remain one transaction
         self,
         capability_id: str,
         sources: Sequence[Source],
@@ -448,6 +448,25 @@ class AnalysisRuntime:
         capability.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         validated = TypeAdapter(capability.model).validate_python(arguments)
+        for source_index, request_source in enumerate(sources):
+            if isinstance(request_source, PathSource) and request_source.format not in (
+                None,
+                *capability.formats,
+            ):
+                raise RuntimeFailure(
+                    "UNSUPPORTED_FORMAT",
+                    f"{capability_id} does not accept artifact format {request_source.format!r}",
+                    details={
+                        "capability_id": capability_id,
+                        "source_index": source_index,
+                        "received_format": request_source.format,
+                        "accepted_formats": list(capability.formats),
+                        "recovery": (
+                            "Select one accepted format or inspect the `analyze` request variants "
+                            "with `flameox mcp inspect --tool analyze`."
+                        ),
+                    },
+                )
         resolved = self._resolve_sources(sources, selected_limits)
         text_fragment_chars = (
             validated.text_fragment_chars if isinstance(validated, PreviewArguments) else None
@@ -892,10 +911,8 @@ class AnalysisRuntime:
                             "The official Nsight Compute ncu_report.py interface is missing.",
                             details={
                                 "provider_id": target.provider_id,
-                                "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[
-                                    target.provider_id
-                                ],
                             },
+                            remediation=(SYSTEM_PROVIDER_GUIDANCE[target.provider_id],),
                         )
                     self.dependencies.verify_capture_binding(target.provider_id, collector_binding)
                     if experiment is not None and experiment.semantic_oracle is not None:
@@ -1565,19 +1582,30 @@ class AnalysisRuntime:
                 else "EXECUTION_FAILURE"
             )
             details = {}
+            remediation = error.remediation
             if provider_id in SYSTEM_PROVIDER_GUIDANCE:
-                details = {
-                    "provider_id": provider_id,
-                    "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[provider_id],
-                }
-            raise RuntimeFailure(code, error.message, details=details) from error
+                details = {"provider_id": provider_id}
+                remediation = (*remediation, SYSTEM_PROVIDER_GUIDANCE[provider_id])
+            raise RuntimeFailure(
+                code,
+                error.message,
+                retryable=error.retryable,
+                details=details,
+                remediation=remediation,
+            ) from error
 
     @staticmethod
     def _revalidate_executable(binding: ResolvedExecutable) -> None:
         try:
             ExecutableResolver().revalidate(binding)
         except DomainError as error:
-            raise RuntimeFailure(error.code.value, error.message, details=error.details) from error
+            raise RuntimeFailure(
+                error.code.value,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
 
     @staticmethod
     def _managed_executable(name: str) -> str | None:
@@ -1598,11 +1626,11 @@ class AnalysisRuntime:
                     f"prepare_providers with provider_ids=[{provider_id!r}], then follow its "
                     "activation guidance and retry."
                 ),
-                details={
-                    "provider_id": provider_id,
-                    "preparation_tool": "prepare_providers",
-                    "provider_ids": [provider_id],
-                },
+                retryable=True,
+                details={"provider_id": provider_id},
+                remediation=(
+                    "Prepare the managed provider, reconnect if directed, then retry capture.",
+                ),
             )
         return executable
 
@@ -2695,7 +2723,13 @@ class AnalysisRuntime:
                 maximum_output_bytes=limits.max_output_bytes,
             )
         except ProviderFailure as error:
-            raise RuntimeFailure(error.code, error.message, details=error.details) from error
+            raise RuntimeFailure(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
         except DomainError as error:
             code = (
                 "UNAVAILABLE_CAPABILITY"
@@ -2706,7 +2740,13 @@ class AnalysisRuntime:
                 if error.code is ErrorCode.LIMIT_EXCEEDED
                 else "DECODE_FAILURE"
             )
-            raise RuntimeFailure(code, error.message) from error
+            raise RuntimeFailure(
+                code,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
 
     def _platform_trace_analysis(
         self,

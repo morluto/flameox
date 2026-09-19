@@ -1,172 +1,259 @@
-"""Strict MCP result schemas projected from runtime-owned evidence contracts."""
+"""Typed MCP results and recovery states."""
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import Field, GetJsonSchemaHandler, JsonValue, RootModel
 from pydantic.json_schema import JsonSchemaValue
 
-from flameox.mcp.capability_tools import AnalysisRequest
+from flameox.evidence_models import CaptureExecution
 from flameox.runtime_contracts import (
     LOWERCASE_SHA256_PATTERN,
-    MAX_ROWS,
     AnalysisResult,
+    Coverage,
+    ProviderIdentity,
     StrictModel,
 )
 
 
+class CallToolAction(StrictModel):
+    kind: Literal["call_tool"]
+    tool: str
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    then_retry: str | None = None
+    message: str
+
+
+class ReconnectAction(StrictModel):
+    kind: Literal["reconnect_mcp"]
+    message: str
+    necessity: Literal["required", "conditional"]
+    launcher: dict[str, JsonValue] | None = None
+
+
+class AdjustRequestAction(StrictModel):
+    kind: Literal["adjust_request"]
+    field_path: list[str | int] | None = None
+    message: str
+
+
+class ConfigureEnvironmentAction(StrictModel):
+    kind: Literal["configure_environment"]
+    environment: dict[str, str] = Field(default_factory=dict)
+    message: str
+
+
+class WaitAndRetryAction(StrictModel):
+    kind: Literal["wait_and_retry"]
+    retry_after_ms: int | None = Field(default=None, ge=0)
+    message: str
+
+
+class OperatorAction(StrictModel):
+    kind: Literal["operator_action"]
+    message: str
+
+
+class PreserveThenAnalyzeAction(StrictModel):
+    kind: Literal["preserve_then_analyze"]
+    preserve_arguments: dict[str, JsonValue]
+    message: str
+
+
+NextAction = (
+    CallToolAction
+    | AdjustRequestAction
+    | ReconnectAction
+    | ConfigureEnvironmentAction
+    | WaitAndRetryAction
+    | OperatorAction
+    | PreserveThenAnalyzeAction
+)
+
+type FailureCode = str
+
+
 class ToolFailureEnvelope(StrictModel):
-    code: str = Field(description="Stable machine-readable failure code.")
+    status: Literal["failed"] = "failed"
+    code: FailureCode = Field(description="Stable machine-readable failure code.")
     message: str = Field(description="Human-readable failure and recovery guidance.")
-    details: dict[str, JsonValue] = Field(description="Failure-specific structured context.")
+    retryable: bool = False
+    field_path: list[str | int] | None = None
+    accepted_values: list[str] | None = None
+    next_action: NextAction | None = Field(default=None, discriminator="kind")
+    retry_after_ms: int | None = Field(default=None, ge=0)
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class RecoverableEnvelope(StrictModel):
+    status: Literal["retryable", "unavailable"]
+    code: str
+    message: str
+    retryable: bool
+    next_action: NextAction | None = Field(default=None, discriminator="kind")
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ToolCallEnvelope(StrictModel):
+    """Executable next call without recursively embedding another tool schema."""
+
+    tool: Literal["analyze", "query_evidence"]
+    arguments: dict[str, JsonValue]
 
 
 class EvidenceReferenceEnvelope(StrictModel):
-    evidence_id: str = Field(
-        description="Content-addressed immutable evidence identifier.",
-        pattern=LOWERCASE_SHA256_PATTERN,
-    )
-    uri: str = Field(description="Opaque MCP resource URI for the preserved manifest projection.")
-    artifact_count: int = Field(description="Native artifacts preserved with the manifest.", ge=0)
-
-
-class AnalyzeArgumentsEnvelope(StrictModel):
-    request: AnalysisRequest = Field(description="Complete analyze request; submit unchanged.")
-    page_size: int = Field(
-        description="Maximum evidence rows returned on this page.", ge=1, le=MAX_ROWS
-    )
-
-
-class NextPageEnvelope(StrictModel):
-    tool: Literal["analyze"] = Field(description="Exact MCP tool to call.")
-    arguments: AnalyzeArgumentsEnvelope = Field(description="Complete MCP tool arguments.")
+    evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
+    uri: str
+    artifact_count: int = Field(ge=0)
 
 
 class AnalysisEnvelope(AnalysisResult):
-    preserved: EvidenceReferenceEnvelope | None = Field(
-        default=None,
-        description="Immutable evidence reference when the operation preserved this result.",
-    )
-    next_page: NextPageEnvelope | None = Field(
-        default=None,
-        description="Exact analyze invocation for the next page, or null when unavailable.",
-    )
+    status: Literal["complete"] = "complete"
+    capture: None = None
+    analysis_failure: None = None
+    preserved: EvidenceReferenceEnvelope | None = None
+    next_page: ToolCallEnvelope | None = None
+
+
+class CaptureOutcomeEnvelope(StrictModel):
+    status: Literal["succeeded", "failed"]
+    execution_count: int = Field(ge=0)
+    succeeded_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+
+
+class CaptureDetailsEnvelope(StrictModel):
+    status: Literal["complete"]
+    workload_status: Literal["succeeded", "failed"]
+    mode: Literal["single", "experiment"]
+    requested_capability_id: str
+    executions: list[CaptureExecution]
+    outcome: CaptureOutcomeEnvelope
+
+
+class CaptureAnalysisEnvelope(AnalysisResult):
+    status: Literal["complete", "partial"]
+    capture: CaptureDetailsEnvelope  # type: ignore[assignment]
+    preserved: EvidenceReferenceEnvelope | None = None
+    next_page: ToolCallEnvelope | None = None
+    next_action: NextAction | None = Field(default=None, discriminator="kind")
 
 
 class ExternalRequirementEnvelope(StrictModel):
-    provider_id: str = Field(description="Host provider that Flameox cannot install.")
-    guidance: str = Field(description="Host installation or access requirement.")
+    provider_id: str
+    guidance: str
 
 
 class PreparationStatusEnvelope(StrictModel):
-    status: Literal["prepared", "not_applicable"] = Field(
-        description="Whether Flameox prepared a managed provider environment."
-    )
+    status: Literal["prepared", "not_applicable"]
 
 
 class LauncherEnvelope(StrictModel):
-    command: str = Field(description="Executable for the prepared MCP launcher.")
-    args: list[str] = Field(description="Arguments for the prepared MCP launcher.")
-
-
-class ReconnectActionEnvelope(StrictModel):
-    kind: Literal["reconnect_mcp"]
-    message: str = Field(description="Bounded reconnection and preservation guidance.")
-    necessity: Literal["required", "conditional"] = Field(
-        description="Whether the active server is known to require replacement."
-    )
+    command: str
+    args: list[str]
 
 
 class PreparationEnvelope(StrictModel):
-    requested_providers: list[str] = Field(description="Complete requested provider set.")
-    prepared_managed_providers: list[str] = Field(
-        description="Requested Python providers included in the prepared environment."
-    )
-    external_requirements: list[ExternalRequirementEnvelope] = Field(
-        description="Host tools, drivers, devices, or permissions still required."
-    )
-    preparation: PreparationStatusEnvelope = Field(
-        description="Managed environment preparation status."
-    )
-    launcher: LauncherEnvelope = Field(description="Version-pinned launcher to configure.")
-    next_action: ReconnectActionEnvelope | None = Field(
-        description="Required or conditional reconnection, or null when already active."
-    )
-    activation_status: Literal["ready", "restart_required", "unknown", "not_applicable"] = Field(
-        description="Whether the prepared dependency identity is active in this process."
-    )
-    workload_requirements: list[ExternalRequirementEnvelope] = Field(
-        description="Requirements to verify in the exact workload interpreter."
-    )
+    status: Literal["complete"] = "complete"
+    requested_providers: list[str]
+    prepared_managed_providers: list[str]
+    external_requirements: list[ExternalRequirementEnvelope]
+    preparation: PreparationStatusEnvelope
+    launcher: LauncherEnvelope
+    next_action: ReconnectAction | None
+    activation_status: Literal["ready", "restart_required", "unknown", "not_applicable"]
+    workload_requirements: list[ExternalRequirementEnvelope]
 
 
 class PreservationEnvelope(EvidenceReferenceEnvelope):
-    next_page: NextPageEnvelope | None = Field(
-        default=None,
-        description="Refreshed evidence-backed next-page call after live scratch is released.",
-    )
+    status: Literal["complete"] = "complete"
+    next_page: ToolCallEnvelope | None = None
 
 
 class RescueEnvironmentEnvelope(StrictModel):
-    FLAMEOX_DATA_DIR: str = Field(
-        description="Alternate evidence store to configure for the restarted Flameox process."
-    )
+    FLAMEOX_DATA_DIR: str
 
 
 class RescueActionEnvelope(StrictModel):
     kind: Literal["restart_reconnect"]
-    environment: RescueEnvironmentEnvelope = Field(
-        description="Environment required by the restarted server."
-    )
-    message: str = Field(description="Bounded operator guidance for opening rescued evidence.")
+    environment: RescueEnvironmentEnvelope
+    message: str
 
 
 class RescueEnvelope(PreservationEnvelope):
-    rescue_destination: str = Field(description="Absolute directory containing rescued evidence.")
-    next_action: RescueActionEnvelope = Field(
-        description="Required restart or reconnection handoff."
-    )
+    rescue_destination: str
+    next_action: RescueActionEnvelope
 
 
-class QueryArgumentsEnvelope(StrictModel):
-    evidence_kind: str | None = Field(default=None, description="Unchanged evidence-kind filter.")
-    capability_id: str | None = Field(default=None, description="Unchanged capability filter.")
-    provider_id: str | None = Field(default=None, description="Unchanged provider filter.")
-    input_sha256: str | None = Field(
-        default=None,
-        description="Unchanged contributing-input digest filter.",
-        pattern=LOWERCASE_SHA256_PATTERN,
-    )
-    created_after: datetime | None = Field(
-        default=None, description="Unchanged inclusive lower creation-time bound."
-    )
-    created_before: datetime | None = Field(
-        default=None, description="Unchanged inclusive upper creation-time bound."
-    )
-    page_size: int = Field(description="Unchanged page size.", ge=1, le=200)
-    cursor: str = Field(description="Opaque cursor for the next inventory page.")
-
-
-class QueryNextPageEnvelope(StrictModel):
-    tool: Literal["query_evidence"] = Field(description="Exact MCP tool to call.")
-    arguments: QueryArgumentsEnvelope = Field(description="Complete MCP tool arguments.")
+class EvidenceSummaryEnvelope(StrictModel):
+    evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
+    uri: str
+    evidence_kind: str
+    capability_id: str
+    provider: ProviderIdentity
+    created_at: str
+    coverage: Coverage
+    limitations: list[str]
 
 
 class QueryEnvelope(StrictModel):
-    evidence: list[dict[str, JsonValue]] = Field(
-        description="Matching immutable evidence summaries."
-    )
-    inventory_digest: str = Field(description="Digest of the query's inventory snapshot.")
-    next_page: QueryNextPageEnvelope | None = Field(
-        default=None,
-        description="Exact query_evidence call for the next page, or null when complete.",
-    )
+    status: Literal["complete"] = "complete"
+    inventory_status: Literal["absent", "empty", "available"]
+    match_status: Literal["matched", "no_matches"]
+    inventory_size: int = Field(ge=0)
+    evidence: list[EvidenceSummaryEnvelope]
+    inventory_digest: str
+    next_page: ToolCallEnvelope | None = None
+
+
+class CaptureProviderSummary(StrictModel):
+    id: str
+    artifact_formats: list[str]
+    option_schema: dict[str, JsonValue]
+
+
+class CapabilityListRecord(StrictModel):
+    capability_id: str
+    summary: str
+    accepted_formats: list[str]
+    minimum_sources: int = Field(ge=1)
+    maximum_sources: int = Field(ge=1)
+    capture_providers: list[str]
+    capture_supported: bool
+    experiment_supported: bool
+
+
+class CapabilityDetail(StrictModel):
+    capability_id: str
+    summary: str
+    accepted_formats: list[str]
+    minimum_sources: int = Field(ge=1)
+    maximum_sources: int = Field(ge=1)
+    capture_supported: bool
+    experiment_supported: bool
+    capture_providers: list[CaptureProviderSummary]
+    analysis_option_schema: dict[str, JsonValue]
+    analysis_example: dict[str, JsonValue]
+    capture_example: dict[str, JsonValue] | None = None
+    limitations: list[str] = Field(default_factory=list)
+    routing_exclusions: list[str] = Field(default_factory=list)
+
+
+class CapabilityListEnvelope(StrictModel):
+    status: Literal["complete"] = "complete"
+    mode: Literal["list"]
+    capabilities: list[CapabilityListRecord]
+
+
+class CapabilityGetEnvelope(StrictModel):
+    status: Literal["complete"] = "complete"
+    mode: Literal["get"]
+    capabilities: list[CapabilityDetail]
 
 
 class _ObjectOutcome(RootModel[Any]):
-    """Keep MCP's required object root while validating success and failure variants."""
+    """Keep MCP's required object root while validating result variants."""
 
     @classmethod
     def __get_pydantic_json_schema__(
@@ -178,20 +265,28 @@ class _ObjectOutcome(RootModel[Any]):
 
 
 class PreparationOutcome(_ObjectOutcome):
-    root: PreparationEnvelope | ToolFailureEnvelope
+    root: PreparationEnvelope | RecoverableEnvelope | ToolFailureEnvelope
 
 
 class AnalysisOutcome(_ObjectOutcome):
-    root: AnalysisEnvelope | ToolFailureEnvelope
+    root: AnalysisEnvelope | RecoverableEnvelope | ToolFailureEnvelope
+
+
+class CaptureOutcome(_ObjectOutcome):
+    root: CaptureAnalysisEnvelope | RecoverableEnvelope | ToolFailureEnvelope
 
 
 class PreservationOutcome(_ObjectOutcome):
-    root: PreservationEnvelope | ToolFailureEnvelope
+    root: PreservationEnvelope | RecoverableEnvelope | ToolFailureEnvelope
 
 
 class RescueOutcome(_ObjectOutcome):
-    root: RescueEnvelope | ToolFailureEnvelope
+    root: RescueEnvelope | RecoverableEnvelope | ToolFailureEnvelope
 
 
 class QueryOutcome(_ObjectOutcome):
-    root: QueryEnvelope | ToolFailureEnvelope
+    root: QueryEnvelope | RecoverableEnvelope | ToolFailureEnvelope
+
+
+class CapabilityInspectionOutcome(_ObjectOutcome):
+    root: CapabilityListEnvelope | CapabilityGetEnvelope | ToolFailureEnvelope

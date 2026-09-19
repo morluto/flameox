@@ -27,10 +27,18 @@ SEMANTIC_ORACLE_STDERR_ENV = "FLAMEOX_CAPTURE_STDERR"
 
 class RuntimeFailure(RuntimeError):
     def __init__(
-        self, code: str, message: str, *, details: Mapping[str, Any] | None = None
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: Mapping[str, Any] | None = None,
+        remediation: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.code, self.message, self.details = code, message, dict(details or {})
+        self.retryable = retryable
+        self.remediation = remediation
 
 
 class StrictModel(BaseModel):
@@ -1185,7 +1193,7 @@ CAPABILITIES = tuple(
     )
     + _caps(
         ("static.performance_candidates",),
-        "Normalize bounded source-analysis candidates.",
+        "Normalize performance candidates from an existing SARIF report.",
         ("sarif",),
         StaticArguments,
     )

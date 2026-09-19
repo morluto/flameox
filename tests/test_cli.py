@@ -47,14 +47,18 @@ def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> N
 
     assert summary_result.exit_code == 0, summary_result.output
     summary = json.loads(summary_result.output)
-    assert summary["tool_count"] == 6
+    assert summary["tool_count"] == 7
     assert all(
         "input_schema" not in tool and "output_schema" not in tool for tool in summary["tools"]
     )
     hotspot_capability = next(
-        item for item in summary["capabilities"] if item["id"] == "cpu.hotspots"
+        item for item in summary["capabilities"] if item["capability_id"] == "cpu.hotspots"
     )
-    assert hotspot_capability["capture_providers"] == ["py-spy", "perf", "node-cpu-profile"]
+    assert hotspot_capability["capture_providers"] == [
+        "py-spy",
+        "perf",
+        "node-cpu-profile",
+    ]
     capture = next(tool for tool in summary["tools"] if tool["name"] == "capture_and_analyze")
     assert capture["annotations"]["destructive_hint"] is True
     assert capture["required_inputs"] == ["request"]
@@ -62,8 +66,13 @@ def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> N
     assert exact_result.exit_code == 0, exact_result.output
     exact = json.loads(exact_result.output)
     assert [tool["name"] for tool in exact["tools"]] == ["capture_and_analyze"]
-    request = exact["tools"][0]["input_schema"]["properties"]["request"]
-    assert request["discriminator"]["propertyName"] == "capability_id"
+    input_schema = exact["tools"][0]["input_schema"]
+    request = input_schema["properties"]["request"]
+    assert request["$ref"].endswith("/CaptureRequest")
+    assert (
+        "cpu.hotspots"
+        in input_schema["$defs"]["CaptureRequest"]["properties"]["capability_id"]["enum"]
+    )
 
 
 def test_mcp_inspect_unknown_tool_returns_bounded_recovery() -> None:

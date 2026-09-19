@@ -13,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
+from flameox.mcp.tool_registry import capability_descriptor
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITIES,
@@ -23,7 +24,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     WorkloadBudget,
-    compatible_capture_providers,
 )
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
@@ -633,15 +633,7 @@ def mcp_inspect(
             "tool_count": len(tools),
             "tools": tools,
             "capabilities": [
-                {
-                    "id": capability.id,
-                    "summary": capability.summary,
-                    "formats": list(capability.formats),
-                    "capture_providers": [
-                        provider.id for provider in compatible_capture_providers(capability)
-                    ],
-                }
-                for capability in CAPABILITIES
+                capability_descriptor(capability) for capability in CAPABILITIES
             ],
             "resources": [
                 {
