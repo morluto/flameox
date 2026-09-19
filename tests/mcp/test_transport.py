@@ -16,6 +16,7 @@ from flameox import __version__
 from flameox.mcp import create_server
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.runtime import AnalysisRuntime
+from flameox.runtime_contracts import RuntimeFailure
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 
@@ -117,6 +118,43 @@ def test_mcp_worker_failure_does_not_expose_raw_domain_details(
         assert result.structured_content["code"] == "DECODE_FAILURE"
         assert result.structured_content["details"] == {}
         assert secret not in json.dumps(result.structured_content)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.unit
+def test_mcp_retryable_failure_without_provider_returns_retry_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeFailure(
+            "EXECUTION_TIMEOUT",
+            "Analysis worker timed out.",
+            retryable=True,
+            remediation=("Retry the bounded analysis request.",),
+        )
+
+    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
+
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"path": str(tmp_path / "input.json")}],
+                    }
+                },
+            )
+
+        assert result.is_error is False
+        assert result.structured_content["status"] == "retryable"
+        assert result.structured_content["next_action"] == {
+            "kind": "wait_and_retry",
+            "retry_after_ms": None,
+            "message": "Retry the bounded analysis request.",
+        }
 
     anyio.run(exercise)
 

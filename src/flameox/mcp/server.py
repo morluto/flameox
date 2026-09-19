@@ -41,6 +41,7 @@ from flameox.mcp.result_contracts import (
     PreserveThenAnalyzeAction,
     RecoverableEnvelope,
     ToolFailureEnvelope,
+    WaitAndRetryAction,
 )
 from flameox.mcp.tool_registry import (
     bind_tool_contracts,
@@ -92,19 +93,31 @@ def _failure_result(value: ToolFailureEnvelope) -> CallToolResult:
 def _runtime_failure(error: RuntimeFailure) -> CallToolResult:
     provider_id = error.details.get("provider_id")
     remediation = " ".join(error.remediation) or error.message
-    if error.retryable and isinstance(provider_id, str):
-        value = RecoverableEnvelope(
-            status="retryable",
-            code=error.code,
-            message=error.message,
-            retryable=True,
-            next_action=CallToolAction(
+    if error.retryable:
+        retry_action: CallToolAction | WaitAndRetryAction
+        if isinstance(provider_id, str):
+            retry_action = CallToolAction(
                 kind="call_tool",
                 tool="prepare_providers",
                 arguments=cast(dict[str, JsonValue], {"provider_ids": [provider_id]}),
                 then_retry="capture_and_analyze",
                 message=remediation,
-            ),
+            )
+        else:
+            retry_after_ms = error.details.get("retry_after_ms")
+            retry_action = WaitAndRetryAction(
+                kind="wait_and_retry",
+                retry_after_ms=retry_after_ms
+                if isinstance(retry_after_ms, int) and retry_after_ms >= 0
+                else None,
+                message=remediation,
+            )
+        value = RecoverableEnvelope(
+            status="retryable",
+            code=error.code,
+            message=error.message,
+            retryable=True,
+            next_action=retry_action,
             details=error.details,
         )
         return _text_result(value.model_dump(mode="json"), summary=error.message)
@@ -172,6 +185,21 @@ def _attach_next_page(value: dict[str, Any], request: dict[str, Any] | None) -> 
         "tool": "analyze",
         "arguments": {"request": request, "page_size": limits["max_rows"]},
     }
+
+
+def _workload_status(executions: list[dict[str, Any]]) -> str:
+    workload_returncodes = [
+        execution.get("workload_returncode")
+        for execution in executions
+        if execution.get("returncode_scope") == "workload"
+    ]
+    if any(item is not None and item != 0 for item in workload_returncodes):
+        return "failed"
+    if len(workload_returncodes) == len(executions) and all(
+        item == 0 for item in workload_returncodes
+    ):
+        return "succeeded"
+    return "unknown"
 
 
 def _resource_link(value: Mapping[str, Any]) -> ResourceLink | None:
@@ -517,7 +545,9 @@ class FlameoxServer(Server[AnalysisRuntime]):
             capture = cast(dict[str, Any], value["capture"])
             outcome = cast(dict[str, Any], capture["outcome"])
             capture["status"] = "complete"
-            capture["workload_status"] = outcome["status"]
+            capture["workload_status"] = _workload_status(
+                cast(list[dict[str, Any]], capture["executions"])
+            )
             value["status"] = (
                 "partial"
                 if outcome["status"] != "succeeded" or value.get("analysis_failure") is not None
@@ -536,14 +566,19 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     ),
                 ).model_dump(mode="json")
             elif value["status"] == "partial":
+                workload_status = capture["workload_status"]
+                message = (
+                    "Preserve the observed workload failure for inspection. Reanalysis does "
+                    "not change its exit outcome; a new capture can observe target changes."
+                    if workload_status == "failed"
+                    else "Preserve the capture for inspection. The failure was not attributed "
+                    "to the workload; inspect the collector or experiment outcome before retrying."
+                )
                 value["next_action"] = CallToolAction(
                     kind="call_tool",
                     tool="preserve_evidence",
                     arguments=cast(dict[str, JsonValue], {"analysis_id": value["analysis_id"]}),
-                    message=(
-                        "Preserve the observed workload failure for inspection. Reanalysis does "
-                        "not change its exit outcome; a new capture can observe target changes."
-                    ),
+                    message=message,
                 ).model_dump(mode="json")
             link = _resource_link(value)
             return _text_result(value, summary=_summary(value), resource=link)

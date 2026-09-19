@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 from flameox import __version__
 from flameox.cli import app
 from flameox.repository import EvidenceRepository
-from flameox.runtime_contracts import RequestLimits
+from flameox.runtime_contracts import RequestLimits, RuntimeFailure
 from flameox.setup import CliVersionAdvisory, ExternalRequirement, ProviderPreparation, SetupClient
 
 pytestmark = pytest.mark.integration
@@ -276,6 +276,38 @@ def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["blocks"][1]["rows"][0]["text"] == "cli-capture"
     assert not (tmp_path / ".flameox").exists()
+
+
+def test_capture_failure_keeps_runtime_remediation_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeFailure(
+            "UNAVAILABLE_CAPABILITY",
+            "Host provider is unavailable.",
+            remediation=("Install the host provider and retry capture.",),
+        )
+
+    monkeypatch.setattr("flameox.runtime.AnalysisRuntime.capture_and_analyze", fail)
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["remediation"] == [
+        "Install the host provider and retry capture."
+    ]
 
 
 @pytest.mark.process

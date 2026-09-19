@@ -100,7 +100,12 @@ def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
     if isinstance(error, ValidationError):
         value = {"code": "INVALID_INPUT", "message": str(error), "details": {}}
     else:
-        value = {"code": error.code, "message": error.message, "details": error.details}
+        value = {
+            "code": error.code,
+            "message": error.message,
+            "details": error.details,
+            "remediation": list(error.remediation),
+        }
     typer.echo(json.dumps(value, sort_keys=True), err=True)
     raise typer.Exit(code=1)
 

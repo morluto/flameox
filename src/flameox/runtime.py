@@ -2050,7 +2050,12 @@ class AnalysisRuntime:
                 analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
-            stage.rename(selected)
+            parent_descriptor = os.open(selected.parent, os.O_RDONLY)
+            try:
+                stage.rename(selected)
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
             published = True
             EvidenceRepository(selected, f"{self.session_id}-rescue").read(
                 str(rescued["evidence_id"])

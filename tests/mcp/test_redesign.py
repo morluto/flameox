@@ -76,6 +76,29 @@ def test_query_accepts_historical_capability_ids(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_analyze_accepts_path_source_with_advertised_default_kind(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("[1]")
+
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"path": str(artifact)}],
+                    }
+                },
+            )
+
+        assert result.is_error is False
+        assert result.structured_content["blocks"][1]["rows"][0]["value"] == 1
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
 def test_capability_discovery_requires_an_actionable_mode(tmp_path: Path) -> None:
     async def exercise() -> None:
         async with Client(create_server(evidence_directory=tmp_path / "store")) as client:

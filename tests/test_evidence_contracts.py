@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -138,6 +140,35 @@ def test_rescue_accepts_an_agent_selected_symlink_parent(tmp_path: Path) -> None
         rescued = runtime.rescue_evidence(result["analysis_id"], str(selected))
         assert rescued["rescue_destination"] == str(selected)
         assert (physical_parent / "rescue" / "repository.json").is_file()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_fsyncs_parent_after_publishing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    destination = parent / "rescue"
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+    fsynced_directories: list[tuple[int, int]] = []
+    real_fsync = os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        status = os.fstat(descriptor)
+        if stat.S_ISDIR(status.st_mode):
+            fsynced_directories.append((status.st_dev, status.st_ino))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    try:
+        runtime.rescue_evidence(result["analysis_id"], str(destination))
+        parent_status = parent.stat()
+        assert (parent_status.st_dev, parent_status.st_ino) in fsynced_directories
     finally:
         runtime.close()
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import (
     AfterValidator,
+    BeforeValidator,
     ConfigDict,
     Field,
     GetJsonSchemaHandler,
@@ -88,7 +90,18 @@ class McpPathSource(PathSource):
     )
 
 
-McpSource = Annotated[McpPathSource | EvidenceSource, Field(discriminator="kind")]
+def _normalize_mcp_source_kind(value: Any) -> Any:
+    if isinstance(value, Mapping) and "kind" not in value:
+        value = dict(value)
+        value["kind"] = "evidence" if "evidence_id" in value else "path"
+    return value
+
+
+McpSource = Annotated[
+    McpPathSource | EvidenceSource,
+    Field(discriminator="kind"),
+    BeforeValidator(_normalize_mcp_source_kind),
+]
 
 
 class AnalysisRequest(StrictModel):

@@ -125,7 +125,7 @@ class CaptureOutcomeEnvelope(StrictModel):
 
 class CaptureDetailsEnvelope(StrictModel):
     status: Literal["complete"]
-    workload_status: Literal["succeeded", "failed"]
+    workload_status: Literal["succeeded", "failed", "unknown"]
     mode: Literal["single", "experiment"]
     requested_capability_id: str
     executions: list[CaptureExecution]

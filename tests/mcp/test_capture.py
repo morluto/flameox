@@ -187,6 +187,44 @@ def test_mcp_experiment_design_alone_selects_paired_execution(tmp_path: Path) ->
 
 
 @pytest.mark.integration
+@pytest.mark.process
+def test_mcp_oracle_failure_does_not_become_a_workload_failure(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "capture_and_analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "provider": {"kind": "direct"},
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('captured')"],
+                            "cwd": str(tmp_path),
+                        },
+                        "experiment": {
+                            "cases": [{"name": "baseline"}, {"name": "candidate"}],
+                            "blocks": 1,
+                            "seed": 7,
+                            "metric": "wall_time_ns",
+                            "estimand": "median_difference",
+                            "practical_threshold": 0,
+                            "semantic_oracle": [sys.executable, "-c", "raise SystemExit(1)"],
+                        },
+                    }
+                },
+            )
+
+        assert result.is_error is False
+        value = result.structured_content
+        assert value["status"] == "partial"
+        assert value["capture"]["outcome"]["status"] == "failed"
+        assert value["capture"]["workload_status"] == "succeeded"
+        assert all(item["workload_returncode"] == 0 for item in value["capture"]["executions"])
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("unsupported", ["execution", "experiment"])
 def test_mcp_rejects_removed_or_incompatible_execution_fields_before_capture(
     tmp_path: Path, unsupported: str
