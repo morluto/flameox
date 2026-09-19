@@ -37,10 +37,13 @@ def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if sys.platform == "darwin":
+        monkeypatch.setattr(
+            AnalysisRuntime, "_descriptor_path", staticmethod(lambda _descriptor: tmp_path)
+        )
     artifact = tmp_path / "input.json"
     artifact.write_text('[{"value": 1}]')
     configured = tmp_path / "configured-store"

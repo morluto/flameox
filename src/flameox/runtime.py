@@ -2016,7 +2016,11 @@ class AnalysisRuntime:
             )
         except FileNotFoundError:
             destination_status = None
-        if destination_status is not None and previous is None:
+        if (
+            destination_status is not None
+            and previous is None
+            and not self._rescue_repository_marker_exists(parent_descriptor, selected.name)
+        ):
             raise RuntimeFailure(
                 "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
             )
@@ -2151,6 +2155,21 @@ class AnalysisRuntime:
                 "Rescue destination parent must exist and contain no symbolic links",
             ) from exc
         return descriptor
+
+    @staticmethod
+    def _rescue_repository_marker_exists(parent_descriptor: int, name: str) -> bool:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            destination_descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except OSError:
+            return False
+        try:
+            os.stat("repository.json", dir_fd=destination_descriptor, follow_symlinks=False)
+        except OSError:
+            return False
+        finally:
+            os.close(destination_descriptor)
+        return True
 
     @staticmethod
     def _descriptor_path(descriptor: int) -> Path:
