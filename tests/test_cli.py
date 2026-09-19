@@ -605,7 +605,6 @@ def test_analyze_unsupported_format_returns_accepted_formats(tmp_path: Path) -> 
     assert failure["details"]["recovery"].endswith("`flameox mcp inspect --tool analyze`.")
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: Path) -> None:
     configured = tmp_path / "flameox-data"
     configured.mkdir()

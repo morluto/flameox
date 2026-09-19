@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,12 +37,8 @@ def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    if sys.platform == "darwin":
-        monkeypatch.setattr(
-            AnalysisRuntime, "_descriptor_path", staticmethod(lambda _descriptor: tmp_path)
-        )
     artifact = tmp_path / "input.json"
     artifact.write_text('[{"value": 1}]')
     configured = tmp_path / "configured-store"
@@ -101,7 +96,6 @@ def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_rescue_repository_failures_identify_the_alternate_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -130,65 +124,48 @@ def test_rescue_repository_failures_identify_the_alternate_store(
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
-def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
+def test_rescue_accepts_an_agent_selected_symlink_parent(tmp_path: Path) -> None:
+    physical_parent = tmp_path / "physical-parent"
+    physical_parent.mkdir()
+    selected_parent = tmp_path / "selected-parent"
+    selected_parent.symlink_to(physical_parent, target_is_directory=True)
+    selected = selected_parent / "rescue"
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(selected))
+        assert rescued["rescue_destination"] == str(selected)
+        assert (physical_parent / "rescue" / "repository.json").is_file()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_publication_failure_does_not_leave_staging_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact = tmp_path / "input.json"
     artifact.write_text("[]")
     parent = tmp_path / "parent"
     parent.mkdir()
-    moved_parent = tmp_path / "moved-parent"
-    replacement_destination = parent / "rescue"
+    destination = parent / "rescue"
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
     result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-    original_preserve = EvidenceRepository.preserve
 
-    def replace_parent(repository: EvidenceRepository, **kwargs: Any) -> dict[str, Any]:
-        parent.rename(moved_parent)
-        parent.symlink_to(moved_parent, target_is_directory=True)
-        return original_preserve(repository, **kwargs)
+    def fail(_repository: EvidenceRepository, **_kwargs: Any) -> dict[str, Any]:
+        raise RepositoryError("REPOSITORY_IO_FAILURE", "publication failed")
 
-    monkeypatch.setattr(EvidenceRepository, "preserve", replace_parent)
+    monkeypatch.setattr(EvidenceRepository, "preserve", fail)
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.rescue_evidence(result["analysis_id"], str(replacement_destination))
+            runtime.rescue_evidence(result["analysis_id"], str(destination))
         assert failure.value.code == "REPOSITORY_IO_FAILURE"
-        assert parent.is_symlink()
-        assert (moved_parent / "rescue" / "repository.json").is_file()
+        assert not destination.exists()
+        assert not list(parent.glob(".flameox-rescue-*"))
     finally:
         runtime.close()
-
-
-@pytest.mark.unit
-@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fixture")
-def test_rescue_rejects_ordinary_path_fallback_when_descriptor_paths_are_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import fcntl
-
-    descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    original_stat = Path.stat
-
-    def descriptor_paths_unavailable(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-        if path.parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
-            raise OSError("descriptor paths unavailable")
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", descriptor_paths_unavailable)
-    monkeypatch.setattr("flameox.runtime.sys.platform", "darwin")
-    monkeypatch.setattr(fcntl, "F_GETPATH", 50, raising=False)
-    monkeypatch.setattr(
-        fcntl,
-        "fcntl",
-        lambda *_args: os.fsencode(tmp_path) + b"\0",
-    )
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            AnalysisRuntime._descriptor_path(descriptor)
-        assert failure.value.code == "UNAVAILABLE_CAPABILITY"
-    finally:
-        os.close(descriptor)
 
 
 @pytest.mark.unit

@@ -35,16 +35,14 @@ An unsupported artifact format similarly returns the detected or declared format
 accepted formats, and its exact analysis-tool name before provider decoding begins.
 
 `rescue_evidence` accepts one live session analysis and an agent-selected explicit absolute path
-below an existing, symlink-free parent to a distinct new directory. It anchors publication to an
-open parent directory, publishes the normal immutable evidence format there, and returns the
+below an existing parent to a distinct new directory. It stages the normal immutable evidence
+format beside that destination, publishes it with a filesystem rename, and returns the
 `FLAMEOX_DATA_DIR` restart/reconnect handoff. It does not repair or modify the configured repository,
 change the active runtime store, release the session handle, or expose the alternate store through
 the active server's resource template. Repeating the same rescue request during the live session
-validates the published evidence and returns the original handoff. Secure descriptor-anchored
-rescue publication currently requires a POSIX host with a usable descriptor-backed directory
-alias. This is an internal safety mechanism, not a destination convention: callers may choose any
-otherwise-valid absolute destination. Hosts without that mechanism return
-`UNAVAILABLE_CAPABILITY` before analysis or workload execution.
+validates the published evidence and returns the original handoff. Publication follows ordinary
+local filesystem path semantics; Flameox does not impose a workspace or repository-root policy on
+the selected parent.
 
 The one-shot CLI mirrors this lifecycle with `analyze --rescue-to ABSOLUTE_PATH` and
 `capture --rescue-to ABSOLUTE_PATH`. It requires a destination that does not exist and preflights

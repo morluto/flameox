@@ -323,7 +323,6 @@ def test_mcp_handoffs_are_derived_while_the_runtime_lock_is_held(
     assert observations == [True, True, True]
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
     store = tmp_path / "store"
     rescue = tmp_path / "rescue"
@@ -469,7 +468,6 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path) -> None:
     configured = tmp_path / "configured"
     configured.mkdir()

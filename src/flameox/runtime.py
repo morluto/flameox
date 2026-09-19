@@ -1898,25 +1898,20 @@ class AnalysisRuntime:
     def preflight_rescue_destination(self, destination: str) -> str:
         """Validate a new rescue store before an expensive request begins."""
         selected = self._rescue_destination(destination)
-        parent_descriptor = self._open_rescue_parent(selected.parent)
         try:
-            try:
-                os.stat(selected.name, dir_fd=parent_descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                # Rescue publication must remain anchored to the directory opened above.
-                # Check that the host exposes a usable descriptor-backed directory path
-                # before analysis or a capture workload begins.
-                self._descriptor_path(parent_descriptor)
-                return str(selected)
-            raise RuntimeFailure(
-                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
-            )
+            parent_is_directory = selected.parent.is_dir()
+            destination_exists = os.path.lexists(selected)
         except OSError as exc:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Rescue destination could not be validated."
             ) from exc
-        finally:
-            os.close(parent_descriptor)
+        if not parent_is_directory:
+            raise RuntimeFailure("INVALID_INPUT", "Rescue destination parent must exist")
+        if destination_exists:
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
+            )
+        return str(selected)
 
     def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
         selected = self._rescue_destination(destination)
@@ -1930,14 +1925,8 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
-        parent_descriptor = self._open_rescue_parent(selected.parent)
         try:
-            result = self._rescue_to_open_parent(
-                parent_descriptor,
-                selected=selected,
-                cached=cached,
-                previous=previous,
-            )
+            result = self._rescue_to_destination(selected, cached=cached, previous=previous)
         except RepositoryError as exc:
             raise self._repository_failure(
                 exc,
@@ -1948,8 +1937,6 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Session evidence could not be rescued."
             ) from exc
-        finally:
-            os.close(parent_descriptor)
         if cached is not None:
             self.analyses.move_to_end(analysis_id)
         rescues[rescue_key] = result
@@ -2002,31 +1989,19 @@ class AnalysisRuntime:
             or physical_second.is_relative_to(physical_first)
         )
 
-    def _rescue_to_open_parent(
+    def _rescue_to_destination(
         self,
-        parent_descriptor: int,
-        *,
         selected: Path,
+        *,
         cached: CachedAnalysis | None,
         previous: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        try:
-            destination_status = os.stat(
-                selected.name, dir_fd=parent_descriptor, follow_symlinks=False
-            )
-        except FileNotFoundError:
-            destination_status = None
-        if (
-            destination_status is not None
-            and previous is None
-            and not self._rescue_repository_marker_exists(parent_descriptor, selected.name)
-        ):
+        destination_exists = os.path.lexists(selected)
+        if destination_exists and previous is None and not (selected / "repository.json").is_file():
             raise RuntimeFailure(
                 "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
             )
-        anchored_parent = self._descriptor_path(parent_descriptor)
-        anchored_destination = anchored_parent / selected.name
-        alternate = EvidenceRepository(anchored_destination, f"{self.session_id}-rescue")
+        alternate = EvidenceRepository(selected, f"{self.session_id}-rescue")
         durable = self._durable_analysis(cached.result) if cached is not None else None
         if cached is not None and durable is not None:
             expected_id = alternate.expected_evidence_id(
@@ -2041,44 +2016,20 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
-        if destination_status is not None:
+        if destination_exists:
             manifest = alternate.read(expected_id)
             result = self._rescue_result(expected_id, len(manifest["body"]["artifacts"]), selected)
         else:
             result = self._publish_rescue_stage(
-                parent_descriptor,
-                anchored_parent=anchored_parent,
-                anchored_destination=anchored_destination,
                 selected=selected,
                 cached=cached,
                 durable=durable,
-            )
-        anchored_status = os.fstat(parent_descriptor)
-        try:
-            final_parent_descriptor = self._open_rescue_parent(selected.parent)
-        except RuntimeFailure as exc:
-            raise RuntimeFailure(
-                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
-            ) from exc
-        try:
-            final_status = os.fstat(final_parent_descriptor)
-        finally:
-            os.close(final_parent_descriptor)
-        if (anchored_status.st_dev, anchored_status.st_ino) != (
-            final_status.st_dev,
-            final_status.st_ino,
-        ):
-            raise RuntimeFailure(
-                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
             )
         return result
 
     def _publish_rescue_stage(
         self,
-        parent_descriptor: int,
         *,
-        anchored_parent: Path,
-        anchored_destination: Path,
         selected: Path,
         cached: CachedAnalysis | None,
         durable: Mapping[str, Any] | None,
@@ -2089,33 +2040,27 @@ class AnalysisRuntime:
                 "The session analysis is missing and the rescued evidence is unavailable",
             )
         stage_name = f".flameox-rescue-{secrets.token_hex(12)}"
-        os.mkdir(stage_name, mode=0o700, dir_fd=parent_descriptor)
+        stage = selected.parent / stage_name
+        stage.mkdir(mode=0o700)
+        published = False
         try:
-            rescued = EvidenceRepository(
-                anchored_parent / stage_name, f"{self.session_id}-rescue"
-            ).preserve(
+            rescued = EvidenceRepository(stage, f"{self.session_id}-rescue").preserve(
                 manifest_body=cached.manifest_body,
                 sources=cached.sources,
                 analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
-            os.rename(
-                stage_name,
-                selected.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
-            stage_name = ""
-            os.fsync(parent_descriptor)
-            EvidenceRepository(anchored_destination, f"{self.session_id}-rescue").read(
+            stage.rename(selected)
+            published = True
+            EvidenceRepository(selected, f"{self.session_id}-rescue").read(
                 str(rescued["evidence_id"])
             )
             return self._rescue_result(
                 str(rescued["evidence_id"]), int(rescued["artifact_count"]), selected
             )
         finally:
-            if stage_name:
-                shutil.rmtree(anchored_parent / stage_name, ignore_errors=True)
+            if not published:
+                shutil.rmtree(stage, ignore_errors=True)
 
     @staticmethod
     def _rescue_result(evidence_id: str, artifact_count: int, destination: Path) -> dict[str, Any]:
@@ -2133,57 +2078,6 @@ class AnalysisRuntime:
                 ),
             },
         }
-
-    @staticmethod
-    def _open_rescue_parent(path: Path) -> int:
-        if os.name == "nt":
-            raise RuntimeFailure(
-                "UNAVAILABLE_CAPABILITY",
-                "Secure rescue publication is unavailable on Windows hosts.",
-            )
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path.anchor, flags)
-        try:
-            for part in path.parts[1:]:
-                child = os.open(part, flags, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = child
-        except OSError as exc:
-            os.close(descriptor)
-            raise RuntimeFailure(
-                "INVALID_INPUT",
-                "Rescue destination parent must exist and contain no symbolic links",
-            ) from exc
-        return descriptor
-
-    @staticmethod
-    def _rescue_repository_marker_exists(parent_descriptor: int, name: str) -> bool:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            destination_descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-        except OSError:
-            return False
-        try:
-            os.stat("repository.json", dir_fd=destination_descriptor, follow_symlinks=False)
-        except OSError:
-            return False
-        finally:
-            os.close(destination_descriptor)
-        return True
-
-    @staticmethod
-    def _descriptor_path(descriptor: int) -> Path:
-        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
-            candidate = root / str(descriptor)
-            try:
-                if os.path.samestat(candidate.stat(), os.fstat(descriptor)):
-                    return candidate
-            except OSError:
-                continue
-        raise RuntimeFailure(
-            "UNAVAILABLE_CAPABILITY",
-            "Secure rescue publication requires descriptor-backed directory paths",
-        )
 
     @staticmethod
     def _terminated_limit(
