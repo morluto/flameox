@@ -84,7 +84,7 @@ PreparableProviderId = Annotated[
 class McpPathSource(PathSource):
     format: ArtifactFormat | None = Field(
         default=None,
-        description="Explicit native artifact format; omit only when detection is unambiguous.",
+        description="Explicit native artifact format. Omission requires unambiguous detection.",
     )
 
 
@@ -135,7 +135,9 @@ class CaptureRequest(StrictModel):
 
 class PrepareProvidersArguments(StrictModel):
     provider_ids: list[PreparableProviderId] = Field(
-        description="Complete desired provider set.", min_length=1, max_length=16
+        description="Provider IDs to prepare together in one environment.",
+        min_length=1,
+        max_length=16,
     )
     timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
 
@@ -190,7 +192,11 @@ class PreserveArguments(StrictModel):
 
 
 class RescueArguments(PreserveArguments):
-    destination: str = Field(min_length=1, max_length=4096)
+    destination: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Agent-selected absolute path for a distinct new evidence directory.",
+    )
 
 
 class QueryArguments(StrictModel):

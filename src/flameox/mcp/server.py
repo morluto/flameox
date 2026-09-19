@@ -541,8 +541,8 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     tool="preserve_evidence",
                     arguments=cast(dict[str, JsonValue], {"analysis_id": value["analysis_id"]}),
                     message=(
-                        "Preserve and inspect the observed workload failure. Fix the target "
-                        "before recapturing; reanalysis cannot change its exit outcome."
+                        "Preserve the observed workload failure for inspection. Reanalysis does "
+                        "not change its exit outcome; a new capture can observe target changes."
                     ),
                 ).model_dump(mode="json")
             link = _resource_link(value)

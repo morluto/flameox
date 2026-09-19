@@ -2,42 +2,38 @@
 
 SERVER_DESCRIPTION = "Bounded local runtime evidence over explicit artifacts and process targets."
 
-SERVER_INSTRUCTIONS = """Use inspect_capabilities before analyze or capture_and_analyze when the
-capability, artifact format, provider, or option contract is uncertain. analyze reads existing
-native artifacts; it never captures a process. capture_and_analyze executes the explicit target and
-then analyzes the captured native artifacts. static.performance_candidates consumes an existing
-SARIF report and never scans source files. Session results are ephemeral until preserve_evidence is
-called. A partial capture result is usable evidence: inspect its typed capture outcome and
-analysis_failure, and do not rerun a completed capture merely because analysis failed. If a missing
-managed provider returns a retryable action, call prepare_providers with the complete desired set,
-preserve any live results, then reconnect with the returned launcher. Profiles are exploratory;
-confirm causality with representative paired experiments and a semantic oracle."""
+SERVER_INSTRUCTIONS = """Flameox analyzes explicit local artifacts and captures explicit process
+targets. inspect_capabilities reports the formats, providers, option schemas, examples, and limits
+for a selected capability. analyze never executes a target; capture_and_analyze does.
+static.performance_candidates consumes SARIF rather than source files. Session results remain
+ephemeral until preserved. Partial, retryable, and unavailable results are typed product states;
+their next_action describes an executable recovery when one exists. Profiles are exploratory
+evidence rather than proof of causality."""
 
 TOOL_DESCRIPTIONS = {
     "inspect_capabilities": (
-        "Discover accepted artifact formats, source cardinality, compatible capture providers, "
-        "and exact option schemas. Call this before analysis when selection is uncertain."
+        "List capabilities by format or capture support, or return one capability's accepted "
+        "formats, source cardinality, compatible providers, exact schemas, and examples."
     ),
     "prepare_providers": (
-        "Prepare Flameox-managed provider dependencies and report host requirements. Use only "
-        "after a retryable provider response or when preflighting a known provider set."
+        "Prepare the requested Flameox-managed provider dependencies and report unresolved host "
+        "or workload-interpreter requirements plus any reconnect handoff."
     ),
     "analyze": (
-        "Analyze existing native artifacts without executing a workload. Use inspect_capabilities "
-        "for exact formats and options. For static.performance_candidates, pass SARIF; source "
-        "files are not scanned."
+        "Analyze explicit existing native artifacts without executing a process. Capability "
+        "discovery supplies accepted formats and the exact options schema."
     ),
     "capture_and_analyze": (
-        "Execute one explicit argv target with a compatible provider, preserve native capture "
-        "diagnostics, and analyze its artifacts. Use analyze instead when artifacts already exist."
+        "Execute one explicit argv target with a compatible provider, retain native capture "
+        "diagnostics, and analyze the resulting artifacts."
     ),
     "preserve_evidence": (
-        "Publish one session analysis and its native artifacts as immutable evidence. Use before "
-        "reconnect or shutdown when the result must outlive this server process."
+        "Publish one session analysis and its native artifacts as immutable evidence in the "
+        "active evidence store."
     ),
     "rescue_evidence": (
-        "Publish one live session analysis into a distinct empty evidence directory when the "
-        "configured store cannot accept it, then return the required restart handoff."
+        "Publish one live session analysis into an agent-selected distinct new evidence directory "
+        "and return a restart or reconnect handoff without changing the active store."
     ),
     "query_evidence": (
         "Search immutable evidence manifests with typed rows. Distinguishes an absent "

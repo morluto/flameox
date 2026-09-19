@@ -34,9 +34,9 @@ return the requested value, bounded valid choices, and the exact discovery comma
 An unsupported artifact format similarly returns the detected or declared format, the capability's
 accepted formats, and its exact analysis-tool name before provider decoding begins.
 
-`rescue_evidence` accepts one live session analysis and an explicit absolute path below an existing,
-symlink-free parent to a distinct new directory. It anchors publication to an open parent
-directory, publishes the normal immutable evidence format there, and returns the
+`rescue_evidence` accepts one live session analysis and an agent-selected explicit absolute path
+below an existing, symlink-free parent to a distinct new directory. It anchors publication to an
+open parent directory, publishes the normal immutable evidence format there, and returns the
 `FLAMEOX_DATA_DIR` restart/reconnect handoff. It does not repair or modify the configured repository,
 change the active runtime store, release the session handle, or expose the alternate store through
 the active server's resource template. Repeating the same rescue request during the live session
