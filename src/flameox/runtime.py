@@ -130,6 +130,7 @@ class CachedAnalysis:
     sources: list[NativeSource]
     manifest_body: dict[str, Any]
     analysis_sources: list[NativeSource] | None = None
+    analysis_source_indices: list[int] | None = None
     preserved: dict[str, Any] | None = None
 
 
@@ -296,7 +297,7 @@ class AnalysisRuntime:
                 analysis_id
                 for analysis_id, cached in self.analyses.items()
                 if not any(
-                    source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                    self._paths_overlap(source.path, root)
                     for source in cached.sources
                     for root in protected_roots
                 )
@@ -315,20 +316,25 @@ class AnalysisRuntime:
             try:
                 relative = source.path.relative_to(self.scratch)
             except ValueError:
-                continue
+                try:
+                    relative = source.path.resolve(strict=False).relative_to(
+                        self.scratch.resolve(strict=False)
+                    )
+                except ValueError:
+                    continue
             if relative.parts and relative.parts[0].startswith("capture-"):
                 capture_roots.add(self.scratch / relative.parts[0])
             elif len(relative.parts) >= 2 and relative.parts[0] == "evidence-sources":
                 capture_roots.add(self.scratch / relative.parts[0] / relative.parts[1])
         for root in capture_roots:
             retained = any(
-                source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                self._paths_overlap(source.path, root)
                 for analysis in self.analyses.values()
                 if analysis is not cached
                 for source in analysis.sources
             )
             if not retained and not any(
-                path.is_relative_to(root) or root.is_relative_to(path)
+                self._paths_overlap(path, root)
                 for path in self._protected_sources | self._capture_reservations.keys()
             ):
                 shutil.rmtree(root, ignore_errors=True)
@@ -377,9 +383,7 @@ class AnalysisRuntime:
                 (
                     key
                     for key, path in self.scratch_artifacts.items()
-                    if not any(
-                        path.is_relative_to(root) or root.is_relative_to(path) for root in protected
-                    )
+                    if not any(self._paths_overlap(path, root) for root in protected)
                 ),
                 None,
             )
@@ -635,6 +639,7 @@ class AnalysisRuntime:
                 resolved,
                 body,
                 analysis_sources=resolved,
+                analysis_source_indices=list(range(len(resolved))),
             ),
         )
         return self._copy_result(validated_result)
@@ -1263,6 +1268,9 @@ class AnalysisRuntime:
                         "process-tree execution evidence."
                     )
                 cached.sources = captured
+                cached.analysis_source_indices = self._captured_source_indices(
+                    captured, selected_sources
+                )
                 cached.manifest_body["capture_request"] = {
                     "target": target.model_dump(mode="json"),
                     "mode": mode,
@@ -1424,7 +1432,17 @@ class AnalysisRuntime:
             "coverage": validated["coverage"],
             "limitations": validated["limitations"],
         }
-        self._cache_analysis(analysis_id, CachedAnalysis(validated, captured, manifest_body))
+        analysis_source_indices = self._captured_source_indices(captured, analysis_sources)
+        self._cache_analysis(
+            analysis_id,
+            CachedAnalysis(
+                validated,
+                captured,
+                manifest_body,
+                analysis_sources=analysis_sources,
+                analysis_source_indices=analysis_source_indices,
+            ),
+        )
         return self._copy_result(validated)
 
     def _finalize_capture_result(
@@ -1696,6 +1714,21 @@ class AnalysisRuntime:
         ]
 
     @staticmethod
+    def _captured_source_indices(
+        captured: list[NativeSource], analysis_sources: list[NativeSource]
+    ) -> list[int]:
+        """Retain relational identity even when paths or content identities alias."""
+
+        return [
+            next(
+                index
+                for index, captured_source in enumerate(captured)
+                if captured_source is analysis_source
+            )
+            for analysis_source in analysis_sources
+        ]
+
+    @staticmethod
     def _capture_arguments(
         provider_id: str, arguments: Mapping[str, Any], *, capability_id: str
     ) -> CaptureArguments:
@@ -1758,6 +1791,7 @@ class AnalysisRuntime:
                 cached.preserved = self.repository.preserve(
                     manifest_body=cached.manifest_body,
                     sources=cached.sources,
+                    analysis_source_indices=cached.analysis_source_indices,
                     analysis=self._durable_analysis(cached.result),
                 )
                 self._release_analysis_scratch(cached)
@@ -1926,7 +1960,15 @@ class AnalysisRuntime:
 
     @staticmethod
     def _paths_overlap(first: Path, second: Path) -> bool:
-        return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+        if first == second or first.is_relative_to(second) or second.is_relative_to(first):
+            return True
+        physical_first = first.resolve(strict=False)
+        physical_second = second.resolve(strict=False)
+        return (
+            physical_first == physical_second
+            or physical_first.is_relative_to(physical_second)
+            or physical_second.is_relative_to(physical_first)
+        )
 
     def _rescue_to_open_parent(
         self,
@@ -1944,6 +1986,7 @@ class AnalysisRuntime:
             expected_id = alternate.expected_evidence_id(
                 manifest_body=cached.manifest_body,
                 sources=cached.sources,
+                analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
         elif previous is not None:
@@ -2021,6 +2064,7 @@ class AnalysisRuntime:
             ).preserve(
                 manifest_body=cached.manifest_body,
                 sources=cached.sources,
+                analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
             os.rename(
@@ -2089,6 +2133,16 @@ class AnalysisRuntime:
                     return candidate
             except OSError:
                 continue
+        if sys.platform == "darwin":
+            import fcntl
+
+            try:
+                raw_path = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+                candidate = Path(os.fsdecode(raw_path.split(b"\0", 1)[0]))
+                if os.path.samestat(candidate.stat(), os.fstat(descriptor)):
+                    return candidate
+            except OSError:
+                pass
         raise RuntimeFailure(
             "UNAVAILABLE_CAPABILITY",
             "Secure rescue publication requires descriptor-backed directory paths",
@@ -2313,7 +2367,7 @@ class AnalysisRuntime:
                     self._protected_sources.add(path)
                     if not path.exists():
                         needed[path] = item
-            elif item.path.is_relative_to(self.scratch):
+            elif item.path.resolve(strict=False).is_relative_to(self.scratch.resolve(strict=False)):
                 self._protected_sources.add(item.path)
         self._prune_scratch(
             reserved_bytes=sum(item.source.size_bytes for item in needed.values()),
@@ -3144,14 +3198,11 @@ class AnalysisRuntime:
     def _release_capture_scope(self, root: Path, failed: bool) -> None:
         if failed:
             for analysis_id, cached in list(self.analyses.items()):
-                if any(
-                    source.path.is_relative_to(root) or root.is_relative_to(source.path)
-                    for source in cached.sources
-                ):
+                if any(self._paths_overlap(source.path, root) for source in cached.sources):
                     del self.analyses[analysis_id]
         self._capture_reservations.pop(root, None)
         if not any(
-            source.path.is_relative_to(root) or root.is_relative_to(source.path)
+            self._paths_overlap(source.path, root)
             for cached in self.analyses.values()
             if cached.preserved is None
             for source in cached.sources

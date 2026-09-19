@@ -159,10 +159,11 @@ class EvidenceRepository:
         *,
         manifest_body: Mapping[str, Any],
         sources: Sequence[NativeSource],
+        analysis_source_indices: Sequence[int] | None,
         analysis: Mapping[str, Any],
     ) -> dict[str, Any]:
         artifacts, _layout, artifact_refs, analysis_bytes, manifest = self._publication_plan(
-            manifest_body, sources, analysis
+            manifest_body, sources, analysis_source_indices, analysis
         )
         self.initialize()
         published_refs = [self._publish_artifact(item) for item in artifacts]
@@ -197,18 +198,26 @@ class EvidenceRepository:
         *,
         manifest_body: Mapping[str, Any],
         sources: Sequence[NativeSource],
+        analysis_source_indices: Sequence[int] | None,
         analysis: Mapping[str, Any],
     ) -> str:
         """Derive a publication identity without initializing or writing the repository."""
-        return str(self._publication_plan(manifest_body, sources, analysis)[4]["evidence_id"])
+        return str(
+            self._publication_plan(manifest_body, sources, analysis_source_indices, analysis)[4][
+                "evidence_id"
+            ]
+        )
 
     def _publication_plan(
         self,
         manifest_body: Mapping[str, Any],
         sources: Sequence[NativeSource],
+        analysis_source_indices: Sequence[int] | None,
         analysis: Mapping[str, Any],
     ) -> tuple[list[NativeSource], SourceLayout, list[dict[str, Any]], bytes, dict[str, Any]]:
-        artifacts, layout = self._publication_layout(sources, manifest_body)
+        artifacts, layout = self._publication_layout(
+            sources, manifest_body, analysis_source_indices
+        )
         artifact_refs = [
             {
                 "format_version": REPOSITORY_FORMAT,
@@ -242,7 +251,9 @@ class EvidenceRepository:
 
     @staticmethod
     def _publication_layout(
-        sources: Sequence[NativeSource], body: Mapping[str, Any]
+        sources: Sequence[NativeSource],
+        body: Mapping[str, Any],
+        analysis_source_indices: Sequence[int] | None,
     ) -> tuple[list[NativeSource], SourceLayout]:
         groups: list[list[tuple[str | None, NativeSource]]] = []
         for source in sources:
@@ -308,22 +319,28 @@ class EvidenceRepository:
                 )
             )
         request = AnalysisRequest.model_validate(body["analysis_request"])
-        indices = []
-        for item in request.inputs:
-            matched_index = next(
-                (
-                    index
-                    for index, source in enumerate(sources)
-                    if (str(source.path), source.sha256, source.format, source.producer)
-                    == (item.path, item.sha256, item.format, item.producer)
-                ),
-                None,
+        indices = list(
+            analysis_source_indices if analysis_source_indices is not None else range(len(sources))
+        )
+        if len(indices) != len(request.inputs):
+            raise RepositoryError(
+                "MISSING_OR_CHANGED_INPUT",
+                "Analysis source mapping does not match the analyzed input count.",
             )
-            if matched_index is None:
+        for item, source_index in zip(request.inputs, indices, strict=True):
+            if not 0 <= source_index < len(sources):
+                raise RepositoryError(
+                    "MISSING_OR_CHANGED_INPUT", "Analysis source mapping is out of range."
+                )
+            source = sources[source_index]
+            if (source.sha256, source.format, source.producer) != (
+                item.sha256,
+                item.format,
+                item.producer,
+            ):
                 raise RepositoryError(
                     "MISSING_OR_CHANGED_INPUT", "Analysis input is absent from preserved sources."
                 )
-            indices.append(matched_index)
         return artifacts, SourceLayout(sources=logical, analysis_sources=indices)
 
     def read(self, evidence_id: str) -> dict[str, Any]:
