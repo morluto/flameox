@@ -632,9 +632,7 @@ def mcp_inspect(
         catalog = {
             "tool_count": len(tools),
             "tools": tools,
-            "capabilities": [
-                capability_descriptor(capability) for capability in CAPABILITIES
-            ],
+            "capabilities": [capability_descriptor(capability) for capability in CAPABILITIES],
             "resources": [
                 {
                     "name": resource["name"],

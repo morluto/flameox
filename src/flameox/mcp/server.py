@@ -593,9 +593,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
             detail = CapabilityDetail.model_validate(
                 capability_detail(CAPABILITY_BY_ID[selected.capability_id])
             )
-            value = CapabilityGetEnvelope(mode="get", capabilities=[detail]).model_dump(
-                mode="json"
-            )
+            value = CapabilityGetEnvelope(mode="get", capabilities=[detail]).model_dump(mode="json")
             return _text_result(value, summary="Found 1 matching capability contract.")
 
         capabilities: list[CapabilityListRecord] = []

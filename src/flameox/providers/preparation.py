@@ -64,9 +64,7 @@ class ProviderDependencies:
             "The prepared collector is missing or changed; prepare py-spy again before capture.",
             retryable=True,
             details={"provider_id": "py-spy"},
-            remediation=(
-                "Prepare py-spy again, reconnect if directed, then retry capture.",
-            ),
+            remediation=("Prepare py-spy again, reconnect if directed, then retry capture.",),
         )
 
     def verify_capture_binding(self, provider_id: str, binding: ResolvedExecutable) -> None:

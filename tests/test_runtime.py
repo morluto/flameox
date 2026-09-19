@@ -861,9 +861,7 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
             }
             layout = manifest["body"]["source_layout"]
             analyzed_index = layout["analysis_sources"][0]
-            assert layout["sources"][analyzed_index]["role"] == (
-                "capture-0001/stdout"
-            )
+            assert layout["sources"][analyzed_index]["role"] == ("capture-0001/stdout")
             bundle = (
                 tmp_path
                 / ".flameox"
