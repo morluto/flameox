@@ -5,9 +5,15 @@ provider behavior, or lifecycle state.
 
 ## MCP catalog
 
-The catalog exposes six tools. Capability-specific requests are discriminated unions, so the SDK
-validates exact options, source cardinality, compatible providers, and experiment support. Common
-transport fields and result schemas occur only once.
+The catalog exposes seven broad workflow tools. The low-level Python MCP SDK server owns protocol
+initialization, framing, transports, progress, and MCP types. A declarative Flameox tool registry
+projects strict Pydantic input and output schemas and dispatches thin handlers over the shared
+`AnalysisRuntime`; Flameox does not implement a custom MCP protocol.
+
+`inspect_capabilities` keeps capability-specific schemas out of `tools/list`. List mode filters
+compact capability descriptors by artifact format or capture support. Get mode returns one
+capability's exact analysis option schema, compatible provider option schemas, minimal examples,
+limitations, and routing exclusions.
 
 `flameox mcp inspect` is compact by default; use `--tool TOOL_NAME` for one complete schema or
 `--full` for the complete catalog. CLI results omit the process-local `analysis_id` because it
@@ -17,6 +23,7 @@ cannot survive command exit.
 | --- | ---: | --- | --- |
 | Existing-artifact analysis | 1 | `analyze` | Read-only and idempotent. |
 | Capture and immediate analysis | 1 | `capture_and_analyze` | Executes typed argv; not read-only or idempotent. |
+| Capability discovery | 1 | `inspect_capabilities` | Select a capability, format, and provider before requesting detailed schemas. |
 | Evidence lifecycle | 4 | `prepare_providers`, `preserve_evidence`, `rescue_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
 
 For CLI-side discovery, `flameox mcp inspect` returns compact records containing each tool's name,
@@ -43,14 +50,12 @@ its parent before decoding or executing the workload, then returns the same resc
 `rescued`. The `--preserve` and `--rescue-to` options are mutually exclusive so the publication
 destination is unambiguous.
 
-The capability registry generates discriminated request variants through the Python MCP SDK 2.0
-registration API. `analyze.request` contains `capability_id`, `sources`, capability-specific typed
-`options`, and an optional `continuation`. `capture_and_analyze.request`
-contains `capability_id`, `target`, a discriminated `provider` union containing only compatible
-capture providers, typed `options`, and optional `preserve`. Targets run once by default.
-Capabilities that can analyze the multiple artifacts produced by paired cases also expose an
-optional `experiment` design; single-artifact analyses omit that field. Provider and analysis
-arguments are always typed.
+`analyze` and `capture_and_analyze` retain stable compact outer requests. Their global capability,
+artifact-format, and provider fields are closed enums, while capability and provider `options` are
+JSON objects. The transport validates those nested objects, source cardinality, format
+compatibility, provider compatibility, and experiment support against the domain registries before
+runtime execution. Invalid combinations therefore return Flameox's structured failure contract,
+not raw Pydantic diagnostics. Exact nested schemas are available through `inspect_capabilities`.
 
 Both tools expose only the semantic `page_size` beside the request. Input-byte, traversal, worker,
 process-output, memory, and provenance ceilings are server policy rather than caller-facing MCP
@@ -77,10 +82,13 @@ still identify the outcome and recovery path, while structured clients retain th
 bounded evidence. Preserved results also return a resource link.
 
 Failures likewise use a short text summary and keep structured details in `structuredContent`.
-Failed captures include execution records once, in `details.partial_evidence.capture.executions`.
-Their text summary retains the live analysis handle and the next preservation or pagination step.
-Pages are selected by row count; complete rows, execution provenance, and continuation arguments
-are returned without a response-byte ceiling or a second compaction pass.
+Capture-complete failures are ordinary typed product states, not error-side-channel data. A
+`partial` result keeps its analysis handle, typed capture executions, aggregate and workload
+status, analysis failure, and executable preservation action at the top level. Workload failures
+remain observed evidence. `retryable` and `unavailable` are also composable non-error states;
+invalid requests, terminal infrastructure failures, and failures with no trustworthy result set
+`isError=true`. Pages are selected by row count; complete rows, execution provenance, and
+continuation arguments are returned without a response-byte ceiling or a second compaction pass.
 
 On the 2026 protocol, SDK cache hints mark the static tool and resource-template catalogs as
 public for one hour. Content-addressed evidence reads are immutable and receive a 24-hour private
@@ -114,16 +122,16 @@ If the response is partial, do not copy its continuation token into a newly asse
 Submit `next_page.tool` with `next_page.arguments` unchanged. This preserves source order, options,
 identity checks, and the original page size.
 
-Each capability declaration also owns its accepted source cardinality. MCP encodes that range in
-the generated `sources` schema, and the runtime checks the same range before resolving paths or
-starting capture. Single-artifact summaries require exactly one source, comparison operations
-require at least two, and only intentional aggregations accept a larger bounded collection.
+Each capability declaration also owns its accepted source cardinality. The compact MCP envelope
+uses the global transport ceiling; transport and runtime validation apply the selected capability's
+exact range before resolving paths or starting capture. Single-artifact summaries require exactly
+one source, comparison operations require at least two, and only intentional aggregations accept a
+larger bounded collection.
 
-`options` is optional when the capability model can be constructed entirely from documented
-defaults, including operations whose option model is empty. It remains required when omission
-would leave the request incomplete, such as the start and end bounds for `trace.window`. Unknown
-fields are rejected rather than ignored, and pstats CPU metrics use a closed vocabulary in the
-generated schema.
+`options` defaults to an empty object. The selected capability model may still require nested
+fields, such as the start and end bounds for `trace.window`; transport validation returns their
+field paths and accepted values where applicable. Unknown nested fields are rejected, and pstats
+CPU metrics use a closed vocabulary in the detailed capability schema.
 
 For example, a single Nsight Compute capture for kernel metrics has this argument shape:
 
@@ -161,9 +169,9 @@ view. A missing resource is a protocol error.
 
 Every tool advertises a compact output schema for its stable result envelope. Provider-specific
 metrics and rows remain open JSON values. Success uses structured content directly, without an
-`ok/result/error` wrapper. Tool failures set `isError=true` and carry a stable code, message, and
-details. MCP SDK argument-validation errors occur before tool execution and therefore use the
-protocol error shape rather than the tool's output schema.
+`ok/result/error` wrapper. Tool failures set `isError=true` and carry a stable code, message,
+retryability, optional field path and accepted values, and a typed next action. The low-level
+adapter validates requests itself so malformed arguments also use this structured result contract.
 
 Failure messages and details are protocol data. MCP handlers project typed `RuntimeFailure` values
 but never serialize arbitrary exception text: filesystem exceptions may contain host paths, and
