@@ -14,7 +14,9 @@ from mcp_types import TextContent
 
 from flameox import __version__
 from flameox.mcp import create_server
+from flameox.providers.cpu import CpuProfileProvider
 from flameox.runtime import AnalysisRuntime
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 
 
@@ -78,6 +80,43 @@ def test_mcp_analysis_wraps_unexpected_provider_failures(
         assert result.structured_content["code"] == "ANALYSIS_FAILURE"
         assert result.structured_content["message"] == "Analysis failed unexpectedly."
         assert "private provider state" not in json.dumps(result.structured_content)
+
+    anyio.run(exercise)
+
+
+@pytest.mark.unit
+def test_mcp_worker_failure_does_not_expose_raw_domain_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "/private/workspace/customer-path: dependency diagnostic"
+    artifact = tmp_path / "profile.json"
+    artifact.write_text("{}")
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise DomainError(
+            ErrorCode.DECODE_FAILURE,
+            "CPU profile worker transport failed before a trustworthy response.",
+            details={"exit_code": 7, "stderr": secret},
+        )
+
+    monkeypatch.setattr(CpuProfileProvider, "analyze", fail)
+
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "cpu.hotspots",
+                        "sources": [{"kind": "path", "path": str(artifact), "format": "py-spy"}],
+                    }
+                },
+            )
+
+        assert result.is_error is True
+        assert result.structured_content["code"] == "DECODE_FAILURE"
+        assert result.structured_content["details"] == {}
+        assert secret not in json.dumps(result.structured_content)
 
     anyio.run(exercise)
 
@@ -183,6 +222,7 @@ def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
         }
         assert "Preserve" in result.structured_content["next_action"]["message"]
         assert "external requirements" in result.content[0].text
+        assert "workload interpreter" in result.content[0].text
         assert result.structured_content["launcher"]["args"][3] == (
             f"flameox[memory]=={__version__}"
         )

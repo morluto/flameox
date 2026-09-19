@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
     tmp_path: Path,
 ) -> None:
@@ -96,6 +98,7 @@ def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_rescue_repository_failures_identify_the_alternate_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -124,6 +127,7 @@ def test_rescue_repository_failures_identify_the_alternate_store(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,6 +155,37 @@ def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
         assert (moved_parent / "rescue" / "repository.json").is_file()
     finally:
         runtime.close()
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fixture")
+def test_rescue_rejects_ordinary_path_fallback_when_descriptor_paths_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    original_stat = Path.stat
+
+    def descriptor_paths_unavailable(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path.parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
+            raise OSError("descriptor paths unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", descriptor_paths_unavailable)
+    monkeypatch.setattr("flameox.runtime.sys.platform", "darwin")
+    monkeypatch.setattr(fcntl, "F_GETPATH", 50, raising=False)
+    monkeypatch.setattr(
+        fcntl,
+        "fcntl",
+        lambda *_args: os.fsencode(tmp_path) + b"\0",
+    )
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            AnalysisRuntime._descriptor_path(descriptor)
+        assert failure.value.code == "UNAVAILABLE_CAPABILITY"
+    finally:
+        os.close(descriptor)
 
 
 @pytest.mark.unit

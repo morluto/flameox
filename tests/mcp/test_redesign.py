@@ -21,6 +21,9 @@ def test_capability_discovery_returns_exact_contract_only_on_drill_down(tmp_path
             exact = await client.call_tool(
                 "inspect_capabilities", {"mode": "get", "capability_id": "cpu.hotspots"}
             )
+            comparison = await client.call_tool(
+                "inspect_capabilities", {"mode": "get", "capability_id": "benchmark.compare"}
+            )
 
         assert compact.is_error is False
         assert {item["capability_id"] for item in compact.structured_content["capabilities"]} == {
@@ -46,6 +49,28 @@ def test_capability_discovery_returns_exact_contract_only_on_drill_down(tmp_path
             "py-spy",
         }
         assert all(item["option_schema"] is not None for item in capability["capture_providers"])
+        assert (
+            len(
+                comparison.structured_content["capabilities"][0]["analysis_example"]["request"][
+                    "sources"
+                ]
+            )
+            == 2
+        )
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
+def test_query_accepts_historical_capability_ids(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "query_evidence", {"capability_id": "retired.capability"}
+            )
+
+        assert result.is_error is False
+        assert result.structured_content["inventory_status"] == "absent"
 
     anyio.run(exercise)
 

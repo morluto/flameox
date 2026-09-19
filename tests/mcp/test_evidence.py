@@ -62,6 +62,7 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
         assert isinstance(summary, TextContent)
         assert "no continuation is available" in summary.text
         assert "narrow" in summary.text
+        assert "bounded evidence" in summary.text
         assert "preserve" not in summary.text
 
     anyio.run(exercise)
@@ -322,6 +323,7 @@ def test_mcp_handoffs_are_derived_while_the_runtime_lock_is_held(
     assert observations == [True, True, True]
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
     store = tmp_path / "store"
     rescue = tmp_path / "rescue"
@@ -382,6 +384,14 @@ def test_mcp_query_returns_an_exact_next_page(tmp_path: Path) -> None:
             )
             next_page = first.structured_content["next_page"]
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
+
+            first_summary = first.content[0]
+            second_summary = second.content[0]
+            assert isinstance(first_summary, TextContent)
+            assert isinstance(second_summary, TextContent)
+            assert "Evidence query partial" in first_summary.text
+            assert "exact next_page arguments" in first_summary.text
+            assert "Evidence query complete" in second_summary.text
 
         assert next_page["arguments"]["capability_id"] == "artifact.preview"
         assert next_page["arguments"]["page_size"] == 1
@@ -459,6 +469,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires descriptor-backed directory aliases")
 def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path) -> None:
     configured = tmp_path / "configured"
     configured.mkdir()

@@ -1903,6 +1903,10 @@ class AnalysisRuntime:
             try:
                 os.stat(selected.name, dir_fd=parent_descriptor, follow_symlinks=False)
             except FileNotFoundError:
+                # Rescue publication must remain anchored to the directory opened above.
+                # Check that the host exposes a usable descriptor-backed directory path
+                # before analysis or a capture workload begins.
+                self._descriptor_path(parent_descriptor)
                 return str(selected)
             raise RuntimeFailure(
                 "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
@@ -2006,6 +2010,16 @@ class AnalysisRuntime:
         cached: CachedAnalysis | None,
         previous: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
+        try:
+            destination_status = os.stat(
+                selected.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            destination_status = None
+        if destination_status is not None and previous is None:
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
+            )
         anchored_parent = self._descriptor_path(parent_descriptor)
         anchored_destination = anchored_parent / selected.name
         alternate = EvidenceRepository(anchored_destination, f"{self.session_id}-rescue")
@@ -2023,22 +2037,8 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
-        try:
-            destination_status = os.stat(
-                selected.name, dir_fd=parent_descriptor, follow_symlinks=False
-            )
-        except FileNotFoundError:
-            destination_status = None
         if destination_status is not None:
-            try:
-                manifest = alternate.read(expected_id)
-            except RepositoryError as exc:
-                if previous is None and not (anchored_destination / "repository.json").exists():
-                    raise RuntimeFailure(
-                        "INVALID_INPUT",
-                        "Rescue destination must be a new path that does not exist",
-                    ) from exc
-                raise
+            manifest = alternate.read(expected_id)
             result = self._rescue_result(expected_id, len(manifest["body"]["artifacts"]), selected)
         else:
             result = self._publish_rescue_stage(
@@ -2161,16 +2161,6 @@ class AnalysisRuntime:
                     return candidate
             except OSError:
                 continue
-        if sys.platform == "darwin":
-            import fcntl
-
-            try:
-                raw_path = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024)
-                candidate = Path(os.fsdecode(raw_path.split(b"\0", 1)[0]))
-                if os.path.samestat(candidate.stat(), os.fstat(descriptor)):
-                    return candidate
-            except OSError:
-                pass
         raise RuntimeFailure(
             "UNAVAILABLE_CAPABILITY",
             "Secure rescue publication requires descriptor-backed directory paths",
@@ -2744,7 +2734,9 @@ class AnalysisRuntime:
                 code,
                 error.message,
                 retryable=error.retryable,
-                details=error.details,
+                # Worker/process details may contain stderr, argv, environment values, or paths.
+                # The typed code and remediation are the safe public recovery contract.
+                details={},
                 remediation=error.remediation,
             ) from error
 

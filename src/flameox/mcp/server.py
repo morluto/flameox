@@ -190,6 +190,11 @@ def _summary(value: Mapping[str, Any]) -> str:
     status = value.get("status", "complete")
     if "analysis_id" in value:
         truncation = value.get("truncation")
+        coverage = value.get("coverage")
+        coverage_complete = isinstance(coverage, Mapping) and coverage.get("complete") is True
+        evidence_state = (
+            "partial" if status == "partial" else "complete" if coverage_complete else "bounded"
+        )
         if value.get("next_page") is not None:
             action = "call analyze with the exact next_page arguments; do not rerun capture"
         elif isinstance(value.get("preserved"), Mapping):
@@ -199,11 +204,21 @@ def _summary(value: Mapping[str, Any]) -> str:
         else:
             action = "preserve the session analysis if durable evidence is needed"
         return (
-            f"{value.get('capability_id')}: {status}; analysis_id={value['analysis_id']}; "
+            f"{value.get('capability_id')}: {evidence_state} evidence; "
+            f"analysis_id={value['analysis_id']}; "
             f"next: {action}."
         )
     if "evidence" in value:
-        return f"Evidence query {status}; {len(cast(list[Any], value['evidence']))} row(s)."
+        query_state = "partial" if value.get("next_page") is not None else "complete"
+        action = (
+            "call query_evidence with the exact next_page arguments"
+            if query_state == "partial"
+            else "query complete"
+        )
+        return (
+            f"Evidence query {query_state}; {len(cast(list[Any], value['evidence']))} row(s); "
+            f"next: {action}."
+        )
     return f"Flameox operation {status}."
 
 
@@ -388,6 +403,8 @@ class FlameoxServer(Server[AnalysisRuntime]):
             action = "reconnect using the returned launcher" if next_action else "continue capture"
             if prepared.external_requirements:
                 action += "; satisfy the listed external requirements; host readiness is unknown"
+            if prepared.workload_requirements:
+                action += "; satisfy the listed requirements in the workload interpreter"
             return _text_result(
                 value,
                 summary=f"Provider preparation completed; next: {action}.",
@@ -507,7 +524,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 else "complete"
             )
             value["next_action"] = None
-            if value["status"] == "partial":
+            if value.get("analysis_failure") is not None:
                 value["next_action"] = PreserveThenAnalyzeAction(
                     kind="preserve_then_analyze",
                     preserve_arguments=cast(
@@ -516,6 +533,16 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     message=(
                         "Preserve this trustworthy capture, then retry analyze over its "
                         "analysis sources after addressing the observed failure."
+                    ),
+                ).model_dump(mode="json")
+            elif value["status"] == "partial":
+                value["next_action"] = CallToolAction(
+                    kind="call_tool",
+                    tool="preserve_evidence",
+                    arguments=cast(dict[str, JsonValue], {"analysis_id": value["analysis_id"]}),
+                    message=(
+                        "Preserve and inspect the observed workload failure. Fix the target "
+                        "before recapturing; reanalysis cannot change its exit outcome."
                     ),
                 ).model_dump(mode="json")
             link = _resource_link(value)

@@ -103,6 +103,8 @@ def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
             assert failed.structured_content["status"] == "partial"
             assert failed.structured_content["analysis_id"]
             assert failed.structured_content["capture"]["executions"][0]["returncode"] == 7
+            assert failed.structured_content["next_action"]["kind"] == "call_tool"
+            assert failed.structured_content["next_action"]["tool"] == "preserve_evidence"
 
     anyio.run(exercise)
 
@@ -138,6 +140,9 @@ def test_mcp_one_run_capture_needs_no_execution_choice_and_exposes_its_handle(
             assert isinstance(summary, TextContent)
             assert value["analysis_id"] in summary.text
             assert "preserve" in summary.text
+            if exit_code:
+                assert value["next_action"]["kind"] == "call_tool"
+                assert value["next_action"]["tool"] == "preserve_evidence"
             preserved = await client.call_tool(
                 "preserve_evidence", {"analysis_id": value["analysis_id"]}
             )

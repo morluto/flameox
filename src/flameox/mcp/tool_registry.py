@@ -132,9 +132,10 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
             "sources": [
                 {
                     "kind": "path",
-                    "path": f"/absolute/path/artifact.{suffix}",
+                    "path": f"/absolute/path/artifact-{index + 1}.{suffix}",
                     "format": format_name,
                 }
+                for index in range(capability.minimum_sources)
             ],
         }
     }

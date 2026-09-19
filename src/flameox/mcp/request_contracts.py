@@ -195,7 +195,12 @@ class RescueArguments(PreserveArguments):
 
 class QueryArguments(StrictModel):
     evidence_kind: str | None = None
-    capability_id: CapabilityId | None = None
+    capability_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=160,
+        description="Current or historical capability ID stored in immutable evidence.",
+    )
     provider_id: str | None = None
     input_sha256: str | None = Field(default=None, pattern=LOWERCASE_SHA256_PATTERN)
     created_after: datetime | None = None

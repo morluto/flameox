@@ -114,6 +114,7 @@ def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
             assert response.is_error is False
             partial = response.structured_content
             assert partial["status"] == "partial"
+            assert partial["next_action"]["kind"] == "preserve_then_analyze"
             assert partial["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
             assert partial["analysis_id"]
             preserved = partial["preserved"]

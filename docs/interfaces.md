@@ -41,8 +41,10 @@ directory, publishes the normal immutable evidence format there, and returns the
 change the active runtime store, release the session handle, or expose the alternate store through
 the active server's resource template. Repeating the same rescue request during the live session
 validates the published evidence and returns the original handoff. Secure descriptor-anchored
-rescue publication currently requires a POSIX host with `/proc/self/fd` or `/dev/fd`; Windows
-returns `UNAVAILABLE_CAPABILITY` before analysis or workload execution.
+rescue publication currently requires a POSIX host with a usable descriptor-backed directory
+alias. This is an internal safety mechanism, not a destination convention: callers may choose any
+otherwise-valid absolute destination. Hosts without that mechanism return
+`UNAVAILABLE_CAPABILITY` before analysis or workload execution.
 
 The one-shot CLI mirrors this lifecycle with `analyze --rescue-to ABSOLUTE_PATH` and
 `capture --rescue-to ABSOLUTE_PATH`. It requires a destination that does not exist and preflights
