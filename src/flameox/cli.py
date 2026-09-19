@@ -13,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
+from flameox.mcp.tool_registry import capability_descriptor
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITIES,
@@ -23,7 +24,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     WorkloadBudget,
-    compatible_capture_providers,
 )
 from flameox.setup import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
@@ -100,7 +100,12 @@ def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
     if isinstance(error, ValidationError):
         value = {"code": "INVALID_INPUT", "message": str(error), "details": {}}
     else:
-        value = {"code": error.code, "message": error.message, "details": error.details}
+        value = {
+            "code": error.code,
+            "message": error.message,
+            "details": error.details,
+            "remediation": list(error.remediation),
+        }
     typer.echo(json.dumps(value, sort_keys=True), err=True)
     raise typer.Exit(code=1)
 
@@ -632,17 +637,7 @@ def mcp_inspect(
         catalog = {
             "tool_count": len(tools),
             "tools": tools,
-            "capabilities": [
-                {
-                    "id": capability.id,
-                    "summary": capability.summary,
-                    "formats": list(capability.formats),
-                    "capture_providers": [
-                        provider.id for provider in compatible_capture_providers(capability)
-                    ],
-                }
-                for capability in CAPABILITIES
-            ],
+            "capabilities": [capability_descriptor(capability) for capability in CAPABILITIES],
             "resources": [
                 {
                     "name": resource["name"],

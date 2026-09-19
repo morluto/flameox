@@ -130,6 +130,7 @@ class CachedAnalysis:
     sources: list[NativeSource]
     manifest_body: dict[str, Any]
     analysis_sources: list[NativeSource] | None = None
+    analysis_source_indices: list[int] | None = None
     preserved: dict[str, Any] | None = None
 
 
@@ -296,7 +297,7 @@ class AnalysisRuntime:
                 analysis_id
                 for analysis_id, cached in self.analyses.items()
                 if not any(
-                    source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                    self._paths_overlap(source.path, root)
                     for source in cached.sources
                     for root in protected_roots
                 )
@@ -315,20 +316,25 @@ class AnalysisRuntime:
             try:
                 relative = source.path.relative_to(self.scratch)
             except ValueError:
-                continue
+                try:
+                    relative = source.path.resolve(strict=False).relative_to(
+                        self.scratch.resolve(strict=False)
+                    )
+                except ValueError:
+                    continue
             if relative.parts and relative.parts[0].startswith("capture-"):
                 capture_roots.add(self.scratch / relative.parts[0])
             elif len(relative.parts) >= 2 and relative.parts[0] == "evidence-sources":
                 capture_roots.add(self.scratch / relative.parts[0] / relative.parts[1])
         for root in capture_roots:
             retained = any(
-                source.path.is_relative_to(root) or root.is_relative_to(source.path)
+                self._paths_overlap(source.path, root)
                 for analysis in self.analyses.values()
                 if analysis is not cached
                 for source in analysis.sources
             )
             if not retained and not any(
-                path.is_relative_to(root) or root.is_relative_to(path)
+                self._paths_overlap(path, root)
                 for path in self._protected_sources | self._capture_reservations.keys()
             ):
                 shutil.rmtree(root, ignore_errors=True)
@@ -377,9 +383,7 @@ class AnalysisRuntime:
                 (
                     key
                     for key, path in self.scratch_artifacts.items()
-                    if not any(
-                        path.is_relative_to(root) or root.is_relative_to(path) for root in protected
-                    )
+                    if not any(self._paths_overlap(path, root) for root in protected)
                 ),
                 None,
             )
@@ -421,7 +425,7 @@ class AnalysisRuntime:
         finally:
             self._protected_sources = protected
 
-    def _analyze(
+    def _analyze(  # noqa: C901 - validation and bounded projection remain one transaction
         self,
         capability_id: str,
         sources: Sequence[Source],
@@ -444,6 +448,25 @@ class AnalysisRuntime:
         capability.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
         validated = TypeAdapter(capability.model).validate_python(arguments)
+        for source_index, request_source in enumerate(sources):
+            if isinstance(request_source, PathSource) and request_source.format not in (
+                None,
+                *capability.formats,
+            ):
+                raise RuntimeFailure(
+                    "UNSUPPORTED_FORMAT",
+                    f"{capability_id} does not accept artifact format {request_source.format!r}",
+                    details={
+                        "capability_id": capability_id,
+                        "source_index": source_index,
+                        "received_format": request_source.format,
+                        "accepted_formats": list(capability.formats),
+                        "recovery": (
+                            "Select one accepted format or inspect the `analyze` request variants "
+                            "with `flameox mcp inspect --tool analyze`."
+                        ),
+                    },
+                )
         resolved = self._resolve_sources(sources, selected_limits)
         text_fragment_chars = (
             validated.text_fragment_chars if isinstance(validated, PreviewArguments) else None
@@ -635,6 +658,7 @@ class AnalysisRuntime:
                 resolved,
                 body,
                 analysis_sources=resolved,
+                analysis_source_indices=list(range(len(resolved))),
             ),
         )
         return self._copy_result(validated_result)
@@ -887,10 +911,8 @@ class AnalysisRuntime:
                             "The official Nsight Compute ncu_report.py interface is missing.",
                             details={
                                 "provider_id": target.provider_id,
-                                "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[
-                                    target.provider_id
-                                ],
                             },
+                            remediation=(SYSTEM_PROVIDER_GUIDANCE[target.provider_id],),
                         )
                     self.dependencies.verify_capture_binding(target.provider_id, collector_binding)
                     if experiment is not None and experiment.semantic_oracle is not None:
@@ -1263,6 +1285,9 @@ class AnalysisRuntime:
                         "process-tree execution evidence."
                     )
                 cached.sources = captured
+                cached.analysis_source_indices = self._captured_source_indices(
+                    captured, selected_sources
+                )
                 cached.manifest_body["capture_request"] = {
                     "target": target.model_dump(mode="json"),
                     "mode": mode,
@@ -1424,7 +1449,17 @@ class AnalysisRuntime:
             "coverage": validated["coverage"],
             "limitations": validated["limitations"],
         }
-        self._cache_analysis(analysis_id, CachedAnalysis(validated, captured, manifest_body))
+        analysis_source_indices = self._captured_source_indices(captured, analysis_sources)
+        self._cache_analysis(
+            analysis_id,
+            CachedAnalysis(
+                validated,
+                captured,
+                manifest_body,
+                analysis_sources=analysis_sources,
+                analysis_source_indices=analysis_source_indices,
+            ),
+        )
         return self._copy_result(validated)
 
     def _finalize_capture_result(
@@ -1547,19 +1582,30 @@ class AnalysisRuntime:
                 else "EXECUTION_FAILURE"
             )
             details = {}
+            remediation = error.remediation
             if provider_id in SYSTEM_PROVIDER_GUIDANCE:
-                details = {
-                    "provider_id": provider_id,
-                    "external_setup_guidance": SYSTEM_PROVIDER_GUIDANCE[provider_id],
-                }
-            raise RuntimeFailure(code, error.message, details=details) from error
+                details = {"provider_id": provider_id}
+                remediation = (*remediation, SYSTEM_PROVIDER_GUIDANCE[provider_id])
+            raise RuntimeFailure(
+                code,
+                error.message,
+                retryable=error.retryable,
+                details=details,
+                remediation=remediation,
+            ) from error
 
     @staticmethod
     def _revalidate_executable(binding: ResolvedExecutable) -> None:
         try:
             ExecutableResolver().revalidate(binding)
         except DomainError as error:
-            raise RuntimeFailure(error.code.value, error.message, details=error.details) from error
+            raise RuntimeFailure(
+                error.code.value,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
 
     @staticmethod
     def _managed_executable(name: str) -> str | None:
@@ -1580,11 +1626,11 @@ class AnalysisRuntime:
                     f"prepare_providers with provider_ids=[{provider_id!r}], then follow its "
                     "activation guidance and retry."
                 ),
-                details={
-                    "provider_id": provider_id,
-                    "preparation_tool": "prepare_providers",
-                    "provider_ids": [provider_id],
-                },
+                retryable=True,
+                details={"provider_id": provider_id},
+                remediation=(
+                    "Prepare the managed provider, reconnect if directed, then retry capture.",
+                ),
             )
         return executable
 
@@ -1696,6 +1742,21 @@ class AnalysisRuntime:
         ]
 
     @staticmethod
+    def _captured_source_indices(
+        captured: list[NativeSource], analysis_sources: list[NativeSource]
+    ) -> list[int]:
+        """Retain relational identity even when paths or content identities alias."""
+
+        return [
+            next(
+                index
+                for index, captured_source in enumerate(captured)
+                if captured_source is analysis_source
+            )
+            for analysis_source in analysis_sources
+        ]
+
+    @staticmethod
     def _capture_arguments(
         provider_id: str, arguments: Mapping[str, Any], *, capability_id: str
     ) -> CaptureArguments:
@@ -1758,6 +1819,7 @@ class AnalysisRuntime:
                 cached.preserved = self.repository.preserve(
                     manifest_body=cached.manifest_body,
                     sources=cached.sources,
+                    analysis_source_indices=cached.analysis_source_indices,
                     analysis=self._durable_analysis(cached.result),
                 )
                 self._release_analysis_scratch(cached)
@@ -1836,21 +1898,20 @@ class AnalysisRuntime:
     def preflight_rescue_destination(self, destination: str) -> str:
         """Validate a new rescue store before an expensive request begins."""
         selected = self._rescue_destination(destination)
-        parent_descriptor = self._open_rescue_parent(selected.parent)
         try:
-            try:
-                os.stat(selected.name, dir_fd=parent_descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                return str(selected)
-            raise RuntimeFailure(
-                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
-            )
+            parent_is_directory = selected.parent.is_dir()
+            destination_exists = os.path.lexists(selected)
         except OSError as exc:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Rescue destination could not be validated."
             ) from exc
-        finally:
-            os.close(parent_descriptor)
+        if not parent_is_directory:
+            raise RuntimeFailure("INVALID_INPUT", "Rescue destination parent must exist")
+        if destination_exists:
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
+            )
+        return str(selected)
 
     def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
         selected = self._rescue_destination(destination)
@@ -1864,14 +1925,8 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
-        parent_descriptor = self._open_rescue_parent(selected.parent)
         try:
-            result = self._rescue_to_open_parent(
-                parent_descriptor,
-                selected=selected,
-                cached=cached,
-                previous=previous,
-            )
+            result = self._rescue_to_destination(selected, cached=cached, previous=previous)
         except RepositoryError as exc:
             raise self._repository_failure(
                 exc,
@@ -1882,8 +1937,6 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Session evidence could not be rescued."
             ) from exc
-        finally:
-            os.close(parent_descriptor)
         if cached is not None:
             self.analyses.move_to_end(analysis_id)
         rescues[rescue_key] = result
@@ -1926,24 +1979,35 @@ class AnalysisRuntime:
 
     @staticmethod
     def _paths_overlap(first: Path, second: Path) -> bool:
-        return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+        if first == second or first.is_relative_to(second) or second.is_relative_to(first):
+            return True
+        physical_first = first.resolve(strict=False)
+        physical_second = second.resolve(strict=False)
+        return (
+            physical_first == physical_second
+            or physical_first.is_relative_to(physical_second)
+            or physical_second.is_relative_to(physical_first)
+        )
 
-    def _rescue_to_open_parent(
+    def _rescue_to_destination(
         self,
-        parent_descriptor: int,
-        *,
         selected: Path,
+        *,
         cached: CachedAnalysis | None,
         previous: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        anchored_parent = self._descriptor_path(parent_descriptor)
-        anchored_destination = anchored_parent / selected.name
-        alternate = EvidenceRepository(anchored_destination, f"{self.session_id}-rescue")
+        destination_exists = os.path.lexists(selected)
+        if destination_exists and previous is None and not (selected / "repository.json").is_file():
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination must be a new path that does not exist"
+            )
+        alternate = EvidenceRepository(selected, f"{self.session_id}-rescue")
         durable = self._durable_analysis(cached.result) if cached is not None else None
         if cached is not None and durable is not None:
             expected_id = alternate.expected_evidence_id(
                 manifest_body=cached.manifest_body,
                 sources=cached.sources,
+                analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
         elif previous is not None:
@@ -1952,58 +2016,20 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
-        try:
-            destination_status = os.stat(
-                selected.name, dir_fd=parent_descriptor, follow_symlinks=False
-            )
-        except FileNotFoundError:
-            destination_status = None
-        if destination_status is not None:
-            try:
-                manifest = alternate.read(expected_id)
-            except RepositoryError as exc:
-                if previous is None and not (anchored_destination / "repository.json").exists():
-                    raise RuntimeFailure(
-                        "INVALID_INPUT",
-                        "Rescue destination must be a new path that does not exist",
-                    ) from exc
-                raise
+        if destination_exists:
+            manifest = alternate.read(expected_id)
             result = self._rescue_result(expected_id, len(manifest["body"]["artifacts"]), selected)
         else:
             result = self._publish_rescue_stage(
-                parent_descriptor,
-                anchored_parent=anchored_parent,
-                anchored_destination=anchored_destination,
                 selected=selected,
                 cached=cached,
                 durable=durable,
-            )
-        anchored_status = os.fstat(parent_descriptor)
-        try:
-            final_parent_descriptor = self._open_rescue_parent(selected.parent)
-        except RuntimeFailure as exc:
-            raise RuntimeFailure(
-                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
-            ) from exc
-        try:
-            final_status = os.fstat(final_parent_descriptor)
-        finally:
-            os.close(final_parent_descriptor)
-        if (anchored_status.st_dev, anchored_status.st_ino) != (
-            final_status.st_dev,
-            final_status.st_ino,
-        ):
-            raise RuntimeFailure(
-                "REPOSITORY_IO_FAILURE", "Rescue destination changed during publication."
             )
         return result
 
     def _publish_rescue_stage(
         self,
-        parent_descriptor: int,
         *,
-        anchored_parent: Path,
-        anchored_destination: Path,
         selected: Path,
         cached: CachedAnalysis | None,
         durable: Mapping[str, Any] | None,
@@ -2014,32 +2040,32 @@ class AnalysisRuntime:
                 "The session analysis is missing and the rescued evidence is unavailable",
             )
         stage_name = f".flameox-rescue-{secrets.token_hex(12)}"
-        os.mkdir(stage_name, mode=0o700, dir_fd=parent_descriptor)
+        stage = selected.parent / stage_name
+        stage.mkdir(mode=0o700)
+        published = False
         try:
-            rescued = EvidenceRepository(
-                anchored_parent / stage_name, f"{self.session_id}-rescue"
-            ).preserve(
+            rescued = EvidenceRepository(stage, f"{self.session_id}-rescue").preserve(
                 manifest_body=cached.manifest_body,
                 sources=cached.sources,
+                analysis_source_indices=cached.analysis_source_indices,
                 analysis=durable,
             )
-            os.rename(
-                stage_name,
-                selected.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
-            stage_name = ""
-            os.fsync(parent_descriptor)
-            EvidenceRepository(anchored_destination, f"{self.session_id}-rescue").read(
+            parent_descriptor = os.open(selected.parent, os.O_RDONLY)
+            try:
+                stage.rename(selected)
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+            published = True
+            EvidenceRepository(selected, f"{self.session_id}-rescue").read(
                 str(rescued["evidence_id"])
             )
             return self._rescue_result(
                 str(rescued["evidence_id"]), int(rescued["artifact_count"]), selected
             )
         finally:
-            if stage_name:
-                shutil.rmtree(anchored_parent / stage_name, ignore_errors=True)
+            if not published:
+                shutil.rmtree(stage, ignore_errors=True)
 
     @staticmethod
     def _rescue_result(evidence_id: str, artifact_count: int, destination: Path) -> dict[str, Any]:
@@ -2057,42 +2083,6 @@ class AnalysisRuntime:
                 ),
             },
         }
-
-    @staticmethod
-    def _open_rescue_parent(path: Path) -> int:
-        if os.name == "nt":
-            raise RuntimeFailure(
-                "UNAVAILABLE_CAPABILITY",
-                "Secure rescue publication is unavailable on Windows hosts.",
-            )
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path.anchor, flags)
-        try:
-            for part in path.parts[1:]:
-                child = os.open(part, flags, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = child
-        except OSError as exc:
-            os.close(descriptor)
-            raise RuntimeFailure(
-                "INVALID_INPUT",
-                "Rescue destination parent must exist and contain no symbolic links",
-            ) from exc
-        return descriptor
-
-    @staticmethod
-    def _descriptor_path(descriptor: int) -> Path:
-        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
-            candidate = root / str(descriptor)
-            try:
-                if os.path.samestat(candidate.stat(), os.fstat(descriptor)):
-                    return candidate
-            except OSError:
-                continue
-        raise RuntimeFailure(
-            "UNAVAILABLE_CAPABILITY",
-            "Secure rescue publication requires descriptor-backed directory paths",
-        )
 
     @staticmethod
     def _terminated_limit(
@@ -2313,7 +2303,7 @@ class AnalysisRuntime:
                     self._protected_sources.add(path)
                     if not path.exists():
                         needed[path] = item
-            elif item.path.is_relative_to(self.scratch):
+            elif item.path.resolve(strict=False).is_relative_to(self.scratch.resolve(strict=False)):
                 self._protected_sources.add(item.path)
         self._prune_scratch(
             reserved_bytes=sum(item.source.size_bytes for item in needed.values()),
@@ -2641,7 +2631,13 @@ class AnalysisRuntime:
                 maximum_output_bytes=limits.max_output_bytes,
             )
         except ProviderFailure as error:
-            raise RuntimeFailure(error.code, error.message, details=error.details) from error
+            raise RuntimeFailure(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
         except DomainError as error:
             code = (
                 "UNAVAILABLE_CAPABILITY"
@@ -2652,7 +2648,15 @@ class AnalysisRuntime:
                 if error.code is ErrorCode.LIMIT_EXCEEDED
                 else "DECODE_FAILURE"
             )
-            raise RuntimeFailure(code, error.message) from error
+            raise RuntimeFailure(
+                code,
+                error.message,
+                retryable=error.retryable,
+                # Worker/process details may contain stderr, argv, environment values, or paths.
+                # The typed code and remediation are the safe public recovery contract.
+                details={},
+                remediation=error.remediation,
+            ) from error
 
     def _platform_trace_analysis(
         self,
@@ -3144,14 +3148,11 @@ class AnalysisRuntime:
     def _release_capture_scope(self, root: Path, failed: bool) -> None:
         if failed:
             for analysis_id, cached in list(self.analyses.items()):
-                if any(
-                    source.path.is_relative_to(root) or root.is_relative_to(source.path)
-                    for source in cached.sources
-                ):
+                if any(self._paths_overlap(source.path, root) for source in cached.sources):
                     del self.analyses[analysis_id]
         self._capture_reservations.pop(root, None)
         if not any(
-            source.path.is_relative_to(root) or root.is_relative_to(source.path)
+            self._paths_overlap(source.path, root)
             for cached in self.analyses.values()
             if cached.preserved is None
             for source in cached.sources

@@ -79,7 +79,13 @@ class MemrayProvider:
                 rows, observed = self._read_rows(files, metric, max_rows=max_rows)
         except DomainError as error:
             if error.code is ErrorCode.UNAVAILABLE_CAPABILITY:
-                raise ProviderFailure("UNAVAILABLE_CAPABILITY", error.message) from error
+                raise ProviderFailure(
+                    "UNAVAILABLE_CAPABILITY",
+                    error.message,
+                    retryable=error.retryable,
+                    details=error.details,
+                    remediation=error.remediation,
+                ) from error
             raise
 
         coverage = (

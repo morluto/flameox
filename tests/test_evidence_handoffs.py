@@ -373,13 +373,16 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
                     }
                 },
             )
-            assert result.is_error
-            partial = result.structured_content["details"]["partial_evidence"]
+            assert result.is_error is False
+            partial = result.structured_content
+            assert partial["status"] == "partial"
             assert partial["capture"]["outcome"]["failed_count"] == 1
             execution = partial["capture"]["executions"][0]
             assert execution["returncode"] == 1
             assert execution["returncode_scope"] == "collector"
             assert execution["workload_returncode"] is None
+            assert partial["capture"]["workload_status"] == "unknown"
+            assert "not attributed to the workload" in partial["next_action"]["message"]
             resource = await client.read_resource(partial["preserved"]["uri"])
             assert isinstance(resource.contents[0], TextResourceContents)
             projection = json.loads(resource.contents[0].text)

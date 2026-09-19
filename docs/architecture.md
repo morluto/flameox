@@ -82,10 +82,11 @@ catalog. Flameox production code must not create or depend on SQLite state.
 ## Capability boundary
 
 One registry entry owns a capability descriptor, strict argument model, accepted formats,
-capture/analysis semantics, and model-visible selection guidance. MCP projects these entries
-into discriminated request variants for the read-only `analyze` tool and the executing
-`capture_and_analyze` tool. Agents select `request.capability_id`; its variant validates exact
-typed options, source cardinality, and compatible capture providers.
+capture/analysis semantics, and model-visible selection guidance. MCP projects compact global
+envelopes for the read-only `analyze` tool and the executing `capture_and_analyze` tool. Agents
+select `request.capability_id`; transport validation then applies that registry entry's exact
+typed options, source cardinality, and compatible capture providers. `inspect_capabilities`
+projects one selected entry's detailed schemas and examples without expanding `tools/list`.
 
 Capture-provider contracts supply the discriminated provider variants for each compatible
 capability request. Missing packages, executables, permissions, versions, or platforms do not

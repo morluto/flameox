@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -124,31 +126,75 @@ def test_rescue_repository_failures_identify_the_alternate_store(
 
 
 @pytest.mark.unit
-def test_rescue_publication_stays_anchored_if_parent_path_is_replaced(
+def test_rescue_accepts_an_agent_selected_symlink_parent(tmp_path: Path) -> None:
+    physical_parent = tmp_path / "physical-parent"
+    physical_parent.mkdir()
+    selected_parent = tmp_path / "selected-parent"
+    selected_parent.symlink_to(physical_parent, target_is_directory=True)
+    selected = selected_parent / "rescue"
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(selected))
+        assert rescued["rescue_destination"] == str(selected)
+        assert (physical_parent / "rescue" / "repository.json").is_file()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_fsyncs_parent_after_publishing_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact = tmp_path / "input.json"
     artifact.write_text("[]")
     parent = tmp_path / "parent"
     parent.mkdir()
-    moved_parent = tmp_path / "moved-parent"
-    replacement_destination = parent / "rescue"
+    destination = parent / "rescue"
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
     result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-    original_preserve = EvidenceRepository.preserve
+    fsynced_directories: list[tuple[int, int]] = []
+    real_fsync = os.fsync
 
-    def replace_parent(repository: EvidenceRepository, **kwargs: Any) -> dict[str, Any]:
-        parent.rename(moved_parent)
-        parent.symlink_to(moved_parent, target_is_directory=True)
-        return original_preserve(repository, **kwargs)
+    def record_fsync(descriptor: int) -> None:
+        status = os.fstat(descriptor)
+        if stat.S_ISDIR(status.st_mode):
+            fsynced_directories.append((status.st_dev, status.st_ino))
+        real_fsync(descriptor)
 
-    monkeypatch.setattr(EvidenceRepository, "preserve", replace_parent)
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    try:
+        runtime.rescue_evidence(result["analysis_id"], str(destination))
+        parent_status = parent.stat()
+        assert (parent_status.st_dev, parent_status.st_ino) in fsynced_directories
+    finally:
+        runtime.close()
+
+
+@pytest.mark.unit
+def test_rescue_publication_failure_does_not_leave_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "input.json"
+    artifact.write_text("[]")
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    destination = parent / "rescue"
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
+    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+
+    def fail(_repository: EvidenceRepository, **_kwargs: Any) -> dict[str, Any]:
+        raise RepositoryError("REPOSITORY_IO_FAILURE", "publication failed")
+
+    monkeypatch.setattr(EvidenceRepository, "preserve", fail)
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.rescue_evidence(result["analysis_id"], str(replacement_destination))
+            runtime.rescue_evidence(result["analysis_id"], str(destination))
         assert failure.value.code == "REPOSITORY_IO_FAILURE"
-        assert parent.is_symlink()
-        assert (moved_parent / "rescue" / "repository.json").is_file()
+        assert not destination.exists()
+        assert not list(parent.glob(".flameox-rescue-*"))
     finally:
         runtime.close()
 

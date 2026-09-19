@@ -62,6 +62,7 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
         assert isinstance(summary, TextContent)
         assert "no continuation is available" in summary.text
         assert "narrow" in summary.text
+        assert "bounded evidence" in summary.text
         assert "preserve" not in summary.text
 
     anyio.run(exercise)
@@ -260,11 +261,12 @@ def test_mcp_failed_capture_retains_an_executable_preserved_handoff(tmp_path: Pa
                     "page_size": 1,
                 },
             )
-            partial = failed.structured_content["details"]["partial_evidence"]
+            partial = failed.structured_content
             next_page = partial["next_page"]
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
 
-        assert failed.is_error is True
+        assert failed.is_error is False
+        assert partial["status"] == "partial"
         assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
         assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
 
@@ -381,6 +383,14 @@ def test_mcp_query_returns_an_exact_next_page(tmp_path: Path) -> None:
             )
             next_page = first.structured_content["next_page"]
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
+
+            first_summary = first.content[0]
+            second_summary = second.content[0]
+            assert isinstance(first_summary, TextContent)
+            assert isinstance(second_summary, TextContent)
+            assert "Evidence query partial" in first_summary.text
+            assert "exact next_page arguments" in first_summary.text
+            assert "Evidence query complete" in second_summary.text
 
         assert next_page["arguments"]["capability_id"] == "artifact.preview"
         assert next_page["arguments"]["page_size"] == 1
