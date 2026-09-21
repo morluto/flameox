@@ -2,6 +2,7 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.8] - 2026-09-21
 ## [0.2.7] - 2026-09-12
 
 ### Bug Fixes
