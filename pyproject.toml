@@ -74,6 +74,7 @@ packages = ["src/flameox"]
 addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional and not process'"
 testpaths = ["tests"]
 markers = [
+    "golden: fixed data examples with explicit expected projections",
     "unit: deterministic tests for one semantic owner",
     "integration: tests crossing two or more Flameox services",
     "process: tests that spawn, transport to, or cancel another process",

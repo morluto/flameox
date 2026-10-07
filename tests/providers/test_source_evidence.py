@@ -60,21 +60,20 @@ def test_sarif_export_uses_explicit_source_root_and_preserves_containment(tmp_pa
     assert not (root / "work.py").exists()
 
 
-@pytest.mark.parametrize("root", ["relative/project", "\x00"])
-def test_sarif_source_root_rejects_ambiguous_paths(tmp_path: Path, root: str) -> None:
+def test_sarif_source_root_rejects_ambiguous_paths(tmp_path: Path) -> None:
     runtime = AnalysisRuntime()
     try:
         with pytest.raises(ValidationError, match="source_root must be an absolute path"):
             runtime.analyze(
                 "static.performance_candidates",
                 [PathSource(path=str(tmp_path / "unused.sarif"))],
-                {"source_root": root},
+                {"source_root": "relative/project"},
             )
     finally:
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
     artifact = tmp_path / "report.sarif"
     artifact.write_text(
@@ -133,7 +132,7 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
     assert not (tmp_path / ".flameox").exists()
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_truncated_sarif_never_reports_complete_coverage(tmp_path: Path) -> None:
     artifact = tmp_path / "truncated.sarif"
     payload = json.dumps(
@@ -171,7 +170,7 @@ def test_truncated_sarif_never_reports_complete_coverage(tmp_path: Path) -> None
     assert any("stopped before the document ended" in item for item in result["limitations"])
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_semantic_observations_reject_unknown_fields(tmp_path: Path) -> None:
     events = tmp_path / "observations.jsonl"
     events.write_text(

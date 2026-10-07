@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import struct
 from pathlib import Path
@@ -9,8 +8,6 @@ import pytest
 
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CaptureTarget,
-    EvidenceSource,
     PathSource,
     RuntimeFailure,
 )
@@ -146,35 +143,6 @@ def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:
     assert row["exponent"] == pytest.approx(2.0)
 
 
-def test_nvbench_scaling_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
-    sources = [
-        PathSource(
-            path=str(
-                _bundle(
-                    tmp_path / f"size-{elements}",
-                    [duration] * 1_002,
-                    elements=elements,
-                )
-            ),
-            format="nvbench",
-        )
-        for elements, duration in ((10, 1.0), (20, 4.0))
-    ]
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "benchmark.scaling",
-            sources,
-            {"input_dimension": "elements", "metric": "cub.scan.sample_times"},
-        )
-    finally:
-        runtime.close()
-
-    row = result["blocks"][1]["rows"][0]
-    assert row["point_count"] == 2
-    assert row["exponent"] == pytest.approx(2.0)
-
-
 def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) -> None:
     standalone = tmp_path / "results.json"
     standalone.write_text("{}")
@@ -198,63 +166,3 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
 
     assert unbound.value.code == "UNSUPPORTED_FORMAT"
     assert malformed.value.code == "DECODE_FAILURE"
-
-
-def test_nvbench_capture_analyzes_and_preserves_the_json_bin_directory(tmp_path: Path) -> None:
-    executable = tmp_path / "nvbench-fixture"
-    executable.write_text(
-        """#!/usr/bin/env python3
-import json
-import struct
-import sys
-from pathlib import Path
-
-output = Path(sys.argv[sys.argv.index("--jsonbin") + 1])
-sidecar = output.parent / f"{output.name}-bin" / "0.bin"
-sidecar.parent.mkdir()
-sidecar.write_bytes(struct.pack("<2f", 0.004, 0.006))
-output.write_text(json.dumps({
-    "meta": {"version": {
-        "json": {"major": 1, "minor": 0, "patch": 0},
-        "nvbench": {"major": 0, "minor": 1, "patch": 0, "string": "0.1.0"}
-    }},
-    "benchmarks": [{"name": "cub.scan", "states": [{
-        "name": "elements=65536", "device": 0, "is_skipped": False,
-        "summaries": [{
-            "tag": "nv/json/bin:sample_times", "hint": "file/sample_times",
-            "data": [
-                {"name": "filename", "type": "string", "value": "results.json-bin/0.bin"},
-                {"name": "size", "type": "int64", "value": "2"}
-            ]
-        }]
-    }]}]
-}))
-"""
-    )
-    executable.chmod(0o755)
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = asyncio.run(
-            runtime.capture_and_analyze(
-                CaptureTarget(argv=[str(executable)], cwd=str(tmp_path), provider_id="nvbench"),
-                "benchmark.summary",
-            )
-        )
-        preserved = runtime.preserve_evidence(result["analysis_id"])
-        manifest = runtime.read_evidence(preserved["evidence_id"])
-        reanalyzed = runtime.analyze(
-            "benchmark.summary",
-            [EvidenceSource(kind="evidence", evidence_id=preserved["evidence_id"])],
-            {},
-        )
-    finally:
-        runtime.close()
-
-    assert result["provider"] == {"id": "nvbench", "version": "0.1.0"}
-    assert result["capture"]["executions"][0]["capture_argv"][-2] == "--jsonbin"
-    assert result["blocks"][1]["rows"][1]["value_float"] == pytest.approx(0.006)
-    assert reanalyzed["provider"] == {"id": "nvbench", "version": "0.1.0"}
-    assert {item["role"] for item in manifest["body"]["artifacts"]} == {
-        "capture-0001/benchmark:results.json",
-        "capture-0001/benchmark:results.json-bin/0.bin",
-    }

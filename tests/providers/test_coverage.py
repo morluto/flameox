@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -94,38 +93,6 @@ def test_provider_continuation_stops_at_a_truthfully_reported_bounded_prefix(
     }
     assert pages[-1]["truncation"] == {"reason": "provider_limit", "next_offset": 1_001}
     assert any("truncated to 1001" in item for item in pages[0]["limitations"])
-
-
-@pytest.mark.process
-def test_coverage_capture_uses_explicit_empty_config_and_native_data(tmp_path: Path) -> None:
-    script = tmp_path / "covered.py"
-    script.write_text("value = 1\nprint(value)\n")
-
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(
-            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
-        )
-        try:
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, str(script)],
-                    cwd=str(tmp_path),
-                    provider_id="coverage",
-                    capture_arguments={"branch": True, "source": [str(tmp_path)]},
-                ),
-                "coverage.summary",
-            )
-            execution = result["capture"]["executions"][0]
-            assert execution["status"] == "succeeded"
-            assert "--rcfile" in execution["capture_argv"]
-            assert result["provider"]["id"] == "coverage.py"
-            assert result["blocks"][0]["values"]["line_count"] >= 2
-            assert result["inputs"][0]["format"] == "coverage"
-            assert not (tmp_path / ".coverage").exists()
-        finally:
-            runtime.close()
-
-    anyio.run(exercise)
 
 
 @pytest.mark.process

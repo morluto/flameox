@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from flameox.providers.contracts import ProviderAnalysis, canonical_provider_projection
+
+pytestmark = pytest.mark.golden
 
 
 def test_provider_projection_normalizes_non_finite_floats_for_canonical_json() -> None:

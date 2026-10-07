@@ -16,7 +16,7 @@ from flameox.runtime_contracts import (
 )
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     events.write_text(
@@ -64,7 +64,7 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
     assert result["blocks"][1]["rows"][0]["classification"] == "unexecuted"
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_failure_identities_precede_large_successful_population(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     nodeids = [f"tests/test_large.py::test_{index:04d}" for index in range(1_472)]
@@ -358,7 +358,7 @@ def test_pytest_capture_does_not_instrument_nested_pytest_processes(tmp_path: Pa
     assert result["blocks"][0]["values"]["executed"] == 1
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     events.write_text(
@@ -387,7 +387,7 @@ def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path
     assert fixtures["blocks"][0]["values"]["completion"] == "interrupted"
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_nonzero_session_exit_remains_visible(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     events.write_text(
@@ -418,7 +418,7 @@ def test_pytest_nonzero_session_exit_remains_visible(tmp_path: Path) -> None:
     assert fixtures["blocks"][0]["values"]["exit_status"] == 5
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     payloads = [
@@ -463,7 +463,7 @@ def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_rerun_outcome_is_flaky_attempt(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     payloads = [
@@ -488,7 +488,7 @@ def test_pytest_rerun_outcome_is_flaky_attempt(tmp_path: Path) -> None:
     assert result["blocks"][1]["rows"][0]["failing_phase"] == "call"
 
 
-@pytest.mark.unit
+@pytest.mark.golden
 def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_runs(
     tmp_path: Path,
 ) -> None:

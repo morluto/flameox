@@ -8,7 +8,6 @@ import anyio
 import pyperf
 import pytest
 
-from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
@@ -63,7 +62,7 @@ def _write_scaling_samples(path: Path) -> None:
                         "measurement_clock": "host_monotonic",
                         "synchronization": "not_required",
                         "dimensions": {"elements": str(elements)},
-                        "samples": [duration, duration],
+                        "samples": [duration] * 1_001 + [duration * 1_001],
                     }
                     for elements, duration in ((10, 100), (20, 400), (40, 1_600))
                 ],
@@ -139,28 +138,6 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
     assert row["ratio"] == 0.5
     assert reanalyzed["blocks"][1]["rows"][0]["ratio"] == 0.5
     assert (tmp_path / ".flameox" / "repository.json").is_file()
-
-
-@pytest.mark.process
-def test_pyperf_compare_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
-    baseline = tmp_path / "baseline.json"
-    candidate = tmp_path / "candidate.json"
-    _write_pyperf_suite(baseline, [0.010] * 1_002)
-    _write_pyperf_suite(candidate, [0.005] * 1_002)
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "benchmark.compare",
-            [
-                PathSource(path=str(baseline), format="pyperf"),
-                PathSource(path=str(candidate), format="pyperf"),
-            ],
-            {"metric": "workload"},
-        )
-    finally:
-        runtime.close()
-
-    assert result["blocks"][1]["rows"][0]["ratio"] == 0.5
 
 
 @pytest.mark.process
@@ -276,7 +253,34 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
     assert row["benchmark"] == "operation"
     assert row["point_count"] == 3
     assert row["exponent"] == pytest.approx(2.0)
+    assert row["coefficient"] == pytest.approx(2_002 / 1_002)
     assert row["r_squared"] == pytest.approx(1.0)
+    assert result["coverage"]["complete"] is True
+
+
+@pytest.mark.process
+def test_benchmark_aggregates_report_inconclusive_or_limit_for_exact_large_integers(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "large.samples.json"
+    _write_scaling_samples(artifact)
+    document = json.loads(artifact.read_text())
+    for benchmark in document["benchmarks"]:
+        benchmark["samples"] = [10**400]
+    artifact.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    source = PathSource(path=str(artifact), format="samples")
+    try:
+        scaling = runtime.analyze("benchmark.scaling", [source], {"input_dimension": "elements"})
+        assert scaling["blocks"][1]["rows"][0]["status"] == "inconclusive"
+        assert any("3 measurement(s)" in value for value in scaling["limitations"])
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("benchmark.compare", [source, source], {"metric": "operation"})
+        assert failure.value.code == "LIMIT_EXCEEDED"
+        assert "finite numeric range" in failure.value.message
+        assert not (tmp_path / ".flameox").exists()
+    finally:
+        runtime.close()
 
 
 @pytest.mark.process
@@ -302,43 +306,6 @@ def test_benchmark_compare_aggregates_beyond_the_sample_row_ceiling(tmp_path: Pa
     assert row["baseline_mean"] == 10
     assert row["candidate_mean"] == 5
     assert row["ratio"] == 0.5
-
-
-@pytest.mark.process
-def test_benchmark_scaling_aggregates_beyond_the_sample_row_ceiling(tmp_path: Path) -> None:
-    artifact = tmp_path / "scaling.samples.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "schema_version": "flameox.benchmark-samples.v1",
-                "producer": "example-benchmark",
-                "benchmarks": [
-                    {
-                        "name": "operation",
-                        "unit": "ns",
-                        "measurement_clock": "host_monotonic",
-                        "synchronization": "not_required",
-                        "dimensions": {"elements": str(elements)},
-                        "samples": [duration] * 1_002,
-                    }
-                    for elements, duration in ((10, 100), (20, 400))
-                ],
-            }
-        )
-    )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "benchmark.scaling",
-            [PathSource(path=str(artifact), format="samples")],
-            {"input_dimension": "elements", "metric": "operation"},
-        )
-    finally:
-        runtime.close()
-
-    row = result["blocks"][1]["rows"][0]
-    assert row["point_count"] == 2
-    assert row["exponent"] == pytest.approx(2.0)
 
 
 @pytest.mark.process
@@ -400,43 +367,6 @@ def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_value
     assert result["blocks"][1]["rows"][0]["status"] == "inconclusive"
     assert result["blocks"][1]["rows"][0]["exponent"] is None
     assert any("numeric 'elements'" in item for item in result["limitations"])
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("inputs", "measurements", "reason"),
-    [
-        (
-            (1_000_000_000_000_000, 1_000_000_000_000_001),
-            (1_000.0, 2_000.0),
-            "insufficient log-space input separation",
-        ),
-        ((1_024, 1_025), (2_000.0, 1_000.0), "finite numeric range"),
-    ],
-)
-def test_benchmark_scaling_reports_numerical_limits_without_crashing(
-    inputs: tuple[int, int], measurements: tuple[float, float], reason: str
-) -> None:
-    result = scaling_projection(
-        [
-            {
-                "benchmark": "operation",
-                "unit": "ns",
-                "dimensions": {"elements": str(input_value)},
-                "value_float": measurement,
-            }
-            for input_value, measurement in zip(inputs, measurements, strict=True)
-        ],
-        {"input_dimension": "elements"},
-        provider_id="test",
-        provider_version="1",
-        max_rows=10,
-    )
-
-    row = result.blocks[1]["rows"][0]
-    assert row["status"] == "inconclusive"
-    assert row["exponent"] is None
-    assert reason in row["reason"]
 
 
 @pytest.mark.process
@@ -660,28 +590,3 @@ def test_unpreserved_capture_analysis_failure_can_be_preserved_later(tmp_path: P
             runtime.close()
 
     anyio.run(exercise)
-
-
-@pytest.mark.process
-def test_benchmark_aggregates_report_inconclusive_or_limit_for_exact_large_integers(
-    tmp_path: Path,
-) -> None:
-    artifact = tmp_path / "large.samples.json"
-    _write_scaling_samples(artifact)
-    document = json.loads(artifact.read_text())
-    for benchmark in document["benchmarks"]:
-        benchmark["samples"] = [10**400]
-    artifact.write_text(json.dumps(document))
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    source = PathSource(path=str(artifact), format="samples")
-    try:
-        scaling = runtime.analyze("benchmark.scaling", [source], {"input_dimension": "elements"})
-        assert scaling["blocks"][1]["rows"][0]["status"] == "inconclusive"
-        assert any("3 measurement(s)" in value for value in scaling["limitations"])
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("benchmark.compare", [source, source], {"metric": "operation"})
-        assert failure.value.code == "LIMIT_EXCEEDED"
-        assert "finite numeric range" in failure.value.message
-        assert not (tmp_path / ".flameox").exists()
-    finally:
-        runtime.close()

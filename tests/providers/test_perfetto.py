@@ -1,143 +1,153 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from flameox.providers.perfetto import PerfettoProvider
-from flameox.workers.perfetto_contract import (
-    PerfettoCallGraphRow,
-    PerfettoExtractResult,
-    PerfettoSliceRow,
-)
+from flameox.runtime import AnalysisRuntime
+from flameox.runtime_contracts import PathSource, RequestLimits
 
 
-class _Harness:
-    def __init__(self, response: PerfettoExtractResult) -> None:
-        self.response = response
-        self.requests: list[Any] = []
-
-    def run_typed_sync(self, _worker: Any, request: Any, **_kwargs: Any) -> PerfettoExtractResult:
-        self.requests.append(request)
-        return self.response
+def _trace_processor() -> str | None:
+    configured = os.environ.get("FLAMEOX_TRACE_PROCESSOR")
+    if configured:
+        return shutil.which(configured)
+    return shutil.which("trace_processor_shell") or shutil.which("trace_processor")
 
 
-def _slice(
-    identifier: int,
-    name: str,
-    *,
-    category: str | None = None,
-    parent_id: int | None = None,
-) -> PerfettoSliceRow:
-    return PerfettoSliceRow(
-        id=identifier,
-        parent_id=parent_id,
-        name=name,
-        ts=identifier * 10,
-        dur=5,
-        track_id=1,
-        category=category,
-        thread_name="main",
-        process_name="python",
-        filename=None,
-        line=None,
-        input_shapes=None,
-        allocation_bytes=None,
-        phase=None,
-        correlation_id=None,
-        device=None,
-        stream=None,
-    )
+@pytest.mark.golden
+@pytest.mark.process
+@pytest.mark.optional
+def test_chrome_trace_projects_native_perfetto_evidence(tmp_path: Path) -> None:
+    pytest.importorskip("perfetto", reason="Perfetto Python package is not installed")
+    binary = _trace_processor()
+    if binary is None:
+        pytest.skip("Trace Processor executable not found on PATH or FLAMEOX_TRACE_PROCESSOR")
 
-
-def test_pytorch_projection_excludes_generic_perfetto_slices(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    response = PerfettoExtractResult(
-        truncated=False,
-        rows=(
-            _slice(1, "event_loop", category="python"),
-            _slice(2, "aten::matmul", category="cpu_op"),
-            _slice(3, "ProfilerStep#1", category="pytorch"),
-        ),
-    )
-    harness = _Harness(response)
-    provider = PerfettoProvider(harness)  # type: ignore[arg-type]
-    binary = tmp_path / "trace_processor"
-    binary.write_bytes(b"binary")
-    monkeypatch.setattr(PerfettoProvider, "_binary", staticmethod(lambda: binary))
-    monkeypatch.setattr(PerfettoProvider, "_identity", staticmethod(lambda _path: "test"))
-
-    summary = provider.analyze(
-        "trace.summary",
-        tmp_path / "trace.json",
-        {},
-        max_rows=10,
-        timeout_seconds=1,
-        maximum_rss_bytes=1024,
-        maximum_output_bytes=1024,
-    )
-    pytorch = provider.analyze(
-        "trace.pytorch",
-        tmp_path / "trace.json",
-        {},
-        max_rows=10,
-        timeout_seconds=1,
-        maximum_rss_bytes=1024,
-        maximum_output_bytes=1024,
-    )
-
-    assert [row["name"] for row in summary.blocks[1]["rows"]] == [
-        "event_loop",
-        "aten::matmul",
-        "ProfilerStep#1",
-    ]
-    assert [row["name"] for row in pytorch.blocks[1]["rows"]] == [
-        "aten::matmul",
-        "ProfilerStep#1",
-    ]
-    assert pytorch.blocks[0]["values"]["pytorch_event_count"] == 2
-    assert harness.requests[-1].projection == "pytorch"
-
-
-@pytest.mark.parametrize("total", [1, 111])
-def test_call_graph_reports_edge_population_instead_of_zero_slices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, total: int
-) -> None:
-    harness = _Harness(
-        PerfettoExtractResult(
-            truncated=total > 1,
-            rows=(),
-            call_graph_rows=(
-                PerfettoCallGraphRow(
-                    parent="parent", child="child", sample_count=1, inclusive_duration_ns=5
-                ),
-            ),
-            projected_total=total,
+    trace = tmp_path / "trace.json"
+    trace.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {
+                        "name": "request",
+                        "cat": "python",
+                        "ph": "X",
+                        "ts": 100,
+                        "dur": 600,
+                        "pid": 1,
+                        "tid": 7,
+                    },
+                    {
+                        "name": "load_model",
+                        "cat": "python",
+                        "ph": "X",
+                        "ts": 150,
+                        "dur": 300,
+                        "pid": 1,
+                        "tid": 7,
+                    },
+                    {
+                        "name": "aten::matmul",
+                        "cat": "cpu_op",
+                        "ph": "X",
+                        "ts": 200,
+                        "dur": 100,
+                        "pid": 1,
+                        "tid": 7,
+                        "args": {"Input Shapes": "[2, 3]", "filename": "model.py", "line": 42},
+                    },
+                    {
+                        "name": "event_loop",
+                        "cat": "python",
+                        "ph": "X",
+                        "ts": 800,
+                        "dur": 50,
+                        "pid": 1,
+                        "tid": 7,
+                    },
+                ]
+            }
         )
     )
-    provider = PerfettoProvider(harness)  # type: ignore[arg-type]
-    monkeypatch.setattr(PerfettoProvider, "_binary", staticmethod(lambda: tmp_path / "reader"))
-    monkeypatch.setattr(PerfettoProvider, "_identity", staticmethod(lambda _path: "test"))
-    result = provider.analyze(
-        "trace.call_graph",
-        tmp_path / "trace.json",
-        {},
-        max_rows=1,
-        timeout_seconds=1,
-        maximum_rss_bytes=1024,
-        maximum_output_bytes=1024,
+
+    runtime = AnalysisRuntime(
+        evidence_directory=tmp_path / ".flameox", limits=RequestLimits(max_rows=1_000)
     )
-    assert result.blocks[0]["values"] == {"edge_count": total}
-    assert result.rows_observed == total
-    assert result.complete is (total == 1)
-    assert result.blocks[1]["rows"] == [
-        {
-            "parent": "parent",
-            "child": "child",
-            "sample_count": 1,
-            "inclusive_duration_ns": 5,
-        }
+    source = [PathSource(path=str(trace), format="chrome-trace")]
+    try:
+        summary = runtime.analyze("trace.summary", source, {})
+        call_graph = runtime.analyze("trace.call_graph", source, {})
+        pytorch = runtime.analyze("trace.pytorch", source, {})
+        window = runtime.analyze("trace.window", source, {"start_ns": 240_000, "end_ns": 250_000})
+        large_trace = tmp_path / "many-edges.json"
+        large_trace.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {"name": "root", "ph": "X", "ts": 0, "dur": 3_000, "pid": 1, "tid": 1},
+                        *[
+                            {
+                                "name": f"child-{index}",
+                                "ph": "X",
+                                "ts": index * 2 + 1,
+                                "dur": 1,
+                                "pid": 1,
+                                "tid": 1,
+                            }
+                            for index in range(1_005)
+                        ],
+                    ]
+                }
+            )
+        )
+        limited = runtime.analyze(
+            "trace.call_graph",
+            [PathSource(path=str(large_trace), format="chrome-trace")],
+            {},
+            limits=RequestLimits(max_rows=1_000),
+        )
+    finally:
+        runtime.close()
+
+    summary_rows = summary["blocks"][1]["rows"]
+    assert [row["name"] for row in summary_rows] == [
+        "request",
+        "load_model",
+        "aten::matmul",
+        "event_loop",
     ]
+    assert summary_rows[2]["input_shapes"] == "[2, 3]"
+    assert summary_rows[2]["filename"] == "model.py"
+    assert summary_rows[2]["line"] == 42
+    assert call_graph["blocks"][1]["rows"] == [
+        {
+            "parent": "request",
+            "child": "load_model",
+            "sample_count": 1,
+            "inclusive_duration_ns": 300_000,
+        },
+        {
+            "parent": "load_model",
+            "child": "aten::matmul",
+            "sample_count": 1,
+            "inclusive_duration_ns": 100_000,
+        },
+    ]
+    assert [row["name"] for row in pytorch["blocks"][1]["rows"]] == ["aten::matmul"]
+    assert [row["name"] for row in window["blocks"][1]["rows"]] == [
+        "request",
+        "load_model",
+        "aten::matmul",
+    ]
+    assert window["blocks"][0]["values"]["matching_slice_count"] == 3
+    assert limited["coverage"] == {
+        "rows_observed": 1_005,
+        "rows_returned": 1_000,
+        "complete": False,
+    }
+    assert limited["blocks"][0]["values"]["edge_count"] == 1_005
+    assert not (tmp_path / ".flameox").exists()

@@ -277,6 +277,75 @@ def test_mooncake_summary_aggregates_beyond_returned_rows(tmp_path: Path) -> Non
     assert result["coverage"]["complete"] is False
 
 
+@pytest.mark.optional
+@pytest.mark.process
+def test_aiperf_runtime_comparison_uses_prompt_free_request_metrics(tmp_path: Path) -> None:
+    pytest.importorskip("aiperf")
+
+    def write_export(path: Path, latencies_ms: tuple[int, int]) -> None:
+        records = []
+        for index, latency_ms in enumerate(latencies_ms):
+            records.append(
+                {
+                    "metadata": {
+                        "session_num": index + 1,
+                        "x_request_id": f"request-{index}",
+                        "conversation_id": f"conversation-{index}",
+                        "turn_index": index,
+                        "request_start_ns": 1_000 + index,
+                        "request_end_ns": 1_000_000 + latency_ms * 1_000_000,
+                        "was_cancelled": False,
+                    },
+                    "metrics": {
+                        "input_sequence_length": {"value": 20, "unit": "tokens"},
+                        "output_sequence_length": {"value": 3, "unit": "tokens"},
+                        "time_to_first_token": {"value": 2, "unit": "ms"},
+                        "request_latency": {"value": latency_ms, "unit": "ms"},
+                    },
+                    "error": None,
+                    "raw_prompt": "must never leave the isolated reader",
+                }
+            )
+        path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    baseline = tmp_path / "baseline.aiperf.jsonl"
+    candidate = tmp_path / "candidate.aiperf.jsonl"
+    write_export(baseline, (10, 14))
+    write_export(candidate, (5, 7))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "inference.compare",
+            [
+                PathSource(path=str(baseline), format="aiperf", producer="aiperf"),
+                PathSource(path=str(candidate), format="aiperf", producer="aiperf"),
+            ],
+            {"metric": "latency_ns"},
+        )
+    finally:
+        runtime.close()
+
+    assert result["provider"]["id"] == "aiperf"
+    assert result["blocks"][1]["rows"] == [
+        {
+            "metric": "latency_ns",
+            "baseline_index": 0,
+            "candidate_index": 1,
+            "baseline_mean": 12_000_000,
+            "candidate_mean": 6_000_000,
+            "ratio": 0.5,
+            "baseline_samples": 2,
+            "candidate_samples": 2,
+            "compatibility": "partial",
+            "identity_differences": {},
+            "identity_unavailable": ["system"],
+        }
+    ]
+    assert "must never leave the isolated reader" not in json.dumps(result)
+    assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.optional
 @pytest.mark.process
 def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path) -> None:
     pytest.importorskip("aiperf")

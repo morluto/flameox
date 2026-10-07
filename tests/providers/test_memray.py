@@ -42,6 +42,45 @@ def test_memray_capture_is_analyzed_without_creating_repository(tmp_path: Path) 
     assert not (tmp_path / ".flameox").exists()
 
 
+@pytest.mark.integration
+@pytest.mark.requires_memray
+def test_memray_native_profile_attributes_and_bounds_nested_allocations(tmp_path: Path) -> None:
+    memray = pytest.importorskip("memray")
+    capture = tmp_path / "nested-memory.bin"
+
+    def allocate_leaf() -> list[bytearray]:
+        return [bytearray(8_192) for _ in range(4)]
+
+    def call_leaf() -> list[bytearray]:
+        return allocate_leaf()
+
+    with memray.Tracker(str(capture)):
+        retained = call_leaf()
+
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "memory.hotspots",
+            [PathSource(path=str(capture), format="memray", producer="memray")],
+            {},
+            limits=RequestLimits(max_rows=1),
+        )
+    finally:
+        runtime.close()
+
+    assert retained
+    assert result["blocks"][0]["values"]["total_allocated_bytes"] > 0
+    row = result["blocks"][1]["rows"][0]
+    assert row["function"] == "allocate_leaf"
+    assert row["inclusive_bytes"] >= row["self_bytes"]
+    assert row["allocation_count"] == 4
+    assert result["coverage"]["rows_returned"] == 1
+    assert result["coverage"]["rows_observed"] > 1
+    assert result["coverage"]["complete"] is False
+    assert result["truncation"]["reason"] == "row_limit"
+    assert any("bounded" in item for item in result["limitations"])
+
+
 @pytest.mark.process
 @pytest.mark.requires_memray
 def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(

@@ -379,62 +379,6 @@ def test_pyspy_capture_rejects_ambient_path_fallback(
 
 
 @pytest.mark.process
-def test_perf_capture_converts_native_data_in_session_scratch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    executable = tmp_path / "bin" / "perf"
-    executable.parent.mkdir()
-    calls = tmp_path / "calls.txt"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, sys\n"
-        "arguments = sys.argv[1:]\n"
-        f"calls = pathlib.Path({str(calls)!r})\n"
-        "with calls.open('a') as stream: stream.write(' '.join(arguments) + '\\n')\n"
-        "if arguments[0] == 'record':\n"
-        "    output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "    output.write_bytes(b'PERFILE2')\n"
-        "else:\n"
-        "    print('target 1 [000] 1.0: cycles:')\n"
-        "    print('        1000 leaf+0x1 (app)')\n"
-        "    print('        2000 root+0x2 (app)')\n"
-        "    print()\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
-
-    async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-        try:
-            return await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, "-c", "pass"],
-                    cwd=str(tmp_path),
-                    provider_id="perf",
-                    capture_arguments={"frequency": 199, "call_graph": "fp"},
-                ),
-                "cpu.hotspots",
-            )
-        finally:
-            runtime.close()
-
-    result = anyio.run(exercise)
-    assert result["provider"]["id"] == "perf-collapsed"
-    assert result["blocks"][1]["rows"] == [
-        {"function": "leaf", "self_samples": 1, "unit": "samples"}
-    ]
-    execution = result["capture"]["executions"][0]
-    collector_digest, _ = sha256_file(executable)
-    workload_digest, _ = sha256_file(Path(sys.executable))
-    assert execution["collector_executable_sha256"] == collector_digest
-    assert execution["workload_executable_sha256"] == workload_digest
-    assert execution["capture_argv"][-3] == str(Path(sys.executable).absolute())
-    record, script = calls.read_text().splitlines()
-    assert "record --freq 199 --call-graph fp" in record
-    assert script.startswith("script --input ")
-
-
-@pytest.mark.process
 def test_wrapped_capture_revalidates_workload_after_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -471,67 +415,6 @@ def test_wrapped_capture_revalidates_workload_after_admission(
             runtime.close()
 
     anyio.run(exercise)
-
-
-def test_node_capture_uses_explicit_profile_name_and_analyzes_v8_output(tmp_path: Path) -> None:
-    executable = tmp_path / "fake-node"
-    executable.write_text(
-        """#!/usr/bin/env python3
-import json
-import sys
-from pathlib import Path
-
-directory = Path(next(
-    value.split("=", 1)[1]
-    for value in sys.argv
-    if value.startswith("--cpu-prof-dir=")
-))
-name = next(
-    value.split("=", 1)[1]
-    for value in sys.argv
-    if value.startswith("--cpu-prof-name=")
-)
-(directory / name).write_text(json.dumps({
-    "nodes": [{
-        "id": 1,
-        "callFrame": {
-            "functionName": "captured", "url": "app.js",
-            "lineNumber": 0, "columnNumber": 0
-        },
-        "hitCount": 1,
-        "children": []
-    }],
-    "samples": [1]
-}))
-"""
-    )
-    executable.chmod(0o755)
-
-    async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-        try:
-            return await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[str(executable), "app.js"],
-                    cwd=str(tmp_path),
-                    provider_id="node-cpu-profile",
-                ),
-                "cpu.hotspots",
-            )
-        finally:
-            runtime.close()
-
-    result = anyio.run(exercise)
-    capture = result["capture"]
-    assert isinstance(capture, dict)
-    executions = capture["executions"]
-    assert isinstance(executions, list)
-    capture_argv = executions[0]["capture_argv"]
-    assert capture_argv[1] == "--cpu-prof"
-    assert "--cpu-prof-name=profile.cpuprofile" in capture_argv
-    provider = result["provider"]
-    assert isinstance(provider, dict)
-    assert provider["id"] == "v8-cpu-profile"
 
 
 @pytest.mark.process

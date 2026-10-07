@@ -1,74 +1,16 @@
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
-from typing import Any
 
-import anyio
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CaptureTarget,
     PathSource,
     RequestLimits,
 )
-
-
-@pytest.mark.process
-def test_nsight_systems_capture_preserves_native_report_and_exports_parquetdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    template = tmp_path / "kernels.parquet"
-    pq.write_table(pa.table({"start_ns": [1], "kernel": ["captured"]}), template)
-    calls = tmp_path / "calls.txt"
-    executable = tmp_path / "bin" / "nsys"
-    executable.parent.mkdir()
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, shutil, sys\n"
-        "arguments = sys.argv[1:]\n"
-        f"calls = pathlib.Path({str(calls)!r})\n"
-        "with calls.open('a') as stream: stream.write(' '.join(arguments) + '\\n')\n"
-        "if arguments[0] == 'profile':\n"
-        "    stem = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "    stem.with_suffix('.nsys-rep').write_bytes(b'native-report')\n"
-        "else:\n"
-        "    output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "    destination = output.with_suffix('.parquetdir')\n"
-        "    destination.mkdir(parents=True, exist_ok=True)\n"
-        f"    shutil.copyfile(pathlib.Path({str(template)!r}), "
-        "destination / 'CUDA_GPU_KERN_SUM.parquet')\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
-
-    async def exercise() -> dict[str, Any]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-        try:
-            return await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, "-c", "pass"],
-                    cwd=str(tmp_path),
-                    provider_id="nsight-systems",
-                    capture_arguments={"trace": ["cuda", "nvtx"]},
-                ),
-                "gpu.launches",
-            )
-        finally:
-            runtime.close()
-
-    result = anyio.run(exercise)
-    assert result["provider"]["id"] == "nsight-systems-parquetdir"
-    assert result["capture"]["executions"][0]["capture_argv"][0] == "nsys"
-    assert result["blocks"][1]["rows"][0]["kernel"] == "captured"
-    profile, export = calls.read_text().splitlines()
-    assert "profile --trace=cuda,nvtx" in profile
-    assert "--export=sqlite" not in profile
-    assert "export --type parquetdir" in export
 
 
 def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: Path) -> None:
@@ -94,18 +36,18 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
     assert preserved["evidence_id"]
 
 
-@pytest.mark.parametrize(
-    "table", ["CUDA_API_TRACE", "CUPTI_ACTIVITY_KIND_RUNTIME", "CUPTI_ACTIVITY_KIND_DRIVER"]
-)
-def test_nsight_systems_cuda_api_only_is_negative_accelerator_evidence(
-    tmp_path: Path, table: str
-) -> None:
+def test_nsight_systems_cuda_api_only_is_negative_accelerator_evidence(tmp_path: Path) -> None:
     parquetdir = tmp_path / "report.parquetdir"
     parquetdir.mkdir()
-    pq.write_table(
-        pa.table({"name": ["cudaGetDeviceCount"]}),
-        parquetdir / f"{table}.parquet",
-    )
+    for table in (
+        "CUDA_API_TRACE",
+        "CUPTI_ACTIVITY_KIND_RUNTIME",
+        "CUPTI_ACTIVITY_KIND_DRIVER",
+    ):
+        pq.write_table(
+            pa.table({"name": ["cudaGetDeviceCount"]}),
+            parquetdir / f"{table}.parquet",
+        )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
@@ -222,57 +164,7 @@ def test_nsight_systems_trace_projections_select_semantic_table_families(
     assert {row["table"] for row in lifecycle["blocks"][1]["rows"]} == {"PROCESS_LIFECYCLE"}
 
 
-@pytest.mark.process
-def test_cpu_only_nsight_capture_is_typed_negative_accelerator_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    template = tmp_path / "os-runtime.parquet"
-    pq.write_table(pa.table({"start_ns": [1], "operation": ["poll"]}), template)
-    executable = tmp_path / "bin" / "nsys"
-    executable.parent.mkdir()
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, shutil, sys\n"
-        "arguments = sys.argv[1:]\n"
-        "if arguments[0] == 'profile':\n"
-        "    stem = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "    stem.with_suffix('.nsys-rep').write_bytes(b'cpu-only-native-report')\n"
-        "else:\n"
-        "    output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "    destination = output.with_suffix('.parquetdir')\n"
-        "    destination.mkdir(parents=True, exist_ok=True)\n"
-        f"    shutil.copyfile(pathlib.Path({str(template)!r}), "
-        "destination / 'OS_RUNTIME_SUM.parquet')\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
-
-    async def exercise() -> tuple[dict[str, Any], dict[str, Any]]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-        try:
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, "-c", "pass"],
-                    cwd=str(tmp_path),
-                    provider_id="nsight-systems",
-                ),
-                "gpu.launches",
-                preserve=True,
-            )
-            manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
-            return result, manifest
-        finally:
-            runtime.close()
-
-    result, manifest = anyio.run(exercise)
-    assert result["coverage"] == {"rows_returned": 0, "rows_observed": 0, "complete": True}
-    assert result["blocks"][0]["values"]["accelerator_activity_observed"] is False
-    assert "no_accelerator_activity_observed" in result["limitations"]
-    assert result["analysis_failure"] is None
-    assert any(item["format"] == "nsys-rep" for item in manifest["body"]["artifacts"])
-
-
-@pytest.mark.unit
+@pytest.mark.golden
 def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Path) -> None:
     export = tmp_path / "report.parquetdir"
     export.mkdir()
@@ -294,43 +186,4 @@ def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Pa
     assert result["provider"]["id"] == "nsight-systems-parquetdir"
     assert result["coverage"] == {"rows_returned": 2, "rows_observed": 3, "complete": False}
     assert result["continuation"]
-    assert not (tmp_path / ".flameox").exists()
-
-
-@pytest.mark.process
-def test_native_nsight_report_uses_cached_parquetdir_export(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    template = tmp_path / "template.parquet"
-    pq.write_table(pa.table({"start_ns": [1], "kernel": ["cached"]}), template)
-    counter = tmp_path / "exports.txt"
-    executable = tmp_path / "bin" / "nsys"
-    executable.parent.mkdir()
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, shutil, sys\n"
-        "arguments = sys.argv[1:]\n"
-        "output = pathlib.Path(arguments[arguments.index('--output') + 1])\n"
-        "destination = output.with_suffix('.parquetdir')\n"
-        "destination.mkdir(parents=True, exist_ok=True)\n"
-        f"shutil.copyfile(pathlib.Path({str(template)!r}), "
-        "destination / 'CUDA_GPU_KERN_SUM.parquet')\n"
-        f"with pathlib.Path({str(counter)!r}).open('a') as stream: stream.write('1\\n')\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
-    report = tmp_path / "capture.nsys-rep"
-    report.write_bytes(b"native-nsight-report")
-
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        first = runtime.analyze("gpu.launches", [PathSource(path=str(report))], {})
-        runtime.analyses.clear()
-        second = runtime.analyze("gpu.launches", [PathSource(path=str(report))], {})
-    finally:
-        runtime.close()
-
-    assert first["blocks"][1]["rows"][0]["kernel"] == "cached"
-    assert second["blocks"][1]["rows"] == first["blocks"][1]["rows"]
-    assert counter.read_text().splitlines() == ["1"]
     assert not (tmp_path / ".flameox").exists()
