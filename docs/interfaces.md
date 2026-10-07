@@ -15,8 +15,10 @@ compact capability descriptors by artifact format or capture support. Get mode r
 capability's exact analysis option schema, compatible provider option schemas, minimal examples,
 limitations, and routing exclusions.
 
-`flameox mcp inspect` is compact by default; use `--tool TOOL_NAME` for one complete schema or
-`--full` for the complete catalog. CLI results omit the process-local `analysis_id` because it
+`flameox mcp inspect` is compact by default; use `--capability CAPABILITY_ID` for exact analysis
+options, compatible provider options, and valid examples shared with MCP discovery. Use
+`--tool TOOL_NAME` for one transport schema or `--full` for the complete catalog. CLI results omit
+the process-local `analysis_id` because it
 cannot survive command exit.
 
 | Group | Count | Examples | Effect |
@@ -153,8 +155,10 @@ For example, a single Nsight Compute capture for kernel metrics has this argumen
 Analysis and capture remain separate tools even when they return the same evidence envelope. MCP
 annotations describe a whole tool, so combining read-only artifact analysis and target execution
 behind a mode flag would conceal a material effect change. Provider choice stays inside a capture
-tool because it is a typed implementation choice for one evidence question; incompatible providers
-cannot be represented by that tool's schema.
+tool because it is a typed implementation choice for one evidence question. The compact transport
+schema enumerates provider kinds; admission rejects incompatible capability/provider pairs before
+execution. `inspect_capabilities` exposes the selected capability's compatible providers and their
+exact options schemas.
 
 There is one resource template:
 
@@ -291,8 +295,9 @@ is reported under `output_streams`. Omitted bytes cannot be recovered later.
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields live in the capture tool's
-typed provider union, and analysis fields live in its capability-specific `options` model. Shell
-command strings are not accepted.
+selected provider's typed `options` model, and analysis fields live in the selected capability's
+`options` model. Discovery returns both exact schemas; admission validates them before execution.
+Shell command strings are not accepted.
 
 `target.budget` controls workload execution independently of analysis limits:
 
@@ -350,7 +355,7 @@ exit excludes the corresponding case-block observation from paired comparison.
 Comparison capabilities consume explicit artifacts; they do not capture their inputs. A caller captures
 representative baseline and candidate summaries separately, preserves them when durable provenance
 is needed, and supplies at least two sources with capability `benchmark.compare`,
-`inference.compare`, or `kernel.compare`. The capture schema omits these variants: experiment
+`inference.compare`, or `kernel.compare`. Capture admission rejects these capabilities: experiment
 capture reports the declared cases' effect but does not create the
 case-grouped native inputs required by artifact comparison.
 

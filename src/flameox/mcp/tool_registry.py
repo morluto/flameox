@@ -125,10 +125,14 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
 
     providers = compatible_capture_providers(capability)
     format_name = capability.formats[0]
+    option_schema = capability.model.model_json_schema()
+    options = dict(option_schema.get("examples", [{}])[0])
+    capability.model.model_validate(options)
     suffix = "sarif" if format_name == "sarif" else format_name.replace("-", ".")
     analysis_example = {
         "request": {
             "capability_id": capability.id,
+            "options": options,
             "sources": [
                 {
                     "kind": "path",
@@ -143,6 +147,7 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
         {
             "request": {
                 "capability_id": capability.id,
+                "options": options,
                 "target": {"argv": ["python", "workload.py"], "cwd": "/absolute/workdir"},
                 "provider": {"kind": providers[0].id},
             }
@@ -164,7 +169,7 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
             }
             for provider in providers
         ],
-        "analysis_option_schema": capability.model.model_json_schema(),
+        "analysis_option_schema": option_schema,
         "analysis_example": analysis_example,
         "capture_example": capture_example,
         "limitations": [capability.limitation],

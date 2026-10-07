@@ -75,6 +75,124 @@ def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
         reopened.close()
 
 
+@pytest.mark.integration
+@pytest.mark.process
+@pytest.mark.parametrize("provider", ["direct", "node-cpu-profile"])
+def test_preserved_capture_can_be_rescued_after_scratch_is_released(
+    tmp_path: Path, provider: str
+) -> None:
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    capability_id = "artifact.preview" if provider == "direct" else "cpu.hotspots"
+
+    async def capture() -> dict[str, Any]:
+        return await runtime.capture_and_analyze(
+            CaptureTarget(
+                argv=[sys.executable, "-c", "print('retained evidence')"],
+                cwd=str(tmp_path),
+                provider_id=provider,
+            ),
+            capability_id,
+        )
+
+    try:
+        result = anyio.run(capture)
+        reference = runtime.preserve_evidence(result["analysis_id"])
+        assert all(not Path(item["path"]).exists() for item in result["inputs"])
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(tmp_path / "rescue"))
+        assert rescued["evidence_id"] == reference["evidence_id"]
+        assert runtime.rescue_evidence(result["analysis_id"], str(tmp_path / "rescue")) == rescued
+        assert runtime.preserve_evidence(result["analysis_id"]) == reference
+    finally:
+        runtime.close()
+    reopened = AnalysisRuntime(evidence_directory=tmp_path / "rescue")
+    try:
+        projection = reopened.read_evidence_agent_projection(rescued["evidence_id"])
+        if provider == "direct":
+            reanalysis = reopened.analyze(
+                capability_id,
+                [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]],
+                {},
+            )
+            assert reanalysis["blocks"][1]["rows"][0]["text"] == "retained evidence"
+        else:
+            assert projection["body"]["capture_request"]["executions"][0]["status"] == "failed"
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+def test_rescue_uses_preserved_directory_after_original_is_removed(tmp_path: Path) -> None:
+    directory = tmp_path / "native"
+    directory.mkdir()
+    artifact = directory / "input.txt"
+    artifact.write_text("native contents\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(directory))], {})
+        reference = runtime.preserve_evidence(result["analysis_id"])
+        artifact.unlink()
+        directory.rmdir()
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(tmp_path / "rescue"))
+        assert rescued["evidence_id"] == reference["evidence_id"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+@pytest.mark.process
+def test_rescue_of_preserved_capture_does_not_reapply_analysis_input_limit(tmp_path: Path) -> None:
+    runtime = AnalysisRuntime(
+        evidence_directory=tmp_path / "store", limits=RequestLimits(max_input_bytes=1024)
+    )
+
+    async def capture() -> dict[str, Any]:
+        return await runtime.capture_and_analyze(
+            CaptureTarget(
+                argv=[sys.executable, "-c", "print('x' * 2048)"],
+                cwd=str(tmp_path),
+                provider_id="direct",
+            ),
+            "artifact.preview",
+        )
+
+    try:
+        result = anyio.run(capture)
+        assert result["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
+        reference = runtime.preserve_evidence(result["analysis_id"])
+        rescued = runtime.rescue_evidence(result["analysis_id"], str(tmp_path / "rescue"))
+        assert rescued["evidence_id"] == reference["evidence_id"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_rescue_reports_damaged_preserved_evidence_before_creating_destination(
+    tmp_path: Path, damage: str
+) -> None:
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("native contents\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    destination = tmp_path / "rescue"
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        reference = runtime.preserve_evidence(result["analysis_id"])
+        source = runtime.repository.select_source(
+            reference["evidence_id"], selector=None, role=None
+        )
+        payload = source.members[0][1].path
+        if damage == "missing":
+            payload.unlink()
+        else:
+            payload.write_text("changed bytes")
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.rescue_evidence(result["analysis_id"], str(destination))
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+        assert not destination.exists()
+    finally:
+        runtime.close()
+
+
 @pytest.mark.unit
 def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle(
     tmp_path: Path,

@@ -13,10 +13,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp import create_server, run_server
-from flameox.mcp.tool_registry import capability_descriptor
+from flameox.mcp.tool_registry import capability_descriptor, capability_detail
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITIES,
+    CAPABILITY_BY_ID,
     CaptureTarget,
     EvidenceSource,
     ExperimentDesign,
@@ -399,7 +400,7 @@ def capture(
         str,
         typer.Option(
             "--provider",
-            help="Capture provider accepted by the selected capability's MCP tool schema.",
+            help="Provider ID; inspect with `flameox mcp inspect --capability CAPABILITY_ID`.",
         ),
     ],
     capability_id: Annotated[
@@ -410,8 +411,12 @@ def capture(
         ),
     ] = "artifact.preview",
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
-    capture_arguments: Annotated[str, typer.Option("--capture-arguments")] = "{}",
-    analysis_arguments: Annotated[str, typer.Option("--analysis-arguments")] = "{}",
+    capture_arguments: Annotated[
+        str, typer.Option("--capture-arguments", help="Provider options as a JSON object.")
+    ] = "{}",
+    analysis_arguments: Annotated[
+        str, typer.Option("--analysis-arguments", help="Capability options as a JSON object.")
+    ] = "{}",
     console_output: Annotated[
         str, typer.Option("--console-output", help="Console retention: diagnostics or full.")
     ] = "diagnostics",
@@ -585,12 +590,40 @@ def mcp_inspect(
         str | None,
         typer.Option("--tool", help="Return the complete schema for one exact tool name."),
     ] = None,
+    capability_id: Annotated[
+        str | None,
+        typer.Option("--capability", help="Return exact options and examples for one capability."),
+    ] = None,
     full: Annotated[
         bool,
         typer.Option("--full", help="Return the complete catalog including every schema."),
     ] = False,
 ) -> None:
     """Inspect the MCP catalog without starting a transport."""
+
+    if sum((tool_name is not None, capability_id is not None, full)) > 1:
+        _cli_failure(
+            RuntimeFailure(
+                "INVALID_INPUT",
+                "Use either --tool, --capability, or --full for one inspection mode.",
+            )
+        )
+    if capability_id is not None:
+        capability = CAPABILITY_BY_ID.get(capability_id)
+        if capability is None:
+            _cli_failure(
+                RuntimeFailure(
+                    "UNKNOWN_CAPABILITY",
+                    f"Unknown capability: {capability_id}",
+                    details={
+                        "requested_capability": capability_id,
+                        "available_capabilities": sorted(CAPABILITY_BY_ID),
+                        "recovery": "Run `flameox mcp inspect` to select a capability.",
+                    },
+                )
+            )
+        _write({"capabilities": [capability_detail(capability)]})
+        return
 
     async def inspect_server() -> dict[str, Any]:
         server = create_server()
@@ -603,13 +636,6 @@ def mcp_inspect(
 
     catalog = anyio.run(inspect_server)
     tools = cast(list[dict[str, Any]], catalog["tools"])
-    if tool_name is not None and full:
-        _cli_failure(
-            RuntimeFailure(
-                "INVALID_INPUT",
-                "Use either --tool for one complete schema or --full for the complete catalog.",
-            )
-        )
     if tool_name is not None:
         tools = [tool for tool in tools if tool["name"] == tool_name]
         if not tools:

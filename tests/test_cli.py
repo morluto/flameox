@@ -96,6 +96,34 @@ def test_mcp_inspect_rejects_conflicting_detail_modes() -> None:
     assert "either --tool" in result.stderr
 
 
+@pytest.mark.parametrize("capability_id", ["trace.window", "benchmark.scaling", "cpu.hotspots"])
+def test_mcp_inspect_returns_exact_capability_options_and_examples(capability_id: str) -> None:
+    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", capability_id])
+    assert result.exit_code == 0, result.output
+    detail = json.loads(result.stdout)["capabilities"][0]
+    assert detail["capability_id"] == capability_id
+    assert "analysis_option_schema" in detail
+    options = detail["analysis_example"]["request"]["options"]
+    for name in detail["analysis_option_schema"].get("required", []):
+        assert name in options
+    assert all("option_schema" in provider for provider in detail["capture_providers"])
+
+
+@pytest.mark.parametrize("other", [["--full"], ["--tool", "analyze"]])
+def test_mcp_inspect_rejects_conflicting_capability_modes(other: list[str]) -> None:
+    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", "cpu.hotspots", *other])
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["code"] == "INVALID_INPUT"
+
+
+def test_mcp_inspect_unknown_capability_returns_choices() -> None:
+    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", "missing.capability"])
+    assert result.exit_code == 1
+    failure = json.loads(result.stderr)
+    assert failure["code"] == "UNKNOWN_CAPABILITY"
+    assert "cpu.hotspots" in failure["details"]["available_capabilities"]
+
+
 def test_mcp_startup_limits_reach_the_shared_server(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[RequestLimits | None] = []
 
@@ -634,7 +662,9 @@ def test_analyze_unsupported_format_returns_accepted_formats(tmp_path: Path) -> 
         "perf",
         "perf-data",
     ]
-    assert failure["details"]["recovery"].endswith("`flameox mcp inspect --tool analyze`.")
+    assert failure["details"]["recovery"].endswith(
+        "`flameox mcp inspect --capability cpu.hotspots`."
+    )
 
 
 def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: Path) -> None:

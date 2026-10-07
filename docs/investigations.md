@@ -62,8 +62,8 @@ test. Semantic correctness still requires the declared oracle.
 Artifact comparison is separate from that experiment result. Capture the representative baseline
 and candidate summaries independently, preserve them if they must survive the session, then submit
 both sources to `analyze` with `request.capability_id` set to `benchmark.compare`,
-`inference.compare`, or `kernel.compare`. The `capture_and_analyze` request union excludes those
-comparison variants because comparison requires explicit artifact identity. An experiment owns
+`inference.compare`, or `kernel.compare`. `capture_and_analyze` admission rejects those
+comparison capabilities because comparison requires explicit artifact identity. An experiment owns
 randomized case order and repeated measurements within one request.
 
 ## Scaling

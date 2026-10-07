@@ -88,8 +88,8 @@ select `request.capability_id`; transport validation then applies that registry 
 typed options, source cardinality, and compatible capture providers. `inspect_capabilities`
 projects one selected entry's detailed schemas and examples without expanding `tools/list`.
 
-Capture-provider contracts supply the discriminated provider variants for each compatible
-capability request. Missing packages, executables, permissions, versions, or platforms do not
+Capture-provider contracts supply typed options for each compatible capability request, exposed
+by discovery and checked at admission. Missing packages, executables, permissions, versions, or platforms do not
 change the catalog; the attempted tool returns typed remediation. The CLI setup command or MCP
 `prepare_providers` tool resolves dependencies according to where they execute. CLI setup prepares
 the complete version-pinned server environment. MCP preparation can activate a pinned standalone
