@@ -87,8 +87,8 @@ acceptance threshold.
 ## Proof gaps
 
 For a repeatable public CLI and stdio MCP exercise against a built REA checkout,
-run `uv run python -m tools.rea_ux_audit --help`. The [REA UX audit](rea-tool-ux-audit.md)
-records native workload coverage, findings, and the boundaries of that evidence.
+run `uv run python -m tools.rea_ux_audit --help`. Keep its generated results under
+`.diagnostics/`; local UX audit reports and capture scratch outputs are ignored.
 
 A passing default suite does not prove every provider or platform. Report
 missing hardware, permissions, vendor tools, cross-platform execution, crash

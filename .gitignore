@@ -1,4 +1,8 @@
 .diagnostics/
+# Local audit reports and capture scratch outputs.
+/docs/*-ux-audit.md
+/durable
+/preserve_evidence
 .mypy_cache/
 .pytest_cache/
 .coverage
