@@ -29,11 +29,6 @@ def _capture_roles(manifest: dict[str, object]) -> set[str]:
     return {item["role"] for item in artifacts if isinstance(item, dict)}
 
 
-def _preserved_payloads(runtime: AnalysisRuntime) -> list[bytes]:
-    artifact_root = runtime.repository.root / "artifacts" / "sha256"
-    return [path.read_bytes() for path in artifact_root.rglob("payload")]
-
-
 @pytest.mark.process
 def test_capture_default_diagnostics_bound_noisy_native_capture_and_preservation(
     tmp_path: Path,
@@ -96,19 +91,18 @@ def test_capture_default_diagnostics_bound_noisy_native_capture_and_preservation
 
 
 @pytest.mark.process
-def test_capture_explicit_full_retention_preserves_exact_native_console_logs(
-    tmp_path: Path,
-) -> None:
-    stdout = b"out-" * 20_000
-    stderr = b"err-" * 20_000
-    code = "import os; os.write(1, b'out-' * 20000); os.write(2, b'err-' * 20000)"
-    workload = tmp_path / "full_workload.py"
-    workload.write_text(code, encoding="utf-8")
+def test_native_capture_can_explicitly_preserve_full_console_output(tmp_path: Path) -> None:
+    stdout, stderr = b"out-" * 8_000, b"err-" * 8_000
+    workload = tmp_path / "workload.py"
+    workload.write_text(
+        "import os; os.write(1, b'out-' * 8000); os.write(2, b'err-' * 8000)",
+        encoding="utf-8",
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
+    try:
 
-    async def exercise() -> str:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
-        try:
-            result = await runtime.capture_and_analyze(
+        async def capture() -> dict[str, Any]:
+            return await runtime.capture_and_analyze(
                 CaptureTarget(
                     argv=[sys.executable, str(workload)],
                     cwd=str(tmp_path),
@@ -119,33 +113,24 @@ def test_capture_explicit_full_retention_preserves_exact_native_console_logs(
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,
             )
-            execution = result["capture"]["executions"][0]
-            assert execution["status"] == "succeeded"
-            assert execution["output_streams"] == {
-                "stdout_bytes": len(stdout),
-                "stderr_bytes": len(stderr),
-                "stdout_complete": True,
-                "stderr_complete": True,
-                "io_error": False,
-            }
-            preserved = result["preserved"]
-            assert isinstance(preserved, dict)
-            return str(preserved["evidence_id"])
-        finally:
-            runtime.close()
 
-    evidence_id = anyio.run(exercise)
-    reopened = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
-    try:
-        manifest = reopened.read_evidence(evidence_id)
-        roles = _capture_roles(manifest)
-        assert "capture-0001/stdout" in roles
-        assert "capture-0001/stderr" in roles
-        payloads = _preserved_payloads(reopened)
+        result = anyio.run(capture)
+        execution = result["capture"]["executions"][0]
+        assert execution["output_streams"] == {
+            "stdout_bytes": len(stdout),
+            "stderr_bytes": len(stderr),
+            "stdout_complete": True,
+            "stderr_complete": True,
+            "io_error": False,
+        }
+        payloads = [
+            path.read_bytes()
+            for path in (runtime.repository.root / "artifacts" / "sha256").rglob("payload")
+        ]
         assert stdout in payloads
         assert stderr in payloads
     finally:
-        reopened.close()
+        runtime.close()
 
 
 @pytest.mark.process

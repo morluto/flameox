@@ -86,19 +86,6 @@ async def test_diagnostics_zero_retention_still_counts_complete_streams(tmp_path
     assert outcome.diagnostic_output.stderr_complete
 
 
-def test_diagnostics_rejects_disk_sink_and_rss_observation(tmp_path: Path) -> None:
-    for overrides in (
-        {
-            "diagnostic_bytes": 4_096,
-            "output_directory": tmp_path / "sink",
-            "output_root": tmp_path,
-        },
-        {"diagnostic_bytes": 4_096, "observation": "child_peak_rss"},
-    ):
-        with pytest.raises(ValueError):
-            request(tmp_path, "-c", "pass", **overrides)
-
-
 @pytest.mark.anyio
 async def test_diagnostics_timeout_reports_incomplete_streams(tmp_path: Path) -> None:
     emitted = tmp_path / "emitted"

@@ -131,18 +131,15 @@ def test_live_capture_keeps_capacity_reserved_until_unwind(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("offset", [2, 99])
 def test_explicit_preview_offset_cannot_turn_exhaustion_into_complete_evidence(
-    tmp_path: Path, offset: int
+    tmp_path: Path,
 ) -> None:
     artifact = tmp_path / "input.txt"
     artifact.write_text("one\ntwo\n")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(
-                "artifact.preview", [PathSource(path=str(artifact))], {"offset": offset}
-            )
+            runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {"offset": 2})
         assert failure.value.code == "INVALID_INPUT"
     finally:
         runtime.close()

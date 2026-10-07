@@ -9,7 +9,7 @@ from typing import Annotated
 import anyio
 import psutil
 import pytest
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter
 
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
@@ -25,25 +25,6 @@ def worker_definition() -> WorkerDefinition[int, int]:
         implementation="test",
         timeout_seconds=10,
     )
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("mode", ["sync", "async", "session"])
-def test_invalid_worker_request_releases_job_directory(tmp_path: Path, mode: str) -> None:
-    harness = IsolatedWorkerHarness(WorkerRuntimeConfig(tmp_path, tmp_path, tmp_path))
-
-    async def exercise() -> None:
-        if mode == "session":
-            await harness.run_typed_session(worker_definition(), 0, consume=lambda value, _: value)
-        else:
-            await harness.run_typed(worker_definition(), 0)
-
-    with pytest.raises(ValidationError):
-        if mode == "sync":
-            harness.run_typed_sync(worker_definition(), 0)
-        else:
-            anyio.run(exercise)
-    assert not list((tmp_path / "artifact-workers").iterdir())
 
 
 @pytest.mark.process

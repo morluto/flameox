@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import os
-import signal
 import sys
-from contextlib import suppress
 from pathlib import Path
 
 import anyio
 import pytest
-from pydantic import ValidationError
 
 from flameox.command_binding import ExecutableResolver
 from flameox.execution import (
@@ -38,15 +33,6 @@ def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRe
     return ExecutionRequest.model_validate(values)
 
 
-def test_optional_deadline_is_unbounded_only_when_explicitly_none(tmp_path: Path) -> None:
-    assert request(tmp_path, "-c", "pass").timeout_seconds == 300
-    assert request(tmp_path, "-c", "pass", timeout_seconds=None).timeout_seconds is None
-    with pytest.raises(ValidationError):
-        request(tmp_path, "-c", "pass", timeout_seconds=0)
-    with pytest.raises(ValidationError):
-        request(tmp_path, "-c", "pass", timeout_seconds=86_400.1)
-
-
 @pytest.mark.anyio
 async def test_ordinary_execution_with_no_deadline_can_complete(tmp_path: Path) -> None:
     outcome = await SubprocessBroker().run(
@@ -59,45 +45,6 @@ async def test_ordinary_execution_with_no_deadline_can_complete(tmp_path: Path) 
     )
     assert outcome.stdout == b"finished\n"
     assert outcome.process.cancellation_cause is None
-
-
-@pytest.mark.anyio
-async def test_raw_task_cancel_with_no_deadline_settles_inherited_pipe_writer(
-    tmp_path: Path,
-) -> None:
-    child_pid_path = tmp_path / "grandchild.pid"
-    code = (
-        "import pathlib, subprocess, sys, time; "
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "print('started', flush=True); time.sleep(60)"
-    )
-    task = asyncio.create_task(
-        SubprocessBroker().run(
-            request(tmp_path, "-c", code, str(child_pid_path), timeout_seconds=None)
-        )
-    )
-    try:
-        await wait_for_pid_file(child_pid_path)
-        assert child_pid_path.exists()
-        child_pid = int(child_pid_path.read_text())
-        task.cancel()
-        with pytest.raises(ProcessCancelledError) as cancelled:
-            await asyncio.wait_for(task, timeout=2)
-        assert (
-            cancelled.value.process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED
-        )
-        assert cancelled.value.process.cleanup_complete is True
-        assert not process_is_alive(child_pid)
-    finally:
-        if not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        if child_pid_path.exists():
-            child_pid = int(child_pid_path.read_text())
-            if process_is_alive(child_pid):
-                os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.anyio

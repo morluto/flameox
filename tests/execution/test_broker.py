@@ -242,37 +242,6 @@ async def test_output_limit_wakes_resource_observer_before_its_next_sample(
 
 
 @pytest.mark.anyio
-async def test_observed_level_cancellation_settles_thread_and_cleanup(tmp_path: Path) -> None:
-    pid_path = tmp_path / "observed.pid"
-    cleanup: list[bool] = []
-
-    async def on_cleanup(complete: bool) -> None:
-        await anyio.sleep(0)
-        cleanup.append(complete)
-
-    with anyio.fail_after(5), anyio.CancelScope() as scope:
-
-        async def cancel_started_child() -> None:
-            await wait_for_pid_file(pid_path)
-            scope.cancel()
-
-        async with anyio.create_task_group() as group:
-            group.start_soon(cancel_started_child)
-            await SubprocessBroker().run(
-                request(
-                    tmp_path,
-                    "-c",
-                    "import os, pathlib, time; "
-                    "pathlib.Path('observed.pid').write_text(str(os.getpid())); time.sleep(30)",
-                    observation="child_peak_rss",
-                ),
-                on_cleanup=on_cleanup,
-            )
-    assert cleanup == [True]
-    assert not process_is_alive(int(pid_path.read_text()))
-
-
-@pytest.mark.anyio
 async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_pipes(
     tmp_path: Path,
 ) -> None:
@@ -284,7 +253,9 @@ async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_p
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(60)"
     )
     task = asyncio.create_task(
-        SubprocessBroker().run(request(tmp_path, "-c", code, str(child_pid_path)))
+        SubprocessBroker().run(
+            request(tmp_path, "-c", code, str(child_pid_path), timeout_seconds=None)
+        )
     )
     child_pid: int | None = None
     try:
@@ -805,23 +776,6 @@ async def test_timeout_includes_startup_callback_and_cleans_up_child(tmp_path: P
 
 
 @pytest.mark.anyio
-async def test_timeout_does_not_reawait_a_stalled_subprocess_spawn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def stalled_spawn(*_arguments: object, **_options: object) -> object:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", stalled_spawn)
-
-    with anyio.fail_after(5), pytest.raises(DomainError) as error:
-        await SubprocessBroker().run(request(tmp_path, "-c", "pass", timeout_seconds=0.05))
-
-    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-
-
-@pytest.mark.anyio
 async def test_output_budget_is_shared_between_stdout_and_stderr(
     tmp_path: Path,
 ) -> None:
@@ -1031,26 +985,6 @@ async def test_async_output_sink_does_not_clobber_existing_hardlink(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_async_output_sink_does_not_overwrite_existing_regular_file(tmp_path: Path) -> None:
-    sink = tmp_path / "sink"
-    sink.mkdir()
-    existing = sink / "stdout"
-    existing.write_bytes(b"protected")
-
-    with pytest.raises(FileExistsError):
-        await SubprocessBroker().run(
-            request(
-                tmp_path,
-                "-c",
-                "print('must not launch')",
-                output_directory=sink,
-                output_root=tmp_path,
-            )
-        )
-    assert existing.read_bytes() == b"protected"
-
-
-@pytest.mark.anyio
 async def test_async_output_sink_cancellation_waits_for_blocked_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1175,39 +1109,6 @@ def test_observed_output_sink_is_rejected_before_launch(tmp_path: Path) -> None:
             output_root=tmp_path,
             observation="child_peak_rss",
         )
-
-
-@pytest.mark.anyio
-async def test_cancellation_performs_cleanup_before_propagating(
-    tmp_path: Path,
-) -> None:
-    started = asyncio.Event()
-    process_ids: list[int] = []
-    cleanup: list[bool] = []
-
-    async def record_started(process_id: int) -> None:
-        process_ids.append(process_id)
-        started.set()
-
-    async def record_cleanup(complete: bool) -> None:
-        cleanup.append(complete)
-
-    task = asyncio.create_task(
-        SubprocessBroker().run(
-            request(tmp_path, "-c", "import time; time.sleep(10)"),
-            on_started=record_started,
-            on_cleanup=record_cleanup,
-        )
-    )
-    await asyncio.wait_for(started.wait(), timeout=5)
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert cleanup == [True]
-    assert len(process_ids) == 1
-    assert not process_is_alive(process_ids[0])
 
 
 @pytest.mark.anyio

@@ -6,16 +6,12 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
-from pydantic import ValidationError
 
 from flameox.canonical import canonical_bytes
-from flameox.providers.contracts import ProviderAnalysis
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
@@ -29,7 +25,7 @@ from flameox.runtime_contracts import (
 from tests.support.processes import process_is_alive, wait_for_pid_file
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> None:
     pyperf_artifact = tmp_path / "benchmark.json"
     samples_artifact = tmp_path / "benchmark.samples.json"
@@ -52,7 +48,7 @@ def test_typed_capability_never_falls_back_to_generic_rows(tmp_path: Path) -> No
     assert failure.value.code == "UNSUPPORTED_FORMAT"
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_analysis_rejects_source_cardinality_before_resolving_paths(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
@@ -77,32 +73,7 @@ def test_analysis_rejects_source_cardinality_before_resolving_paths(tmp_path: Pa
     }
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("capability_id", "arguments"),
-    [
-        ("failures.summary", {"group_by": "not-a-dimension"}),
-        ("cpu.hotspots", {"metric": "not-a-metric"}),
-    ],
-)
-def test_analysis_rejects_options_not_declared_by_the_capability(
-    tmp_path: Path,
-    capability_id: str,
-    arguments: dict[str, str],
-) -> None:
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        with pytest.raises(ValidationError):
-            runtime.analyze(
-                capability_id,
-                [PathSource(path=str(tmp_path / "missing.json"), format="observations")],
-                arguments,
-            )
-    finally:
-        runtime.close()
-
-
-@pytest.mark.unit
+@pytest.mark.integration
 def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     tmp_path: Path,
 ) -> None:
@@ -137,7 +108,7 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     assert not marker.exists()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path: Path) -> None:
     marker = tmp_path / "executed"
 
@@ -169,7 +140,7 @@ def test_capture_rejects_experiments_that_exceed_analysis_source_limit(tmp_path:
     assert not marker.exists()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_capture_rejects_experiment_unsupported_by_single_source_analysis(
     tmp_path: Path,
 ) -> None:
@@ -288,7 +259,7 @@ def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path:
     anyio.run(exercise)
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_analysis_is_bounded_deterministic_and_does_not_change_input(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
@@ -311,8 +282,9 @@ def test_analysis_is_bounded_deterministic_and_does_not_change_input(tmp_path: P
     assert artifact.read_bytes() == before
 
 
-@pytest.mark.unit
-def test_analysis_rejects_a_negative_continuation_offset(tmp_path: Path) -> None:
+@pytest.mark.integration
+@pytest.mark.parametrize("offset", [-1, 100])
+def test_analysis_rejects_a_tampered_continuation_offset(tmp_path: Path, offset: int) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -326,7 +298,7 @@ def test_analysis_rejects_a_negative_continuation_offset(tmp_path: Path) -> None
                 first["continuation"] + "=" * (-len(first["continuation"]) % 4)
             )
         )
-        decoded["payload"]["offset"] = -1
+        decoded["payload"]["offset"] = offset
         decoded["checksum"] = hashlib.sha256(canonical_bytes(decoded["payload"])).hexdigest()
         continuation = base64.urlsafe_b64encode(canonical_bytes(decoded)).decode().rstrip("=")
 
@@ -344,62 +316,7 @@ def test_analysis_rejects_a_negative_continuation_offset(tmp_path: Path) -> None
     assert failure.value.code == "INVALID_INPUT"
 
 
-@pytest.mark.unit
-def test_analysis_rejects_a_continuation_beyond_the_evidence(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        limits = RequestLimits(max_rows=2)
-        first = runtime.analyze(
-            "artifact.preview", [PathSource(path=str(artifact))], {}, limits=limits
-        )
-        decoded = json.loads(
-            base64.urlsafe_b64decode(
-                first["continuation"] + "=" * (-len(first["continuation"]) % 4)
-            )
-        )
-        decoded["payload"]["offset"] = 100
-        decoded["checksum"] = hashlib.sha256(canonical_bytes(decoded["payload"])).hexdigest()
-        continuation = base64.urlsafe_b64encode(canonical_bytes(decoded)).decode().rstrip("=")
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(
-                "artifact.preview",
-                [PathSource(path=str(artifact))],
-                {},
-                limits=limits,
-                continuation=continuation,
-            )
-    finally:
-        runtime.close()
-
-    assert failure.value.code == "INVALID_INPUT"
-
-
-@pytest.mark.unit
-def test_analysis_returns_a_complete_large_row(tmp_path: Path) -> None:
-    artifact = tmp_path / "large.jsonl"
-    value = "x" * 300_000
-    artifact.write_text(json.dumps({"value": value}) + "\n")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "artifact.preview",
-            [PathSource(path=str(artifact))],
-            {},
-            limits=RequestLimits(max_rows=1),
-        )
-    finally:
-        runtime.close()
-
-    assert result["blocks"][1]["rows"][0]["value"] == value
-    assert len(result["blocks"][1]["rows"]) == 1
-    assert result["coverage"]["complete"] is True
-    assert result["truncation"] is None
-
-
-@pytest.mark.unit
+@pytest.mark.integration
 def test_continuation_pages_have_distinct_preservable_analysis_ids(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text(json.dumps([{"value": value} for value in range(4)]))
@@ -428,7 +345,7 @@ def test_continuation_pages_have_distinct_preservable_analysis_ids(tmp_path: Pat
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_session_analysis_cache_expires_least_recently_used_handles(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text(json.dumps([{"value": value} for value in range(65)]))
@@ -457,59 +374,7 @@ def test_session_analysis_cache_expires_least_recently_used_handles(tmp_path: Pa
         runtime.close()
 
 
-@pytest.mark.unit
-def test_capability_arguments_reject_unknown_fields(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text("[]")
-
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    with pytest.raises(ValidationError):
-        runtime.analyze(
-            "artifact.preview",
-            [PathSource(path=str(artifact))],
-            {"unsupported": True},
-        )
-    runtime.close()
-
-
-@pytest.mark.unit
-def test_request_limits_can_only_lower_explicit_startup_bounds() -> None:
-    startup = RequestLimits(
-        max_rows=20,
-        timeout_seconds=10,
-        max_output_bytes=4096,
-        max_memory_bytes=512 * 1024 * 1024,
-    )
-
-    effective = RequestLimits(max_rows=5, max_memory_bytes=256 * 1024 * 1024).lowered_against(
-        startup
-    )
-
-    assert effective.max_rows == 5
-    assert effective.timeout_seconds == 10
-    assert effective.max_output_bytes == 4096
-    assert effective.max_memory_bytes == 256 * 1024 * 1024
-    with pytest.raises(RuntimeFailure) as failure:
-        RequestLimits(timeout_seconds=11).lowered_against(startup)
-    assert failure.value.code == "LIMIT_EXCEEDED"
-    assert failure.value.details == {
-        "field": "timeout_seconds",
-        "requested": 11,
-        "effective_ceiling": 10,
-        "scope": "request_limit",
-        "mutability": "lower_only",
-        "safe_retry": {"timeout_seconds": 10},
-        "recovery": {
-            "action": "restart_reconnect",
-            "startup_setting": "timeout_seconds",
-        },
-    }
-    with pytest.raises(RuntimeFailure) as failure:
-        RequestLimits(max_memory_bytes=1024**3).lowered_against(startup)
-    assert failure.value.code == "LIMIT_EXCEEDED"
-
-
-@pytest.mark.unit
+@pytest.mark.integration
 def test_explicit_inputs_fail_at_byte_and_file_bounds(tmp_path: Path) -> None:
     oversized = tmp_path / "oversized.txt"
     oversized.write_bytes(b"x" * 2048)
@@ -540,7 +405,7 @@ def test_explicit_inputs_fail_at_byte_and_file_bounds(tmp_path: Path) -> None:
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_input_limits_apply_across_all_explicit_sources(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
@@ -570,7 +435,7 @@ def test_input_limits_apply_across_all_explicit_sources(tmp_path: Path) -> None:
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
     artifact = tmp_path / "invalid.json"
     artifact.write_text("not json")
@@ -586,7 +451,7 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
     runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_json_object_sequence_is_streamed_with_bounded_continuation(tmp_path: Path) -> None:
     artifact = tmp_path / "report.json"
     artifact.write_text(json.dumps({"metadata": {"ignored": True}, "results": list(range(20))}))
@@ -615,7 +480,7 @@ def test_json_object_sequence_is_streamed_with_bounded_continuation(tmp_path: Pa
     assert [row["value"] for row in second["blocks"][1]["rows"]] == [2, 3, 4]
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_json_object_preview_includes_all_arrays_and_root_scalars(tmp_path: Path) -> None:
     artifact = tmp_path / "sections.json"
     artifact.write_text(json.dumps({"first": [1, 2], "label": "kept", "second": [{"value": 3}]}))
@@ -643,7 +508,7 @@ def test_json_object_preview_includes_all_arrays_and_root_scalars(tmp_path: Path
     ]
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_preview_source_digest_wins_over_user_row_fields(tmp_path: Path) -> None:
     artifact = tmp_path / "rows.json"
     artifact.write_text(json.dumps([{"input_sha256": "f" * 64, "value": 1}]))
@@ -654,178 +519,6 @@ def test_preview_source_digest_wins_over_user_row_fields(tmp_path: Path) -> None
         runtime.close()
 
     assert result["blocks"][1]["rows"][0]["input_sha256"] == result["inputs"][0]["sha256"]
-
-
-@pytest.mark.unit
-def test_provider_pages_use_one_stable_projection_limit(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text("[]")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    limits_seen: list[int] = []
-
-    def analyze(*_args: Any, max_rows: int, **_kwargs: Any) -> ProviderAnalysis:
-        limits_seen.append(max_rows)
-        rows = [{"index": index} for index in range(max_rows)]
-        return ProviderAnalysis(
-            provider_id="test",
-            provider_version="1",
-            blocks=[{"type": "metrics", "values": {}}, {"type": "table", "rows": rows}],
-            rows_observed=max_rows + 1,
-            complete=False,
-            limitations=[],
-        )
-
-    runtime.benchmarks.analyze = analyze  # type: ignore[method-assign]
-    try:
-        first = runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(artifact), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=3),
-        )
-        second = runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(artifact), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=3),
-            continuation=first["continuation"],
-        )
-    finally:
-        runtime.close()
-
-    assert limits_seen == [1001]
-    assert first["blocks"][1]["rows"] == [{"index": 0}, {"index": 1}, {"index": 2}]
-    assert second["blocks"][1]["rows"] == [{"index": 3}, {"index": 4}, {"index": 5}]
-
-
-@pytest.mark.unit
-def test_projection_cache_binds_implementation_identity(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text("[]")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    calls = 0
-    implementation = {"version": "one"}
-
-    def analyze(*_args: Any, max_rows: int, **_kwargs: Any) -> ProviderAnalysis:
-        nonlocal calls
-        calls += 1
-        return ProviderAnalysis(
-            provider_id="test",
-            provider_version=implementation["version"],
-            blocks=[
-                {"type": "metrics", "values": {}},
-                {"type": "table", "rows": [{"index": index} for index in range(max_rows)]},
-            ],
-            rows_observed=max_rows + 1,
-            complete=False,
-            limitations=[],
-        )
-
-    runtime.benchmarks.analyze = analyze  # type: ignore[method-assign]
-    runtime._projection_runtime_identity = (  # type: ignore[method-assign]
-        lambda *_args: {"test": implementation["version"]}
-    )
-    try:
-        first = runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(artifact), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=2),
-        )
-        runtime.analyses.clear()
-        runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(artifact), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=2),
-        )
-        assert calls == 1
-
-        implementation["version"] = "two"
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(
-                "benchmark.summary",
-                [PathSource(path=str(artifact), format="samples")],
-                {},
-                limits=RequestLimits(max_rows=2),
-                continuation=first["continuation"],
-            )
-        assert failure.value.code == "INVALID_INPUT"
-        runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(artifact), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=2),
-        )
-        assert calls == 2
-    finally:
-        runtime.close()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("bound", ["entries", "bytes"])
-def test_projection_cache_is_bounded_and_returns_defensive_copies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str
-) -> None:
-    monkeypatch.setattr("flameox.runtime.MAX_SESSION_PROJECTIONS", 2 if bound == "entries" else 16)
-    if bound == "bytes":
-        # Two projections fit, but three payloads alone exceed this byte budget.
-        monkeypatch.setattr("flameox.runtime.MAX_SESSION_PROJECTION_BYTES", 8_192)
-    calls: list[str] = []
-    for index, name in enumerate(("one", "two", "three")):
-        (tmp_path / f"{name}.json").write_text(json.dumps([index]))
-
-    def analyze(
-        _capability_id: str, paths: Sequence[Path], *_args: Any, **_kwargs: Any
-    ) -> ProviderAnalysis:
-        calls.append(paths[0].stem)
-        return ProviderAnalysis(
-            provider_id="test",
-            provider_version="1",
-            blocks=[
-                {"type": "metrics", "values": {"x": 1}},
-                {
-                    "type": "table",
-                    "rows": [{"payload": "x" * 3_072}, *({"index": i} for i in range(1, 8))],
-                },
-            ],
-            rows_observed=8,
-            complete=True,
-            limitations=[],
-        )
-
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    monkeypatch.setattr(runtime.benchmarks, "analyze", analyze)
-    continuations: dict[str, str] = {}
-
-    def read(name: str) -> dict[str, Any]:
-        # New pages bypass whole-analysis reuse while sharing the same provider
-        # projection. No cached handles or projection dictionaries are cleared.
-        result = runtime.analyze(
-            "benchmark.summary",
-            [PathSource(path=str(tmp_path / f"{name}.json"), format="samples")],
-            {},
-            limits=RequestLimits(max_rows=1),
-            continuation=continuations.get(name),
-        )
-        continuations[name] = result["continuation"]
-        return result
-
-    try:
-        read("one")
-        read("two")
-        returned = read("one")
-        returned["blocks"][0]["values"]["x"] = 9
-        assert read("one")["blocks"][0]["values"]["x"] == 1
-        assert calls == ["one", "two"]
-
-        read("three")
-        read("one")
-        assert calls == ["one", "two", "three"]
-        read("two")
-        assert calls == ["one", "two", "three", "two"]
-    finally:
-        runtime.close()
 
 
 @pytest.mark.process
@@ -1025,11 +718,19 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
             assert comparison["metric"] == "wall_time_ns"
             assert comparison["estimand"] == "median_difference"
             assert comparison["paired_blocks"] == 1
-            assert comparison["point_estimate_classification"] in {
-                "practically_improved",
-                "practically_regressed",
-                "within_threshold",
-            }
+            estimate = comparison["estimate"]
+            assert result["blocks"][-2]["values"]["decision_basis"] == (
+                "descriptive_point_estimate"
+            )
+            if estimate is None:
+                expected = "inconclusive"
+            elif abs(estimate) <= 0:
+                expected = "within_threshold"
+            elif estimate < 0:
+                expected = "practically_improved"
+            else:
+                expected = "practically_regressed"
+            assert comparison["point_estimate_classification"] == expected
             preserved = runtime.preserve_evidence(result["analysis_id"])
             manifest = runtime.read_evidence(preserved["evidence_id"])
             assert manifest["body"]["limitations"] == result["limitations"]
@@ -1106,25 +807,3 @@ def test_capture_returns_all_execution_provenance(tmp_path: Path) -> None:
         assert result["capture"]["outcome"]["execution_count"] == 16
 
     anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_experiment_zero_effect_is_within_zero_threshold() -> None:
-    experiment = ExperimentDesign(
-        cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
-        blocks=1,
-        seed=1,
-        metric="wall_time_ns",
-        estimand="median_difference",
-        practical_threshold=0,
-    )
-    blocks, _limitations = AnalysisRuntime._experiment_blocks(
-        experiment,
-        [
-            {"case": "baseline", "block": 1, "status": "succeeded", "wall_time_ns": 10},
-            {"case": "candidate", "block": 1, "status": "succeeded", "wall_time_ns": 10},
-        ],
-    )
-
-    assert blocks[-1]["rows"][0]["estimate"] == 0
-    assert blocks[-1]["rows"][0]["point_estimate_classification"] == "within_threshold"

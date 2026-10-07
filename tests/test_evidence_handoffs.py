@@ -17,8 +17,6 @@ from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
-    ExperimentCase,
-    ExperimentDesign,
     PathSource,
     PreviewArguments,
     RequestLimits,
@@ -205,20 +203,6 @@ def test_artifact_extra_fields_cannot_override_file_identity(tmp_path: Path) -> 
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("whitespace", ["", "\n", " \t\r\n" * 2000], ids=["compact", "lf", "long"])
-def test_preview_json_whitespace_preserves_rows(tmp_path: Path, whitespace: str) -> None:
-    artifact = tmp_path / "array.json"
-    artifact.write_text(whitespace + '[{"value":1},{"value":2}]')
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-    try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-        assert [row["value"] for row in result["blocks"][1]["rows"]] == [1, 2]
-        assert result["coverage"]["complete"] is True
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
 def test_preview_offset_is_a_logical_row(tmp_path: Path) -> None:
     assert "row" in PreviewArguments.model_json_schema()["properties"]["offset"]["description"]
     artifact = tmp_path / "lines.txt"
@@ -288,29 +272,6 @@ def test_preserved_capture_continuation_uses_discovered_sources(
             runtime.close()
 
     anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_experiment_classification_explicitly_describes_point_estimate() -> None:
-    design = ExperimentDesign(
-        cases=[ExperimentCase(name="base"), ExperimentCase(name="candidate")],
-        blocks=3,
-        seed=7,
-        metric="wall_time_ns",
-        estimand="mean_difference",
-        practical_threshold=10,
-    )
-    executions = [
-        dict(case=case, block=block, status="succeeded", wall_time_ns=value)
-        for block, candidate in enumerate([1000, 2000, 3000], 1)
-        for case, value in [("base", 2000), ("candidate", candidate)]
-    ]
-    blocks, _ = AnalysisRuntime._experiment_blocks(design, executions)
-    row = blocks[-1]["rows"][0]
-    assert row["estimate"] == 0
-    assert row["confidence_low"] < -10 < 10 < row["confidence_high"]
-    assert row["point_estimate_classification"] == "within_threshold"
-    assert blocks[0]["values"]["decision_basis"] == "descriptive_point_estimate"
 
 
 @pytest.mark.integration

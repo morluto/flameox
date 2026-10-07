@@ -8,7 +8,7 @@ import pytest
 from flameox.runtime_contracts import RuntimeFailure
 from flameox.source_files import NativeSource, copy_verified_file
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.parametrize("actual", [b"old", b"", b"new", b"old" * 1000])

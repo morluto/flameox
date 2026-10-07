@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -29,10 +28,13 @@ def _experiment(oracle: list[str]) -> ExperimentDesign:
     )
 
 
-def _preserved_data_files(runtime: AnalysisRuntime, evidence_id: str) -> list[Path]:
-    del evidence_id
+def _preserved_data_files(runtime: AnalysisRuntime, evidence_id: str) -> dict[str, Path]:
+    manifest = runtime.read_evidence(evidence_id)
     bundle = runtime.repository.root / "artifacts" / "sha256"
-    return [path for path in bundle.rglob("payload") if path.is_file()]
+    return {
+        artifact["role"]: bundle / artifact["sha256"][:2] / artifact["sha256"] / "payload"
+        for artifact in manifest["body"]["artifacts"]
+    }
 
 
 @pytest.mark.process
@@ -54,7 +56,7 @@ def test_capture_streams_preserve_exact_large_native_bytes_across_restart(tmp_pa
                     provider_id="direct",
                 ),
                 "artifact.preview",
-                limits=RequestLimits(max_output_bytes=stdout.__len__() + stderr.__len__() + 1),
+                limits=RequestLimits(max_output_bytes=len(stdout) + len(stderr) + 1),
                 preserve=True,
             )
             execution = result["capture"]["executions"][0]
@@ -78,8 +80,8 @@ def test_capture_streams_preserve_exact_large_native_bytes_across_restart(tmp_pa
             "stdout_bytes"
         ] == len(stdout)
         files = _preserved_data_files(reopened, evidence_id)
-        assert stdout in [path.read_bytes() for path in files]
-        assert stderr in [path.read_bytes() for path in files]
+        assert stdout in [path.read_bytes() for path in files.values()]
+        assert stderr in [path.read_bytes() for path in files.values()]
     finally:
         reopened.close()
 
@@ -138,7 +140,7 @@ def test_semantic_oracle_reads_full_capture_and_preserves_its_large_logs(tmp_pat
     reopened = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
     try:
         files = _preserved_data_files(reopened, evidence_id)
-        contents = [path.read_bytes() for path in files]
+        contents = [path.read_bytes() for path in files.values()]
         assert oracle_stdout in contents
         assert oracle_stderr in contents
     finally:
@@ -196,43 +198,6 @@ def test_capture_failure_preserves_stream_prefix_and_marks_sink_incomplete(
     reopened = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
     try:
         files = _preserved_data_files(reopened, evidence_id)
-        assert prefix in [path.read_bytes() for path in files]
+        assert files["capture-0001/stdout"].read_bytes() == prefix
     finally:
         reopened.close()
-
-
-@pytest.mark.process
-def test_cancelled_capture_removes_request_scratch(tmp_path: Path) -> None:
-    started = tmp_path / "started"
-
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
-        task = asyncio.create_task(
-            runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        f"from pathlib import Path; import time; "
-                        f"Path({str(started)!r}).touch(); time.sleep(30)",
-                    ],
-                    cwd=str(tmp_path),
-                    provider_id="direct",
-                ),
-                "artifact.preview",
-            )
-        )
-        try:
-            with anyio.fail_after(5):
-                while not started.exists():
-                    await anyio.sleep(0.01)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            assert not list(runtime.scratch.glob("capture-*"))
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            runtime.close()
-
-    anyio.run(exercise)

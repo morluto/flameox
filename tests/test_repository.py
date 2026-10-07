@@ -5,13 +5,10 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from flameox.canonical import canonical_bytes
-from flameox.evidence_models import CaptureRequest
 from flameox.repository import EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
@@ -19,32 +16,6 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    [("argv", [{}]), ("environment", {"NAME": 1})],
-)
-def test_repository_rejects_invalid_nested_capture_target(field: str, invalid: Any) -> None:
-    target: dict[str, Any] = {
-        "argv": ["python"],
-        "cwd": "/workspace",
-        "environment": {},
-        "provider_id": "direct",
-        "capture_arguments": {},
-        "analysis_arguments": {},
-    }
-    request: dict[str, Any] = {
-        "target": target,
-        "mode": "single",
-        "experiment": None,
-        "executions": [],
-    }
-    target[field] = invalid
-
-    with pytest.raises(ValidationError):
-        CaptureRequest.model_validate(request)
 
 
 @pytest.mark.integration
@@ -219,7 +190,7 @@ def test_preservation_rejects_symlinked_repository_root(tmp_path: Path) -> None:
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")

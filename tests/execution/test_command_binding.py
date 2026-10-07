@@ -14,7 +14,7 @@ from flameox.executable_models import (
 )
 from flameox.runtime_errors import DomainError, ErrorCode
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 def test_path_search_is_bound_to_the_request_cwd_and_environment(tmp_path: Path) -> None:

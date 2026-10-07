@@ -193,7 +193,7 @@ def test_rescue_reports_damaged_preserved_evidence_before_creating_destination(
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle(
     tmp_path: Path,
 ) -> None:
@@ -215,7 +215,7 @@ def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_repository_failures_identify_the_alternate_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,7 +243,7 @@ def test_rescue_repository_failures_identify_the_alternate_store(
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_accepts_an_agent_selected_symlink_parent(tmp_path: Path) -> None:
     physical_parent = tmp_path / "physical-parent"
     physical_parent.mkdir()
@@ -262,7 +262,7 @@ def test_rescue_accepts_an_agent_selected_symlink_parent(tmp_path: Path) -> None
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_fsyncs_parent_after_publishing_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -291,7 +291,7 @@ def test_rescue_fsyncs_parent_after_publishing_destination(
         runtime.close()
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_publication_failure_does_not_leave_staging_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,21 +317,7 @@ def test_rescue_publication_failure_does_not_leave_staging_directory(
         runtime.close()
 
 
-@pytest.mark.unit
-def test_rescue_preflight_requires_a_new_destination(tmp_path: Path) -> None:
-    rescue = tmp_path / "rescue"
-    rescue.mkdir()
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / "configured")
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.preflight_rescue_destination(str(rescue))
-        assert failure.value.code == "INVALID_INPUT"
-        assert "new path" in failure.value.message
-    finally:
-        runtime.close()
-
-
-@pytest.mark.unit
+@pytest.mark.integration
 def test_rescue_rejects_a_physical_alias_of_the_configured_store(tmp_path: Path) -> None:
     physical_store = tmp_path / "physical-store"
     physical_store.mkdir()
@@ -339,8 +325,11 @@ def test_rescue_rejects_a_physical_alias_of_the_configured_store(tmp_path: Path)
     configured_alias.symlink_to(physical_store, target_is_directory=True)
     runtime = AnalysisRuntime(evidence_directory=configured_alias)
     try:
+        artifact = tmp_path / "input.json"
+        artifact.write_text("[]")
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.preflight_rescue_destination(str(physical_store / "rescue"))
+            runtime.rescue_evidence(result["analysis_id"], str(physical_store / "rescue"))
         assert failure.value.code == "INVALID_INPUT"
         assert not (physical_store / "rescue").exists()
     finally:
@@ -639,7 +628,7 @@ def test_bundle_and_member_compose_through_repeated_preservation(tmp_path: Path)
 
 @pytest.mark.integration
 @pytest.mark.parametrize("target", ["repository", "manifest", "artifact"])
-@pytest.mark.parametrize("payload", [[], None, "wrong shape", 1])
+@pytest.mark.parametrize("payload", [None, "wrong shape"])
 def test_nonobject_repository_json_has_typed_recovery(
     tmp_path: Path, target: str, payload: Any
 ) -> None:

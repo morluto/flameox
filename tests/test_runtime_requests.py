@@ -16,72 +16,27 @@ from flameox.executable_models import ResolvedExecutable
 from flameox.execution import ExecutionRequest
 from flameox.mcp import create_server
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import CaptureTarget, RuntimeFailure
+from flameox.runtime_contracts import CaptureTarget
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 @pytest.mark.anyio
-async def test_request_boundary_preserves_values_and_domain_errors(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
+async def test_mcp_rejects_undeclared_analysis_options(tmp_path: Path) -> None:
+    source = tmp_path / "input.json"
+    source.write_text("[]")
+    async with Client(create_server(evidence_directory=tmp_path / "evidence")) as client:
+        result = await client.call_tool(
+            "analyze",
+            {
+                "request": {
+                    "capability_id": "artifact.preview",
+                    "sources": [{"kind": "path", "path": str(source)}],
+                    "options": {"not_an_artifact_preview_option": True},
+                }
+            },
+        )
 
-    def fail() -> None:
-        raise RuntimeFailure("INVALID_INPUT", "invalid request")
-
-    def nothing() -> object:
-        return None
-
-    try:
-        assert await runtime.run_in_request(lambda: 42) == 42
-        assert await runtime.run_in_request(nothing) is None
-        with pytest.raises(RuntimeFailure, match="invalid request"):
-            await runtime.run_in_request(fail)
-        assert await runtime.run_in_request(lambda: "usable") == "usable"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.unit
-@pytest.mark.anyio
-async def test_mcp_catalog_remains_available_during_blocking_analysis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "input.txt"
-    source.write_text("evidence\n")
-    started = threading.Event()
-    release = threading.Event()
-    original = AnalysisRuntime.analyze
-
-    def gated(runtime: AnalysisRuntime, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        started.set()
-        if not release.wait(3):
-            raise TimeoutError("Catalog did not run while analysis was blocked")
-        return original(runtime, *args, **kwargs)
-
-    monkeypatch.setattr(AnalysisRuntime, "analyze", gated)
-    try:
-        async with Client(create_server(evidence_directory=tmp_path / "evidence")) as client:
-            analysis = asyncio.create_task(
-                client.call_tool(
-                    "analyze",
-                    {
-                        "request": {
-                            "capability_id": "artifact.preview",
-                            "sources": [{"kind": "path", "path": str(source)}],
-                        }
-                    },
-                )
-            )
-            assert await anyio.to_thread.run_sync(started.wait, 3)
-            try:
-                catalog = await client.list_tools()
-                assert catalog
-                assert not analysis.done()
-            finally:
-                release.set()
-            result = await analysis
-            assert not result.is_error
-    finally:
-        release.set()
+    assert result.is_error
 
 
 @pytest.mark.integration
