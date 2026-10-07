@@ -38,8 +38,8 @@ test; transport tests must not import fixtures from provider or runtime test mod
 
 ## Required behavioral proof
 
-Contract tests assert exactly six MCP tools, one resource template, no concrete resource list,
-capability-discriminated input schemas, compatible-provider discriminators, output schemas,
+Contract tests assert exactly seven MCP tools, one resource template, no concrete resource list,
+compact input envelopes, registry-backed capability/provider discovery, valid examples, output schemas,
 truthful annotations, and direct structured success content without a universal wrapper.
 
 Runtime tests cover bounded streaming analysis, digest-bound continuation,
@@ -85,6 +85,10 @@ speed or complexity claim. These tests have no hardware-independent five-second
 acceptance threshold.
 
 ## Proof gaps
+
+For a repeatable public CLI and stdio MCP exercise against a built REA checkout,
+run `uv run python -m tools.rea_ux_audit --help`. The [REA UX audit](rea-tool-ux-audit.md)
+records native workload coverage, findings, and the boundaries of that evidence.
 
 A passing default suite does not prove every provider or platform. Report
 missing hardware, permissions, vendor tools, cross-platform execution, crash
