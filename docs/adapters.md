@@ -70,7 +70,8 @@ the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
 
 V8 CPU and heap hotspot rows include their extracted function, file, frame identity,
-symbolization state, and native zero-based line/column coordinates (`-1` means unavailable).
+symbolization state, and native zero-based line/column coordinates. Omitted coordinates
+use `-1` for unavailable; explicitly exported zero remains a valid first line or column.
 Source maps are not resolved. CPU counts use exported sample node IDs rather than optional
 `hitCount` metadata. Inclusive CPU counts sum call-tree occurrences and can repeat recursive
 frames. Heap `sample_count` counts native allocation sample records per

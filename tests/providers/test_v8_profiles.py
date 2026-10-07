@@ -148,6 +148,52 @@ def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: 
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+@pytest.mark.parametrize(
+    ("coordinates", "expected"),
+    [
+        pytest.param({}, (-1, -1), id="both-omitted"),
+        pytest.param({"lineNumber": 0}, (0, -1), id="column-omitted"),
+        pytest.param({"columnNumber": 0}, (-1, 0), id="line-omitted"),
+        pytest.param({"lineNumber": 0, "columnNumber": 0}, (0, 0), id="explicit-zero"),
+        pytest.param({"lineNumber": -1, "columnNumber": -1}, (-1, -1), id="explicit-unknown"),
+    ],
+)
+def test_v8_hotspots_distinguish_omitted_coordinates_from_explicit_zero(
+    tmp_path: Path,
+    profile_kind: str,
+    coordinates: dict[str, int],
+    expected: tuple[int, int],
+) -> None:
+    frame = {"functionName": "work", "url": "app.js", **coordinates}
+    if profile_kind == "cpu":
+        payload = {
+            "nodes": [{"id": 1, "callFrame": frame, "children": []}],
+            "samples": [1],
+        }
+        capability_id, format_name = "cpu.hotspots", "cpuprofile"
+    else:
+        payload = {
+            "head": {"id": 1, "callFrame": frame, "selfSize": 64, "children": []},
+            "samples": [{"size": 64, "nodeId": 1}],
+        }
+        capability_id, format_name = "memory.hotspots", "heapprofile"
+    profile = tmp_path / f"profile.{format_name}"
+    profile.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            capability_id, [PathSource(path=str(profile), format=format_name)], {}
+        )
+    finally:
+        runtime.close()
+    row = result["blocks"][1]["rows"][0]
+    assert (row["line"], row["column"]) == expected
+    assert row["function"] == "work"
+    assert row["file"] == "app.js"
+
+
+@pytest.mark.process
 @pytest.mark.parametrize("hit_count", [None, 0, 99])
 def test_cpu_hotspots_count_exported_samples_when_hit_metadata_differs(
     tmp_path: Path, hit_count: int | None

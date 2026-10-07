@@ -320,8 +320,8 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
     url_value = call_frame.get("url")
     url = url_value if isinstance(url_value, str) else ""
     normalized = url
-    line = _strict_int(call_frame.get("lineNumber", 0), "line number")
-    column = _strict_int(call_frame.get("columnNumber", 0), "column number")
+    line = _strict_int(call_frame.get("lineNumber", -1), "line number")
+    column = _strict_int(call_frame.get("columnNumber", -1), "column number")
     script_id = call_frame.get("scriptId")
     disambiguator = (
         f"v8-script:{script_id}"
