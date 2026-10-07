@@ -138,8 +138,48 @@ def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: 
 
     assert result["provider"]["id"] == "v8-cpu-profile"
     assert result["blocks"][0]["values"]["sample_count"] == 2
-    assert result["blocks"][1]["rows"]
+    row = result["blocks"][1]["rows"][0]
+    assert row["function"] == "main"
+    assert row["file"] == (tmp_path / "index.js").as_uri()
+    assert (row["line"], row["column"]) == (1, 0)
+    assert row["symbolization"] == "complete"
+    assert row["self_value"] == 2
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("hit_count", [None, 0, 99])
+def test_cpu_hotspots_count_exported_samples_when_hit_metadata_differs(
+    tmp_path: Path, hit_count: int | None
+) -> None:
+    root = {
+        "id": 1,
+        "callFrame": {"functionName": "root", "url": "app.js"},
+        "children": [2],
+    }
+    leaf = {
+        "id": 2,
+        "callFrame": {"functionName": "leaf", "url": "app.js"},
+        "children": [],
+    }
+    if hit_count is not None:
+        root["hitCount"] = hit_count
+        leaf["hitCount"] = hit_count
+    profile = tmp_path / "cpu.cpuprofile"
+    profile.write_text(json.dumps({"nodes": [root, leaf], "samples": [1, 2, 2]}))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            "cpu.hotspots", [PathSource(path=str(profile), format="cpuprofile")], {}
+        )
+    finally:
+        runtime.close()
+    rows = {row["function"]: row for row in result["blocks"][1]["rows"]}
+    assert result["blocks"][0]["values"]["sample_count"] == 3
+    assert rows["root"]["self_value"] == rows["root"]["sample_count"] == 1
+    assert rows["root"]["inclusive_value"] == 3
+    assert rows["leaf"]["self_value"] == rows["leaf"]["sample_count"] == 2
+    assert sum(row["self_value"] for row in rows.values()) == 3
 
 
 @pytest.mark.process
@@ -215,10 +255,48 @@ def test_v8_heap_profile_is_registered_as_memory_hotspot_evidence(tmp_path: Path
         "total_sampled_bytes": 64,
     }
     assert result["blocks"][1]["rows"][0]["unit"] == "bytes"
+    assert result["blocks"][1]["rows"][0]["function"] == "allocate"
+    assert result["blocks"][1]["rows"][0]["file"] == "app.js"
 
 
 @pytest.mark.process
-def test_v8_heap_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("samples_first", [True, False])
+def test_heap_counts_sample_records_per_frame_across_call_tree_nodes(
+    tmp_path: Path, samples_first: bool
+) -> None:
+    frame = {"functionName": "allocate", "url": "app.js", "lineNumber": 3, "columnNumber": 2}
+    head = {
+        "callFrame": {"functionName": "root", "url": "app.js"},
+        "selfSize": 0,
+        "id": 1,
+        "children": [
+            {"callFrame": frame, "selfSize": 64, "id": 2, "children": []},
+            {"callFrame": frame, "selfSize": 128, "id": 3, "children": []},
+        ],
+    }
+    samples = [{"size": 64, "nodeId": node} for node in [2, 2, 3, 3, 3]]
+    payload = (
+        {"samples": samples, "head": head} if samples_first else {"head": head, "samples": samples}
+    )
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+    finally:
+        runtime.close()
+    rows = result["blocks"][1]["rows"]
+    allocation = next(row for row in rows if row["function"] == "allocate")
+    root = next(row for row in rows if row["function"] == "root")
+    assert allocation["sample_count"] == 5
+    assert allocation["self_value"] == 192
+    assert (allocation["line"], allocation["column"]) == (3, 2)
+    assert root["sample_count"] == 0
+    assert result["blocks"][0]["values"]["sample_count"] == 5
+
+
+@pytest.mark.process
+def test_v8_heap_profile_reports_unresolved_samples_without_guessing_frames(tmp_path: Path) -> None:
     profile = tmp_path / "memory.heapprofile"
     profile.write_text(
         json.dumps(
@@ -235,12 +313,44 @@ def test_v8_heap_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> No
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
     finally:
         runtime.close()
 
-    assert failure.value.code == "DECODE_FAILURE"
+    metrics = result["blocks"][0]["values"]
+    assert metrics["unresolved_sample_count"] == 1
+    assert metrics["unresolved_sampled_bytes"] == 64
+    assert metrics["sample_count"] == 1
+    assert result["blocks"][1]["rows"][0]["sample_count"] == 0
+    assert result["coverage"]["complete"] is False
+    assert result["continuation"] is None
+    assert any("frame attribution is unavailable" in item for item in result["limitations"])
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("size", [-1, True, "64"])
+def test_v8_heap_profile_still_rejects_malformed_sample_sizes(tmp_path: Path, size: object) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "callFrame": {"functionName": "root", "url": "app.js"},
+                    "selfSize": 0,
+                    "id": 1,
+                    "children": [],
+                },
+                "samples": [{"size": size, "nodeId": 2}],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
 
 
 @pytest.mark.process

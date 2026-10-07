@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Collection
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -41,26 +40,25 @@ def _parse_cpu(request: V8ProfileRequest) -> V8ProfileResult:
             nodes[node_id] = {
                 "call_frame": call_frame,
                 "children": child_ids,
-                "hit_count": hit_count,
+                "self_samples": 0,
             }
     if not nodes:
         _malformed("V8 CPU profile nodes array cannot be empty.")
-    sample_count = _count_cpu_samples(
-        Path(request.artifact_path), request.max_samples, known_node_ids=nodes.keys()
-    )
+    sample_count = _count_cpu_samples(Path(request.artifact_path), request.max_samples, nodes=nodes)
     return _aggregate_cpu(request, nodes, sample_count)
 
 
-def _count_cpu_samples(path: Path, limit: int, *, known_node_ids: Collection[int]) -> int:
-    known = frozenset(known_node_ids)
+def _count_cpu_samples(path: Path, limit: int, *, nodes: dict[int, dict[str, Any]]) -> int:
     count = 0
     with path.open("rb") as stream:
         for sample in ijson.items(stream, "samples.item"):
             if count >= limit:
                 _limit("V8 CPU profile sample limit exceeded.")
             sample_id = _strict_int(sample, "sample node id")
-            if sample_id not in known:
+            node = nodes.get(sample_id)
+            if node is None:
                 _malformed("V8 CPU profile sample references an unknown node.")
+            node["self_samples"] += 1
             count += 1
     return count
 
@@ -93,15 +91,15 @@ def _aggregate_cpu(
             if closing:
                 node = nodes[node_id]
                 identity = _frame_identity(node["call_frame"], request)
-                subtree = node["hit_count"] + sum(
+                subtree = node["self_samples"] + sum(
                     subtree_totals[child_id] for child_id in node["children"]
                 )
                 values = aggregates.setdefault(
                     identity["frame_id"], {"self": 0, "inclusive": 0, "samples": 0}
                 )
-                values["self"] += node["hit_count"]
+                values["self"] += node["self_samples"]
                 values["inclusive"] += subtree
-                values["samples"] += node["hit_count"]
+                values["samples"] += node["self_samples"]
                 subtree_totals[node_id] = subtree
                 frame_rows.setdefault(identity["frame_id"], identity)
                 continue
@@ -128,8 +126,12 @@ def _aggregate_cpu(
         ),
         limitations=(
             "V8 CPU samples represent execution time, not allocation or memory evidence.",
+            "Hotspot counts use exported sample node IDs; optional hitCount metadata is not "
+            "used as a substitute. Inclusive counts sum call-tree occurrences and can repeat "
+            "recursive frames.",
             "The CPU profile contains sampled stack locations; source-map resolution is not "
             "applied.",
+            "V8 line and column coordinates are zero-based; -1 means unavailable.",
             *(
                 (f"V8 hotspot rows were truncated to {request.max_rows} entries.",)
                 if truncated
@@ -150,7 +152,8 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
     sample_count = 0
     total_sampled_bytes = 0
     node_ids: set[int] = set()
-    sample_node_ids: set[int] = set()
+    samples_by_node: dict[int, tuple[int, int]] = {}
+    frames_by_node: dict[int, str] = {}
     node_stack: list[dict[str, Any]] = []
     sample: dict[str, Any] | None = None
     with path.open("rb") as stream:
@@ -207,7 +210,8 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 sample_node_id = _strict_int(sample.get("nodeId"), "sample node id")
                 if size < 0:
                     _malformed("V8 heap sample size cannot be negative.")
-                sample_node_ids.add(sample_node_id)
+                count, sampled_bytes = samples_by_node.get(sample_node_id, (0, 0))
+                samples_by_node[sample_node_id] = (count + 1, sampled_bytes + size)
                 total_sampled_bytes += size
                 sample_count += 1
                 sample = None
@@ -231,18 +235,23 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 if node_stack:
                     node_stack[-1]["child_total"] += self_size + current["child_total"]
                 identity = _frame_identity(call_frame, request)
+                frames_by_node[node_id] = identity["frame_id"]
                 frame_rows.setdefault(identity["frame_id"], identity)
                 values = aggregates.setdefault(
                     identity["frame_id"], {"self": 0, "inclusive": 0, "samples": 0}
                 )
                 values["self"] += self_size
                 values["inclusive"] += self_size + current["child_total"]
-                values["samples"] += 1
                 node_count += 1
     if node_stack or sample is not None:
         _malformed("V8 heap profile contains an incomplete object.")
-    if not sample_node_ids.issubset(node_ids):
-        _malformed("V8 heap sample references an unknown node.")
+    unresolved_sample_count = unresolved_sampled_bytes = 0
+    for node_id, (count, sampled_bytes) in samples_by_node.items():
+        if node_id in frames_by_node:
+            aggregates[frames_by_node[node_id]]["samples"] += count
+        else:
+            unresolved_sample_count += count
+            unresolved_sampled_bytes += sampled_bytes
     frames, measurements, truncated = _bounded_profile_rows(request, frame_rows, aggregates)
     return V8ProfileResult(
         profile_kind="heap",
@@ -251,6 +260,8 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
         frame_count=len(aggregates),
         truncated=truncated,
         total_sampled_bytes=total_sampled_bytes,
+        unresolved_sample_count=unresolved_sample_count,
+        unresolved_sampled_bytes=unresolved_sampled_bytes,
         frames=frames,
         frame_measurements=tuple(
             {**row, "metric": "memory.self_size", "unit": "bytes"} for row in measurements
@@ -261,6 +272,16 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
             "Only allocations sampled by V8 are reported; small or short-lived allocations "
             "may be underrepresented.",
             "Source-map resolution is not applied by this extractor.",
+            "V8 line and column coordinates are zero-based; -1 means unavailable.",
+            *(
+                (
+                    f"{unresolved_sample_count} allocation samples ({unresolved_sampled_bytes} "
+                    "estimated bytes) reference nodes absent from the native call tree; "
+                    "their frame attribution is unavailable and coverage is incomplete.",
+                )
+                if unresolved_sample_count
+                else ()
+            ),
             *(
                 (f"V8 hotspot rows were truncated to {request.max_rows} entries.",)
                 if truncated

@@ -24,6 +24,8 @@ class V8ProfileResult(ContractModel):
     frame_count: Annotated[int, Field(ge=0)]
     truncated: bool = False
     total_sampled_bytes: Annotated[int, Field(ge=0)] = 0
+    unresolved_sample_count: Annotated[int, Field(ge=0)] = 0
+    unresolved_sampled_bytes: Annotated[int, Field(ge=0)] = 0
     frames: tuple[dict[str, JsonValue], ...]
     frame_measurements: tuple[dict[str, JsonValue], ...]
     limitations: tuple[str, ...] = ()
@@ -35,5 +37,5 @@ V8_PROFILE_WORKER: WorkerDefinition[V8ProfileRequest, V8ProfileResult] = WorkerD
     request=TypeAdapter(V8ProfileRequest),
     response=TypeAdapter(V8ProfileResult),
     name="V8 profile",
-    implementation="flameox.workers.v8_profiles/v1",
+    implementation="flameox.workers.v8_profiles/v2",
 )
