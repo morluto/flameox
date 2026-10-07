@@ -1,5 +1,13 @@
 <h1 align="center">flameox</h1>
 
+<p align="center">
+  <img
+    src="docs/assets/flameox-mascot-flamegraph.png"
+    width="420"
+    alt="flameox mascot: an ox with a flame graph between its horns"
+  >
+</p>
+
 <p align="center"><strong>Bounded local runtime evidence for coding agents.</strong></p>
 
 <!-- mcp-name: io.github.morluto/flameox -->
