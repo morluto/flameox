@@ -17,6 +17,7 @@ by passing their exact paths and formats.
 ```console
 uv sync --extra dev --extra memory --extra trace --extra cpu
 uv run flameox mcp inspect
+uv run flameox mcp inspect --capability cpu.hotspots
 uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
 uv run flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
 ```

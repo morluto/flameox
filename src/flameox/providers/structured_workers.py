@@ -102,7 +102,8 @@ class StructuredWorkerProviders:
                 maximum_rss_bytes=maximum_rss_bytes,
                 maximum_writable_growth_bytes=maximum_output_bytes,
             )
-            rows = [dict(row) for row in result.frame_measurements]
+            frames = {str(frame["frame_id"]): frame for frame in result.frames}
+            rows = [{**frames[str(row["frame_id"])], **row} for row in result.frame_measurements]
             return ProviderAnalysis(
                 provider_id="v8-cpu-profile",
                 provider_version=V8_PROFILE_WORKER.implementation,
@@ -135,23 +136,28 @@ class StructuredWorkerProviders:
                 maximum_rss_bytes=maximum_rss_bytes,
                 maximum_writable_growth_bytes=maximum_output_bytes,
             )
-            rows = [dict(row) for row in result.frame_measurements]
+            frames = {str(frame["frame_id"]): frame for frame in result.frames}
+            rows = [{**frames[str(row["frame_id"])], **row} for row in result.frame_measurements]
+            heap_metrics: dict[str, object] = {
+                "node_count": result.node_count,
+                "sample_count": result.sample_count,
+                "total_sampled_bytes": result.total_sampled_bytes,
+            }
+            if result.unresolved_sample_count:
+                heap_metrics["unresolved_sample_count"] = result.unresolved_sample_count
+                heap_metrics["unresolved_sampled_bytes"] = result.unresolved_sampled_bytes
             return ProviderAnalysis(
                 provider_id="v8-heap-profile",
                 provider_version=V8_PROFILE_WORKER.implementation,
                 blocks=[
                     {
                         "type": "metrics",
-                        "values": {
-                            "node_count": result.node_count,
-                            "sample_count": result.sample_count,
-                            "total_sampled_bytes": result.total_sampled_bytes,
-                        },
+                        "values": heap_metrics,
                     },
                     {"type": "table", "rows": rows},
                 ],
                 rows_observed=result.frame_count,
-                complete=not result.truncated,
+                complete=not result.truncated and result.unresolved_sample_count == 0,
                 limitations=list(result.limitations),
             )
         if capability_id == "sanitizer.failures" and format_name == "compute-sanitizer":

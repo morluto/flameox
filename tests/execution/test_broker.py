@@ -487,6 +487,32 @@ def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
     assert not process_is_alive(child_pid)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signals")
+def test_observed_cleanup_accepts_denied_signal_only_for_dead_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True) as process:
+        process.wait(timeout=5)
+
+    def denied(group_id: int, requested_signal: int) -> None:
+        raise PermissionError("group has no live members")
+
+    monkeypatch.setattr(os, "killpg", denied)
+    SubprocessBroker._signal_observed_group(process.pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signals")
+def test_observed_cleanup_propagates_denied_signal_for_live_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(group_id: int, requested_signal: int) -> None:
+        raise PermissionError("live group cannot be signalled")
+
+    monkeypatch.setattr(os, "killpg", denied)
+    with pytest.raises(PermissionError, match="live group cannot be signalled"):
+        SubprocessBroker._signal_observed_group(os.getpgrp(), signal.SIGKILL)
+
+
 def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -> None:
     pid_path = tmp_path / "observed-parent-exit.pid"
     code = (
@@ -910,6 +936,38 @@ async def test_async_output_sink_marks_partial_prefix_on_limit(tmp_path: Path) -
         assert native.startswith(preview)
         assert len(preview) == preview_count
     assert failure.value.details["output_sink"]["complete"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream_fd", [1, 2])
+async def test_output_limit_settles_root_with_paused_pipe_and_preserves_prefix(
+    tmp_path: Path, stream_fd: int
+) -> None:
+    pid_path = tmp_path / "writer.pid"
+    sink = tmp_path / "sink"
+    code = (
+        "import os, pathlib, time; "
+        "pathlib.Path('writer.pid').write_text(str(os.getpid())); "
+        f"os.write({stream_fd}, b'x' * (2 * 1024 * 1024)); time.sleep(30)"
+    )
+    with anyio.fail_after(5), pytest.raises(ProcessExecutionError) as failure:
+        await SubprocessBroker().run(
+            request(
+                tmp_path,
+                "-c",
+                code,
+                max_output_bytes=100_000,
+                output_directory=sink,
+                output_root=tmp_path,
+            )
+        )
+    assert failure.value.code is ErrorCode.LIMIT_EXCEEDED
+    assert failure.value.process.cleanup_complete is True
+    metadata = failure.value.output_sink
+    assert metadata is not None and not metadata.complete
+    path = metadata.stdout_path if stream_fd == 1 else metadata.stderr_path
+    assert path.read_bytes() == b"x" * 100_000
+    assert not process_is_alive(int(pid_path.read_text()))
 
 
 @pytest.mark.anyio

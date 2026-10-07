@@ -177,6 +177,8 @@ class CpuCallGraphArguments(StrictModel):
 
 
 class ScalingArguments(StrictModel):
+    model_config = ConfigDict(json_schema_extra={"examples": [{"input_dimension": "elements"}]})
+
     input_dimension: str = Field(
         description="Numeric benchmark dimension used as the scaling input axis.",
         min_length=1,
@@ -228,6 +230,10 @@ class StaticArguments(StrictModel):
 
 
 class WindowArguments(StrictModel):
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"start_ns": 0, "end_ns": 1_000_000}]}
+    )
+
     start_ns: int = Field(description="Inclusive trace-window start in nanoseconds.", ge=0)
     end_ns: int = Field(description="Exclusive trace-window end in nanoseconds.", gt=0)
 

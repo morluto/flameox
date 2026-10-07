@@ -8,7 +8,9 @@ import pytest
 from mcp import Client
 
 from flameox.mcp import create_server
+from flameox.mcp.request_contracts import AnalyzeArguments, CaptureArguments
 from flameox.repository import EvidenceRepository
+from flameox.runtime_contracts import CAPABILITIES, CAPTURE_PROVIDER_CONTRACTS
 
 
 @pytest.mark.integration
@@ -57,6 +59,31 @@ def test_capability_discovery_returns_exact_contract_only_on_drill_down(tmp_path
             )
             == 2
         )
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
+def test_every_discovered_example_validates_against_its_exact_options(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            for capability in CAPABILITIES:
+                result = await client.call_tool(
+                    "inspect_capabilities", {"mode": "get", "capability_id": capability.id}
+                )
+                assert not result.is_error
+                detail = result.structured_content["capabilities"][0]
+                analysis = AnalyzeArguments.model_validate(detail["analysis_example"])
+                capability.model.model_validate(analysis.request.options)
+                capability.validate_source_count(len(analysis.request.sources))
+                if detail["capture_example"] is not None:
+                    capture = CaptureArguments.model_validate(detail["capture_example"])
+                    capability.model.model_validate(capture.request.options)
+                    provider = CAPTURE_PROVIDER_CONTRACTS[capture.request.provider.kind]
+                    provider.argument_model.model_validate(capture.request.provider.options)
+                    assert any(
+                        artifact.format in capability.formats for artifact in provider.artifacts
+                    )
 
     anyio.run(exercise)
 

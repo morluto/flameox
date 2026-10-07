@@ -1623,13 +1623,13 @@ class SubprocessBroker:
     ) -> bool:
         if os.name == "posix":
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                self._signal_observed_group(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 return True
             if force:
                 time.sleep(0.05)
                 with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                    self._signal_observed_group(process.pid, signal.SIGKILL)
             return True
 
         if process.returncode is not None:
@@ -1641,6 +1641,27 @@ class SubprocessBroker:
                 if process.poll() is None:
                     process.kill()
         return True
+
+    @staticmethod
+    def _signal_observed_group(group_id: int, requested_signal: signal.Signals) -> None:
+        try:
+            os.killpg(group_id, requested_signal)
+        except PermissionError:
+            # Darwin can return EPERM for a group whose last members are zombies.
+            # Do not reap the root here: wait4 still owns the native RSS measurement.
+            for pid in psutil.pids():
+                try:
+                    if os.getpgid(pid) != group_id:
+                        continue
+                    if psutil.Process(pid).status() not in (
+                        psutil.STATUS_ZOMBIE,
+                        psutil.STATUS_DEAD,
+                    ):
+                        raise
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    continue
+            # Every remaining member is dead; a denied signal to a live member
+            # or an unreadable process still propagates instead of claiming cleanup.
 
     async def _write_stdin(
         self,
@@ -1959,11 +1980,11 @@ class SubprocessBroker:
             else:
                 process.terminate()
         except ProcessLookupError:
-            await process.wait()
+            await self._wait_root_exit(process)
             return scope_stopped and await self._finish_descendant_cleanup(descendants)
         try:
             async with asyncio.timeout(request.graceful_shutdown_seconds):
-                await process.wait()
+                await self._wait_root_exit(process)
                 return scope_stopped and await self._finish_descendant_cleanup(descendants)
         except TimeoutError:
             pass
@@ -1974,8 +1995,16 @@ class SubprocessBroker:
                 process.kill()
         except ProcessLookupError:
             pass
-        await process.wait()
+        await self._wait_root_exit(process)
         return scope_stopped and await self._finish_descendant_cleanup(descendants)
+
+    @staticmethod
+    async def _wait_root_exit(process: asyncio.subprocess.Process) -> None:
+        # Process.wait() also waits for pipe transports. A reader that has hit
+        # its output limit can leave a paused pipe, even after the root is reaped.
+        # Readers are settled and transports closed by run() after termination.
+        while process.returncode is None:
+            await asyncio.sleep(0.01)
 
     @staticmethod
     def _descendants(root_pid: int) -> tuple[psutil.Process, ...]:

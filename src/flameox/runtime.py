@@ -18,7 +18,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -462,8 +462,8 @@ class AnalysisRuntime:
                         "received_format": request_source.format,
                         "accepted_formats": list(capability.formats),
                         "recovery": (
-                            "Select one accepted format or inspect the `analyze` request variants "
-                            "with `flameox mcp inspect --tool analyze`."
+                            "Select one accepted format or inspect the exact options "
+                            f"with `flameox mcp inspect --capability {capability_id}`."
                         ),
                     },
                 )
@@ -490,8 +490,8 @@ class AnalysisRuntime:
                     "received_format": bad,
                     "accepted_formats": list(capability.formats),
                     "recovery": (
-                        "Select one accepted format or inspect the `analyze` request variants "
-                        "with `flameox mcp inspect --tool analyze`."
+                        "Select one accepted format or inspect the exact options "
+                        f"with `flameox mcp inspect --capability {capability_id}`."
                     ),
                 },
             )
@@ -1925,7 +1925,11 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
             )
+        protected = self._protected_sources.copy()
         try:
+            if cached is not None and cached.preserved is not None:
+                self._protected_sources.update(source.path for source in cached.sources)
+                cached = replace(cached, sources=self._preserved_rescue_sources(cached))
             result = self._rescue_to_destination(selected, cached=cached, previous=previous)
         except RepositoryError as exc:
             raise self._repository_failure(
@@ -1937,6 +1941,8 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "REPOSITORY_IO_FAILURE", "Session evidence could not be rescued."
             ) from exc
+        finally:
+            self._protected_sources = protected
         if cached is not None:
             self.analyses.move_to_end(analysis_id)
         rescues[rescue_key] = result
@@ -1944,6 +1950,39 @@ class AnalysisRuntime:
         while len(rescues) > MAX_SESSION_RESCUES:
             rescues.popitem(last=False)
         return self._copy_result(result)
+
+    def _preserved_rescue_sources(self, cached: CachedAnalysis) -> list[NativeSource]:
+        """Recover publication sources without imposing analysis-reader cardinality or limits."""
+        assert cached.preserved is not None
+        evidence_id = str(cached.preserved["evidence_id"])
+        projection = self.read_evidence_agent_projection(evidence_id)
+        try:
+            selections = [
+                self.repository.select_source(
+                    evidence_id, selector=item["source"]["artifact_selector"], role=None
+                )
+                for item in projection["logical_sources"]
+            ]
+            needed: dict[Path, EvidenceSelection] = {}
+            for selection in selections:
+                self.repository.verify_source(selection)
+                if selection.source.is_directory:
+                    path = self._evidence_destination(selection)
+                    self._protected_sources.add(path)
+                    if not path.exists():
+                        needed[path] = selection
+            self._prune_scratch(
+                reserved_bytes=sum(item.source.size_bytes for item in needed.values()),
+                reserved_files=sum(len(item.members) for item in needed.values()),
+            )
+            return [
+                self._materialize_evidence_bundle(selection)
+                if selection.source.is_directory
+                else selection.members[0][1]
+                for selection in selections
+            ]
+        except RepositoryError as exc:
+            raise self._repository_failure(exc) from exc
 
     def rescue_evidence_page(
         self, analysis_id: str, destination: str

@@ -69,6 +69,18 @@ An em dash means callers provide an explicit artifact path; it does not mean
 the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
 
+V8 CPU and heap hotspot rows include their extracted function, file, frame identity,
+symbolization state, and native zero-based line/column coordinates. Omitted coordinates
+use `-1` for unavailable; explicitly exported zero remains a valid first line or column.
+Source maps are not resolved. CPU counts use exported sample node IDs rather than optional
+`hitCount` metadata. Inclusive CPU counts sum call-tree occurrences and can repeat recursive
+frames. Heap `sample_count` counts native allocation sample records per
+frame, including records from multiple call-tree nodes with the same identity. `self_value`
+and `inclusive_value` retain V8's allocation estimates, independently of sample counts.
+Native heap samples can reference nodes absent from the exported call tree. Those samples
+remain in the total counts and estimated bytes, with separate `unresolved_sample_count` and
+`unresolved_sampled_bytes` metrics, incomplete coverage, and an explicit attribution limitation.
+
 `triton.autotune` reads native `*.autotune.json` caches (`triton-cache`) emitted
 by Triton's `cache_results=True`, as well as the existing listener-event format.
 Native timing values retain producer order, including positive-infinity sentinels;

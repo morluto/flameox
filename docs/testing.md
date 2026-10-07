@@ -38,8 +38,8 @@ test; transport tests must not import fixtures from provider or runtime test mod
 
 ## Required behavioral proof
 
-Contract tests assert exactly six MCP tools, one resource template, no concrete resource list,
-capability-discriminated input schemas, compatible-provider discriminators, output schemas,
+Contract tests assert exactly seven MCP tools, one resource template, no concrete resource list,
+compact input envelopes, registry-backed capability/provider discovery, valid examples, output schemas,
 truthful annotations, and direct structured success content without a universal wrapper.
 
 Runtime tests cover bounded streaming analysis, digest-bound continuation,
