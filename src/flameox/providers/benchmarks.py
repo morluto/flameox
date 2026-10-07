@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -272,7 +273,17 @@ class BenchmarkProvider:
                 ):
                     key = canonical_bytes(identity)
                     total, prior_count = values.get(key, (0.0, 0))
-                    values[key] = total + float(value), prior_count + count
+                    try:
+                        aggregate_total = total + float(value)
+                    except OverflowError as error:
+                        raise ProviderFailure(
+                            "LIMIT_EXCEEDED", "Benchmark comparison exceeds finite numeric range."
+                        ) from error
+                    if not math.isfinite(aggregate_total):
+                        raise ProviderFailure(
+                            "LIMIT_EXCEEDED", "Benchmark comparison exceeds finite numeric range."
+                        )
+                    values[key] = aggregate_total, prior_count + count
                     members[key] = identity
             series.append(values)
             identities.append(members)

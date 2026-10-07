@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from xml.etree.ElementTree import Element
 
 from defusedxml.ElementTree import ParseError, iterparse  # type: ignore[import-untyped]
 
@@ -16,9 +17,13 @@ class XctraceProvider:
     @staticmethod
     def analyze(path: Path, *, max_rows: int, provider_version: str) -> ProviderAnalysis:
         rows: list[dict[str, Any]] = []
+        parents: list[Element] = []
         observed = 0
         try:
-            for _event, element in iterparse(path, events=("end",)):
+            for event, element in iterparse(path, events=("start", "end")):
+                if event == "start":
+                    parents.append(element)
+                    continue
                 observed += 1
                 if len(rows) < max_rows:
                     rows.append(
@@ -32,6 +37,9 @@ class XctraceProvider:
                         }
                     )
                 element.clear()
+                parents.pop()
+                if parents:
+                    parents[-1].remove(element)
         except (OSError, ParseError, ValueError) as error:
             raise ProviderFailure(
                 "DECODE_FAILURE", "xctrace table-of-contents XML is invalid"

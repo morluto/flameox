@@ -68,7 +68,7 @@ def scaling_projection(
         try:
             input_value = float(raw_input)
             measurement_total = float(value)
-        except ValueError:
+        except (ValueError, OverflowError):
             omitted_measurements += 1
             continue
         if (

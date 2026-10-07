@@ -78,6 +78,11 @@ positive input values is explicitly inconclusive rather than falling back to a g
 summary. The fit describes the measured range; it does not establish asymptotic complexity or a
 causal performance change.
 
+Scaling omits measurements outside its finite numeric range and reports the
+omission; a series without enough remaining points is inconclusive. Benchmark
+comparison returns a typed `LIMIT_EXCEEDED` when aggregate totals exceed the
+finite numeric range. Native exact integer samples remain unchanged.
+
 Comparison and scaling aggregate native samples into per-series sums and counts inside their
 bounded readers. The sample population may therefore exceed the result-row page size without being
 silently clipped. The independent native sample and semantic-series safety ceilings still apply.

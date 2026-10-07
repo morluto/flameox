@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tracemalloc
 from collections.abc import Iterator
 from pathlib import Path
 from types import MethodType
@@ -13,6 +14,7 @@ import pytest
 
 from flameox.evidence_models import EvidenceManifest
 from flameox.providers.benchmarks import BenchmarkProvider
+from flameox.providers.xctrace import XctraceProvider
 from flameox.repository import EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource, RequestLimits
@@ -162,3 +164,23 @@ def test_nsight_continuations_reuse_one_session_export(
 
     assert rows == 100
     assert counter.read_text().splitlines() == ["1"]
+
+
+@pytest.mark.serial
+def test_xctrace_parser_memory_does_not_grow_with_completed_xml_siblings(tmp_path: Path) -> None:
+    peaks: list[int] = []
+    for count in (50_000, 200_000):
+        artifact = tmp_path / f"toc-{count}.xml"
+        artifact.write_text("<trace>" + '<run name="sample"/>' * count + "</trace>")
+        tracemalloc.start()
+        try:
+            result = XctraceProvider.analyze(artifact, max_rows=1, provider_version="golden")
+            peaks.append(tracemalloc.get_traced_memory()[1])
+        finally:
+            tracemalloc.stop()
+        assert result.rows_observed == count + 1
+        assert result.complete is False
+        assert result.blocks[1]["rows"] == [
+            {"element": "run", "attributes": {"name": "sample"}, "text": None}
+        ]
+    assert peaks[1] < peaks[0] * 2, peaks

@@ -15,6 +15,7 @@ from flameox.runtime_contracts import (
     EvidenceSource,
     PathSource,
     RequestLimits,
+    RuntimeFailure,
 )
 
 
@@ -659,3 +660,28 @@ def test_unpreserved_capture_analysis_failure_can_be_preserved_later(tmp_path: P
             runtime.close()
 
     anyio.run(exercise)
+
+
+@pytest.mark.process
+def test_benchmark_aggregates_report_inconclusive_or_limit_for_exact_large_integers(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "large.samples.json"
+    _write_scaling_samples(artifact)
+    document = json.loads(artifact.read_text())
+    for benchmark in document["benchmarks"]:
+        benchmark["samples"] = [10**400]
+    artifact.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    source = PathSource(path=str(artifact), format="samples")
+    try:
+        scaling = runtime.analyze("benchmark.scaling", [source], {"input_dimension": "elements"})
+        assert scaling["blocks"][1]["rows"][0]["status"] == "inconclusive"
+        assert any("3 measurement(s)" in value for value in scaling["limitations"])
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("benchmark.compare", [source, source], {"metric": "operation"})
+        assert failure.value.code == "LIMIT_EXCEEDED"
+        assert "finite numeric range" in failure.value.message
+        assert not (tmp_path / ".flameox").exists()
+    finally:
+        runtime.close()
