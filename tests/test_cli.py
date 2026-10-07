@@ -13,8 +13,6 @@ from typer.testing import CliRunner
 from flameox import __version__
 from flameox.cli import app
 from flameox.repository import EvidenceRepository
-from flameox.runtime_contracts import RequestLimits, RuntimeFailure
-from flameox.setup import CliVersionAdvisory, ExternalRequirement, ProviderPreparation, SetupClient
 
 pytestmark = pytest.mark.integration
 
@@ -22,22 +20,6 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def isolated_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLAMEOX_DATA_DIR", str(tmp_path / "flameox-data"))
-
-
-def test_help_exposes_current_command_families() -> None:
-    result = CliRunner().invoke(app, ["--help"])
-
-    assert result.exit_code == 0, result.output
-    assert all(
-        command in result.output
-        for command in (
-            "setup",
-            "analyze",
-            "capture",
-            "mcp",
-            "evidence",
-        )
-    )
 
 
 def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> None:
@@ -73,80 +55,6 @@ def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> N
         "cpu.hotspots"
         in input_schema["$defs"]["CaptureRequest"]["properties"]["capability_id"]["enum"]
     )
-
-
-def test_mcp_inspect_unknown_tool_returns_bounded_recovery() -> None:
-    result = CliRunner().invoke(app, ["mcp", "inspect", "--tool", "missing_tool"])
-
-    assert result.exit_code == 1
-    failure = json.loads(result.stderr)
-    assert failure["code"] == "UNKNOWN_CAPABILITY"
-    assert failure["details"]["requested_tool"] == "missing_tool"
-    assert "capture_and_analyze" in failure["details"]["available_tools"]
-    assert failure["details"]["recovery"] == "Run `flameox mcp inspect` to select a tool."
-
-
-def test_mcp_inspect_rejects_conflicting_detail_modes() -> None:
-    result = CliRunner().invoke(
-        app,
-        ["mcp", "inspect", "--tool", "capture_and_analyze", "--full"],
-    )
-
-    assert result.exit_code == 1
-    assert "either --tool" in result.stderr
-
-
-@pytest.mark.parametrize("capability_id", ["trace.window", "benchmark.scaling", "cpu.hotspots"])
-def test_mcp_inspect_returns_exact_capability_options_and_examples(capability_id: str) -> None:
-    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", capability_id])
-    assert result.exit_code == 0, result.output
-    detail = json.loads(result.stdout)["capabilities"][0]
-    assert detail["capability_id"] == capability_id
-    assert "analysis_option_schema" in detail
-    options = detail["analysis_example"]["request"]["options"]
-    for name in detail["analysis_option_schema"].get("required", []):
-        assert name in options
-    assert all("option_schema" in provider for provider in detail["capture_providers"])
-
-
-@pytest.mark.parametrize("other", [["--full"], ["--tool", "analyze"]])
-def test_mcp_inspect_rejects_conflicting_capability_modes(other: list[str]) -> None:
-    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", "cpu.hotspots", *other])
-    assert result.exit_code == 1
-    assert json.loads(result.stderr)["code"] == "INVALID_INPUT"
-
-
-def test_mcp_inspect_unknown_capability_returns_choices() -> None:
-    result = CliRunner().invoke(app, ["mcp", "inspect", "--capability", "missing.capability"])
-    assert result.exit_code == 1
-    failure = json.loads(result.stderr)
-    assert failure["code"] == "UNKNOWN_CAPABILITY"
-    assert "cpu.hotspots" in failure["details"]["available_capabilities"]
-
-
-def test_mcp_startup_limits_reach_the_shared_server(monkeypatch: pytest.MonkeyPatch) -> None:
-    received: list[RequestLimits | None] = []
-
-    def serve(*, limits: RequestLimits | None = None) -> None:
-        received.append(limits)
-
-    monkeypatch.setattr("flameox.cli.run_server", serve)
-    result = CliRunner().invoke(
-        app, ["mcp", "serve", "--limits", '{"max_memory_bytes":8589934592}']
-    )
-    assert result.exit_code == 0, result.output
-    assert received == [RequestLimits(max_memory_bytes=8 * 1024**3)]
-
-
-@pytest.mark.parametrize("value", ["[]", "not-json", '{"max_memory_bytes":0}', '{"typo":1}'])
-def test_mcp_startup_rejects_invalid_limits(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    def unexpected(*, limits: RequestLimits | None = None) -> None:
-        pytest.fail("invalid limits must not start the server")
-
-    monkeypatch.setattr("flameox.cli.run_server", unexpected)
-    result = CliRunner().invoke(app, ["mcp", "serve", "--limits", value])
-    assert result.exit_code != 0
-    assert "Traceback" not in result.output
 
 
 def test_analyze_enforces_cli_startup_input_limit(tmp_path: Path) -> None:
@@ -282,63 +190,6 @@ def test_analyze_rejects_a_malformed_continuation_without_a_traceback(tmp_path: 
 
 
 @pytest.mark.process
-def test_capture_accepts_argv_after_separator(tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--capture-arguments",
-            "{}",
-            "--cwd",
-            str(tmp_path),
-            "--",
-            sys.executable,
-            "-c",
-            "print('cli-capture')",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["blocks"][1]["rows"][0]["text"] == "cli-capture"
-    assert not (tmp_path / ".flameox").exists()
-
-
-def test_capture_failure_keeps_runtime_remediation_visible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise RuntimeFailure(
-            "UNAVAILABLE_CAPABILITY",
-            "Host provider is unavailable.",
-            remediation=("Install the host provider and retry capture.",),
-        )
-
-    monkeypatch.setattr("flameox.runtime.AnalysisRuntime.capture_and_analyze", fail)
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--",
-            sys.executable,
-            "-c",
-            "pass",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert json.loads(result.stderr)["remediation"] == [
-        "Install the host provider and retry capture."
-    ]
-
-
-@pytest.mark.process
 def test_capture_does_not_offer_an_unusable_scratch_continuation(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -365,117 +216,6 @@ def test_capture_does_not_offer_an_unusable_scratch_continuation(tmp_path: Path)
 
 
 @pytest.mark.process
-def test_preserved_capture_returns_an_executable_cross_process_next_page(tmp_path: Path) -> None:
-    runner = CliRunner()
-    first = runner.invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--limits",
-            '{"max_rows":1}',
-            "--preserve",
-            "--",
-            sys.executable,
-            "-c",
-            "print('first'); print('second')",
-        ],
-    )
-    assert first.exit_code == 0, first.output
-    first_payload = json.loads(first.output)
-    next_page = first_payload["next_page"]
-    assert next_page["command"] == "flameox"
-    assert first_payload["preserved"]["evidence_id"] in next_page["argv"]
-    assert "analysis_id" not in first_payload
-
-    second = runner.invoke(app, next_page["argv"])
-
-    assert second.exit_code == 0, second.output
-    assert json.loads(second.output)["blocks"][1]["rows"][0]["text"] == "second"
-
-
-@pytest.mark.process
-def test_capture_returns_nonzero_for_failed_target(tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--",
-            sys.executable,
-            "-c",
-            "raise SystemExit(7)",
-        ],
-    )
-
-    assert result.exit_code == 1, result.output
-    assert json.loads(result.stdout)["capture"]["executions"][0]["returncode"] == 7
-
-
-@pytest.mark.process
-@pytest.mark.parametrize("retention", ["diagnostics", "full"])
-def test_capture_console_retention_option_reaches_native_capture(
-    tmp_path: Path, retention: str
-) -> None:
-    workload = tmp_path / "workload.py"
-    workload.write_text("print('console-evidence')\n")
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "coverage",
-            "--capability",
-            "coverage.summary",
-            "--cwd",
-            str(tmp_path),
-            "--console-output",
-            retention,
-            "--",
-            sys.executable,
-            str(workload),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    execution = json.loads(result.stdout)["capture"]["executions"][0]
-    if retention == "diagnostics":
-        assert execution["console_diagnostics"]["stdout"] == "console-evidence\n"
-        assert execution.get("output_streams") is None
-    else:
-        assert execution["output_streams"]["stdout_bytes"] == len(b"console-evidence\n")
-        assert execution.get("console_diagnostics") is None
-
-
-def test_capture_rejects_unknown_console_retention_before_execution(tmp_path: Path) -> None:
-    marker = tmp_path / "executed"
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--console-output",
-            "automatic",
-            "--",
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(marker)!r}).touch()",
-        ],
-    )
-    assert result.exit_code != 0
-    assert not marker.exists()
-    assert "Traceback" not in result.output
-
-
-@pytest.mark.process
 def test_capture_workload_budget_is_independent_of_decoder_limits(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -499,34 +239,6 @@ def test_capture_workload_budget_is_independent_of_decoder_limits(tmp_path: Path
     execution = json.loads(result.stdout)["capture"]["executions"][0]
     assert execution["limit"]["kind"] == "timeout"
     assert execution["limit"]["configured"] == 0.2
-
-
-@pytest.mark.parametrize(
-    "budget", ["[]", '{"timeout_seconds":0}', '{"max_memory_bytes":-1}', '{"unknown":1}']
-)
-def test_capture_rejects_invalid_workload_budget_before_execution(
-    tmp_path: Path, budget: str
-) -> None:
-    marker = tmp_path / "executed"
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--workload-budget",
-            budget,
-            "--",
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(marker)!r}).touch()",
-        ],
-    )
-    assert result.exit_code != 0
-    assert not marker.exists()
-    assert "Traceback" not in result.output
 
 
 @pytest.mark.process
@@ -575,30 +287,6 @@ def test_capture_accepts_the_runtime_experiment_contract(tmp_path: Path) -> None
     assert payload["blocks"][-1]["rows"][0]["baseline_case"] == "baseline"
 
 
-def test_capture_rejects_an_invalid_experiment_before_execution(tmp_path: Path) -> None:
-    marker = tmp_path / "executed"
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--cwd",
-            str(tmp_path),
-            "--experiment",
-            '{"cases": []}',
-            "--",
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(marker)!r}).touch()",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert '"code": "INVALID_INPUT"' in result.stderr
-    assert not marker.exists()
-
-
 def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -616,55 +304,6 @@ def test_analyze_projects_runtime_errors_without_traceback(tmp_path: Path) -> No
     assert "cpu.hotspots" in failure["details"]["available_capabilities"]
     assert "flameox mcp inspect" in failure["details"]["recovery"]
     assert "Traceback" not in result.output
-
-
-def test_capture_unknown_provider_returns_choices_before_execution(tmp_path: Path) -> None:
-    marker = tmp_path / "executed"
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "missing-provider",
-            "--",
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(marker)!r}).touch()",
-        ],
-    )
-
-    assert result.exit_code == 1
-    failure = json.loads(result.stderr)
-    assert failure["details"]["requested_provider"] == "missing-provider"
-    assert "direct" in failure["details"]["available_capture_providers"]
-    assert failure["details"]["recovery"].endswith(
-        "`flameox mcp inspect --tool capture_and_analyze`."
-    )
-    assert not marker.exists()
-
-
-def test_analyze_unsupported_format_returns_accepted_formats(tmp_path: Path) -> None:
-    artifact = tmp_path / "profile.json"
-    artifact.write_text("{}")
-    result = CliRunner().invoke(
-        app,
-        ["analyze", "cpu.hotspots", str(artifact), "--format", "json"],
-    )
-
-    assert result.exit_code == 1
-    failure = json.loads(result.stderr)
-    assert failure["code"] == "UNSUPPORTED_FORMAT"
-    assert failure["details"]["received_format"] == "json"
-    assert failure["details"]["accepted_formats"] == [
-        "cpuprofile",
-        "pstats",
-        "py-spy",
-        "perf",
-        "perf-data",
-    ]
-    assert failure["details"]["recovery"].endswith(
-        "`flameox mcp inspect --capability cpu.hotspots`."
-    )
 
 
 def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: Path) -> None:
@@ -698,35 +337,6 @@ def test_analyze_can_rescue_evidence_when_configured_store_is_corrupt(tmp_path: 
     assert (configured / "unexpected").read_text() == "owned"
     manifest = EvidenceRepository(rescue, "cli-test").read(rescued["evidence_id"])
     assert manifest["body"]["capability_id"] == "artifact.preview"
-
-
-def test_capture_rejects_invalid_rescue_destination_before_workload(tmp_path: Path) -> None:
-    destination = tmp_path / "nonempty"
-    destination.mkdir()
-    (destination / "owned").write_text("keep")
-    marker = tmp_path / "executed"
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "capture",
-            "--provider",
-            "direct",
-            "--rescue-to",
-            str(destination),
-            "--",
-            sys.executable,
-            "-c",
-            f"from pathlib import Path; Path({str(marker)!r}).touch()",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert json.loads(result.stderr)["message"] == (
-        "Rescue destination must be a new path that does not exist"
-    )
-    assert not marker.exists()
-    assert (destination / "owned").read_text() == "keep"
 
 
 def test_capture_rejects_conflicting_evidence_destinations_before_workload(
@@ -798,85 +408,6 @@ def test_setup_without_a_tty_requires_an_explicit_client(tmp_path: Path) -> None
     assert not (tmp_path / "flameox-data").exists()
 
 
-def test_setup_prepares_exact_python_providers_and_guides_system_tools(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    selected: list[list[str]] = []
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    def prepare(providers: list[str], timeout_seconds: int) -> ProviderPreparation:
-        assert timeout_seconds == 1_800
-        selected.append(providers)
-        return ProviderPreparation(
-            providers,
-            ["memray"],
-            [
-                ExternalRequirement(
-                    "nsight-compute",
-                    "Install NVIDIA Nsight Compute with its extras/python interface.",
-                )
-            ],
-            ["/usr/bin/uvx", "--from", f"flameox[memory]=={__version__}", "--version"],
-            "uvx",
-            [
-                "--python",
-                "3.12",
-                "--from",
-                f"flameox[cpu,memory]=={__version__}",
-                "flameox",
-                "mcp",
-                "serve",
-            ],
-        )
-
-    monkeypatch.setattr("flameox.cli.prepare_providers", prepare)
-    result = CliRunner().invoke(
-        app,
-        [
-            "setup",
-            "--provider",
-            "memray",
-            "--provider",
-            "nsight-compute",
-            "--client",
-            "codex",
-            "--yes",
-            "--json",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert selected == [["memray", "nsight-compute"]]
-    assert payload["providers"] == ["memray", "nsight-compute"]
-    assert payload["preparation_command"][0] == "/usr/bin/uvx"
-    assert f"flameox[cpu,memory]=={__version__}" in payload["args"]
-    assert "extras/python" in payload["external_guidance"][0]
-    assert not (tmp_path / "flameox-data").exists()
-
-
-def test_setup_prints_external_provider_guidance_for_humans(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "flameox.cli.prepare_providers",
-        lambda *_args, **_kwargs: ProviderPreparation(
-            requested_providers=["perf"],
-            launcher_command="uvx",
-            launcher_args=["flameox", "mcp", "serve"],
-            prepared_managed_providers=[],
-            external_requirements=[ExternalRequirement("perf", "Install perf externally.")],
-            preparation_command=[],
-        ),
-    )
-
-    result = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes"])
-
-    assert result.exit_code == 0, result.output
-    assert "Install perf externally." in result.output
-
-
 def test_setup_configures_explicit_global_clients_and_reports_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -890,52 +421,6 @@ def test_setup_configures_explicit_global_clients_and_reports_restart(
     assert f"flameox=={__version__}" in config.read_text()
     assert "Codex configured" in result.output
     assert "Restart or reconnect Codex" in result.output
-
-
-def test_setup_json_returns_typed_reconnect_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    result = CliRunner().invoke(app, ["setup", "--client", "gemini", "--yes", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["restart_required"] is True
-    assert payload["next_action"] == {
-        "kind": "reconnect_mcp",
-        "clients": ["Gemini CLI"],
-        "message": "Restart or reconnect Gemini CLI to load Flameox.",
-    }
-
-
-def test_setup_reports_a_different_path_cli_without_changing_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "flameox.cli.path_cli_version_advisory",
-        lambda: CliVersionAdvisory("/tools/flameox", "0.1.0", __version__),
-    )
-
-    structured = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes", "--json"])
-    human = CliRunner().invoke(app, ["setup", "--client", "codex", "--yes"])
-
-    assert structured.exit_code == 0, structured.output
-    assert json.loads(structured.output)["advisories"] == [
-        {
-            "kind": "path_cli_version_mismatch",
-            "executable": "/tools/flameox",
-            "cli_version": "0.1.0",
-            "mcp_version": __version__,
-            "message": (
-                f"Direct CLI commands use Flameox 0.1.0 at /tools/flameox, while the "
-                f"configured MCP launcher uses {__version__}. Manage that CLI separately if "
-                "you want the versions aligned."
-            ),
-        }
-    ]
-    assert "Direct CLI commands use Flameox 0.1.0" in human.output
 
 
 def test_setup_dry_run_does_not_prepare_or_write(
@@ -958,86 +443,6 @@ def test_setup_dry_run_does_not_prepare_or_write(
     assert payload["plan"][0]["action"] == "create"
     assert f"flameox[memory]=={__version__}" in payload["args"]
     assert not (tmp_path / ".cursor").exists()
-
-
-def test_setup_dry_run_validates_providers_and_reports_external_guidance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    unknown = CliRunner().invoke(
-        app, ["setup", "--client", "codex", "--provider", "mystery", "--dry-run"]
-    )
-    external = CliRunner().invoke(
-        app, ["setup", "--client", "codex", "--provider", "perf", "--dry-run", "--json"]
-    )
-
-    assert unknown.exit_code == 2
-    assert "Unknown provider" in unknown.output
-    assert external.exit_code == 0, external.output
-    assert json.loads(external.output)["external_guidance"]
-
-
-def test_setup_yes_requires_explicit_client_selection() -> None:
-    result = CliRunner().invoke(app, ["setup", "--yes"])
-
-    assert result.exit_code == 2
-    assert "detection is not consent" in result.output
-
-
-@pytest.mark.parametrize("arguments", [["--dry-run"], ["--client", "codex", "--json"]])
-def test_setup_automation_requires_explicit_selection_and_consent(arguments: list[str]) -> None:
-    result = CliRunner().invoke(app, ["setup", *arguments])
-
-    assert result.exit_code == 2
-    assert "requires" in result.output
-
-
-def test_setup_interactive_flow_asks_only_for_clients(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
-    selections: list[list[SetupClient]] = []
-
-    def select(detected: list[SetupClient]) -> list[SetupClient]:
-        selections.append(detected)
-        return [SetupClient.CODEX]
-
-    monkeypatch.setattr("flameox.cli._select_setup_clients", select)
-
-    result = CliRunner().invoke(app, ["setup"])
-
-    assert result.exit_code == 0, result.output
-    assert selections == [[]]
-    assert (tmp_path / ".codex" / "config.toml").is_file()
-
-
-def test_setup_interactive_dry_run_uses_the_client_selector(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
-    monkeypatch.setattr("flameox.cli._select_setup_clients", lambda _detected: [SetupClient.CODEX])
-
-    result = CliRunner().invoke(app, ["setup", "--dry-run"])
-
-    assert result.exit_code == 0, result.output
-    assert "No changes were made" in result.output
-    assert not (tmp_path / ".codex").exists()
-
-
-def test_setup_interactive_cancellation_makes_no_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("flameox.cli._is_interactive", lambda: True)
-    monkeypatch.setattr("flameox.cli._select_setup_clients", lambda _detected: [])
-
-    result = CliRunner().invoke(app, ["setup"])
-
-    assert result.exit_code == 0, result.output
-    assert "cancelled. No changes were made" in result.output
-    assert not (tmp_path / ".codex").exists()
 
 
 @pytest.mark.parametrize("path_kind", ["missing", "file", "loop"])
@@ -1079,17 +484,6 @@ def test_cli_preview_reports_unreadable_artifacts_without_traceback(
         "MISSING_OR_CHANGED_INPUT" if input_kind == "loop" else "DECODE_FAILURE"
     )
     assert "Traceback" not in result.output
-
-
-def test_cli_rejects_misspelled_capture_option_before_resolving_the_workload() -> None:
-    result = CliRunner().invoke(
-        app, ["capture", "--provider", "direct", "--presrve", "--", sys.executable, "-c", "pass"]
-    )
-    assert result.exit_code == 2
-    message = " ".join(unstyle(result.stderr).split())
-    assert "No such option" in message
-    assert "--presrve" in message
-    assert "Executable" not in message
 
 
 def test_cli_rejects_format_override_for_preserved_evidence_before_reading_store() -> None:

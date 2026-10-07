@@ -10,7 +10,7 @@ from packaging.requirements import Requirement
 
 from flameox import __version__
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 def test_npm_bootstrap_matches_python_release_version() -> None:
@@ -54,25 +54,8 @@ def test_mcp_registry_metadata_launches_the_python_distribution() -> None:
     assert "<!-- mcp-name: io.github.morluto/flameox -->" in readme
 
 
-def test_python_release_installs_pyperf_for_the_eager_adapter_import() -> None:
+def test_python_release_installs_eager_and_ephemeral_runtime_dependencies() -> None:
     requirements = [Requirement(value) for value in requires("flameox") or []]
+    required = {requirement.name for requirement in requirements if requirement.marker is None}
 
-    assert any(
-        requirement.name == "pyperf" and requirement.marker is None for requirement in requirements
-    )
-
-
-def test_python_release_installs_duckdb_only_for_ephemeral_aggregation() -> None:
-    requirements = [Requirement(value) for value in requires("flameox") or []]
-
-    assert any(
-        requirement.name == "duckdb" and requirement.marker is None for requirement in requirements
-    )
-
-
-def test_python_release_installs_duckdb_timezone_support() -> None:
-    requirements = [Requirement(value) for value in requires("flameox") or []]
-
-    assert any(
-        requirement.name == "pytz" and requirement.marker is None for requirement in requirements
-    )
+    assert {"pyperf", "duckdb", "pytz"} <= required

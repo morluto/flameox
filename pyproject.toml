@@ -71,12 +71,12 @@ flameox = "flameox.cli:app"
 packages = ["src/flameox"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional and not process'"
+addopts = "-ra --strict-config --strict-markers --durations=10 -p no:randomly -m 'not performance and not optional'"
 testpaths = ["tests"]
 markers = [
+    "e2e: installed CLI or MCP workflows using real processes and native evidence",
     "golden: fixed data examples with explicit expected projections",
-    "unit: deterministic tests for one semantic owner",
-    "integration: tests crossing two or more Flameox services",
+    "integration: request, provider, worker, process, or filesystem boundary behavior",
     "process: tests that spawn, transport to, or cancel another process",
     "optional: tests requiring a provider or host capability outside the core install",
     "performance: representative local corpus performance acceptance checks",

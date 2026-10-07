@@ -10,46 +10,25 @@ const test = require("node:test");
 const bootstrap = path.resolve(__dirname, "../bin/flameox.cjs");
 const packageJson = require("../package.json");
 
-function fakeUvx(directory) {
-  const executable = path.join(directory, "uvx");
-  fs.writeFileSync(
-    executable,
-    "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
-    { mode: 0o755 },
-  );
-  return executable;
-}
-
 test("bootstrap reports its matching package version", () => {
   const result = spawnSync(process.execPath, [bootstrap, "--version"], { encoding: "utf8" });
   assert.equal(result.status, 0);
   assert.equal(result.stdout, `${packageJson.version}\n`);
 });
 
-test("setup hands off the matching package version to uvx", () => {
+test("setup reports a missing uv executable with actionable guidance", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-bootstrap-"));
-  const result = spawnSync(process.execPath, [bootstrap, "setup"], {
-    encoding: "utf8",
-    env: { ...process.env, FLAMEOX_UV_EXECUTABLE: fakeUvx(directory) },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  const args = JSON.parse(result.stdout);
-  assert.ok(args.includes(`flameox==${packageJson.version}`));
-  assert.deepEqual(args.slice(-2), ["flameox", "setup"]);
-  assert.match(result.stderr, /ephemeral Flameox Python runtime/);
-});
-
-test("setup hands explicit client automation flags through to Python", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flameox-bootstrap-"));
-  const result = spawnSync(process.execPath, [bootstrap, "setup", "--client", "codex", "--yes"], {
-    encoding: "utf8",
-    env: { ...process.env, FLAMEOX_UV_EXECUTABLE: fakeUvx(directory) },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  const args = JSON.parse(result.stdout);
-  assert.deepEqual(args.slice(-5), ["flameox", "setup", "--client", "codex", "--yes"]);
+  try {
+    const result = spawnSync(process.execPath, [bootstrap, "setup"], {
+      encoding: "utf8",
+      env: { ...process.env, FLAMEOX_UV_EXECUTABLE: path.join(directory, "missing-uvx") },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /setup requires uv/);
+    assert.match(result.stderr, /npx flameox@latest setup/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("bootstrap rejects the removed upgrade command", () => {

@@ -13,6 +13,26 @@ from flameox.repository import EvidenceRepository
 
 
 @pytest.mark.integration
+def test_host_provider_preparation_returns_guidance_without_installing(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool(
+                "prepare_providers", {"provider_ids": ["nsight-compute"]}
+            )
+
+        assert result.is_error is False
+        value = result.structured_content
+        assert value["preparation"]["status"] == "not_applicable"
+        assert value["prepared_managed_providers"] == []
+        assert [item["provider_id"] for item in value["external_requirements"]] == [
+            "nsight-compute"
+        ]
+        assert value["next_action"] is None
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
 def test_mcp_validation_unavailable_provider_and_failed_execution_are_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

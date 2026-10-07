@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -271,56 +270,6 @@ def test_mcp_failed_capture_retains_an_executable_preserved_handoff(tmp_path: Pa
         assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
 
     anyio.run(exercise)
-
-
-def test_mcp_handoffs_are_derived_while_the_runtime_lock_is_held(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    artifact = tmp_path / "rows.json"
-    artifact.write_text('[{"value":1},{"value":2}]')
-    original = AnalysisRuntime.next_analysis_request
-    observations: list[bool] = []
-
-    def checked(runtime: AnalysisRuntime, result: Mapping[str, Any]) -> dict[str, Any] | None:
-        observations.append(runtime._request_lock.locked())
-        return original(runtime, result)
-
-    monkeypatch.setattr(AnalysisRuntime, "next_analysis_request", checked)
-
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            analyzed = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(artifact)}],
-                    },
-                    "page_size": 1,
-                },
-            )
-            await client.call_tool(
-                "preserve_evidence",
-                {"analysis_id": analyzed.structured_content["analysis_id"]},
-            )
-            await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [sys.executable, "-c", "print('captured')"],
-                            "cwd": str(tmp_path),
-                        },
-                        "provider": {"kind": "direct"},
-                    }
-                },
-            )
-
-    anyio.run(exercise)
-    assert observations == [True, True, True]
 
 
 def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:

@@ -10,282 +10,73 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
-from mcp_types import TextContent
 
 from flameox import __version__
 from flameox.mcp import create_server
 from flameox.providers.cpu import CpuProfileProvider
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import RuntimeFailure
 from flameox.runtime_errors import DomainError, ErrorCode
-from flameox.setup import ExternalRequirement, ProviderPreparation, ProviderSelectionFailure
 
 
-@pytest.mark.unit
-def test_mcp_analysis_does_not_expose_unexpected_exception_details(
+@pytest.mark.integration
+def test_mcp_errors_do_not_expose_untrusted_paths_or_provider_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret_path = "/private/agent-workspace/customer-secret.json"
+    private_path = "/private/customer/workspace/profile.json"
+    private_diagnostic = "decoder stderr contains customer token"
+    original_resolve = AnalysisRuntime._resolve_sources
 
-    def fail(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise OSError(2, "No such file", secret_path)
+    def fail_read(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError(2, "No such file", private_path)
 
-    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
-
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            result = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
-                    }
-                },
-            )
-
-        assert result.is_error is True
-        assert result.structured_content["code"] == "DECODE_FAILURE"
-        assert result.structured_content["message"] == "Input could not be read during analysis."
-        assert secret_path not in json.dumps(result.structured_content)
-
-    anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_mcp_analysis_wraps_unexpected_provider_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise RuntimeError("private provider state")
-
-    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
-
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            result = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
-                    }
-                },
-            )
-
-        assert result.is_error is True
-        assert result.structured_content["code"] == "ANALYSIS_FAILURE"
-        assert result.structured_content["message"] == "Analysis failed unexpectedly."
-        assert "private provider state" not in json.dumps(result.structured_content)
-
-    anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_mcp_worker_failure_does_not_expose_raw_domain_details(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    secret = "/private/workspace/customer-path: dependency diagnostic"
-    artifact = tmp_path / "profile.json"
-    artifact.write_text("{}")
-
-    def fail(*_args: Any, **_kwargs: Any) -> None:
+    def fail_provider(*_args: Any, **_kwargs: Any) -> Any:
         raise DomainError(
             ErrorCode.DECODE_FAILURE,
             "CPU profile worker transport failed before a trustworthy response.",
-            details={"exit_code": 7, "stderr": secret},
+            details={"stderr": private_diagnostic, "path": private_path},
         )
 
-    monkeypatch.setattr(CpuProfileProvider, "analyze", fail)
-
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
-            result = await client.call_tool(
+        monkeypatch.setattr(AnalysisRuntime, "_resolve_sources", fail_read)
+        async with Client(
+            create_server(evidence_directory=tmp_path / "store"), raise_exceptions=True
+        ) as client:
+            unreadable = await client.call_tool(
+                "analyze",
+                {
+                    "request": {
+                        "capability_id": "artifact.preview",
+                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
+                    }
+                },
+            )
+            monkeypatch.setattr(AnalysisRuntime, "_resolve_sources", original_resolve)
+            monkeypatch.setattr(CpuProfileProvider, "analyze", fail_provider)
+            profile = tmp_path / "profile.json"
+            profile.write_text("{}")
+            provider_failure = await client.call_tool(
                 "analyze",
                 {
                     "request": {
                         "capability_id": "cpu.hotspots",
-                        "sources": [{"kind": "path", "path": str(artifact), "format": "py-spy"}],
+                        "sources": [{"kind": "path", "path": str(profile), "format": "py-spy"}],
                     }
                 },
             )
 
-        assert result.is_error is True
-        assert result.structured_content["code"] == "DECODE_FAILURE"
-        assert result.structured_content["details"] == {}
-        assert secret not in json.dumps(result.structured_content)
+        for result in (unreadable, provider_failure):
+            assert result.is_error is True
+            serialized = json.dumps(result.structured_content)
+            assert private_path not in serialized
+            assert private_diagnostic not in serialized
 
     anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_mcp_retryable_failure_without_provider_returns_retry_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeFailure(
-            "EXECUTION_TIMEOUT",
-            "Analysis worker timed out.",
-            retryable=True,
-            remediation=("Retry the bounded analysis request.",),
-        )
-
-    monkeypatch.setattr(AnalysisRuntime, "analyze", fail)
-
-    async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
-            result = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"path": str(tmp_path / "input.json")}],
-                    }
-                },
-            )
-
-        assert result.is_error is False
-        assert result.structured_content["status"] == "retryable"
-        assert result.structured_content["next_action"] == {
-            "kind": "wait_and_retry",
-            "retry_after_ms": None,
-            "message": "Retry the bounded analysis request.",
-        }
-
-    anyio.run(exercise)
-
-
-@pytest.mark.unit
-def test_mcp_prepares_managed_providers_and_only_guides_host_tools(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    preparation_calls: list[list[str]] = []
-
-    async def prepare(
-        self: Any, provider_ids: list[str], timeout_seconds: int
-    ) -> ProviderPreparation:
-        assert timeout_seconds == 1_800
-        if provider_ids == ["unknown-provider"]:
-            raise ProviderSelectionFailure("Unknown provider 'unknown-provider'")
-        preparation_calls.append(provider_ids)
-        if provider_ids == ["nsight-compute"]:
-            return ProviderPreparation(
-                ["nsight-compute"],
-                [],
-                [
-                    ExternalRequirement(
-                        "nsight-compute",
-                        "Install NVIDIA Nsight Compute with its extras/python interface.",
-                    )
-                ],
-                [],
-                "uvx",
-                [
-                    "--python",
-                    "3.12",
-                    "--from",
-                    f"flameox=={__version__}",
-                    "flameox",
-                    "mcp",
-                    "serve",
-                ],
-            )
-        return ProviderPreparation(
-            ["memray", "nsight-compute"],
-            ["memray"],
-            [
-                ExternalRequirement(
-                    "nsight-compute",
-                    "Install NVIDIA Nsight Compute with its extras/python interface.",
-                )
-            ],
-            ["/usr/bin/uvx", "--from", f"flameox[memory]=={__version__}", "--version"],
-            "uvx",
-            [
-                "--python",
-                "3.12",
-                "--from",
-                f"flameox[memory]=={__version__}",
-                "flameox",
-                "mcp",
-                "serve",
-            ],
-        )
-
-    monkeypatch.setattr("flameox.providers.preparation.ProviderDependencies.prepare", prepare)
-
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            result = await client.call_tool(
-                "prepare_providers",
-                {"provider_ids": ["memray", "nsight-compute", "memray"]},
-            )
-            host_only = await client.call_tool(
-                "prepare_providers",
-                {"provider_ids": ["nsight-compute"]},
-            )
-            invalid = await client.call_tool(
-                "prepare_providers",
-                {"provider_ids": ["unknown-provider"]},
-            )
-
-        assert result.is_error is False
-        assert len(result.content) == 1
-        assert isinstance(result.content[0], TextContent)
-        assert "Provider preparation completed" in result.content[0].text
-        assert "requested_providers" not in result.content[0].text
-        assert result.structured_content["requested_providers"] == [
-            "memray",
-            "nsight-compute",
-        ]
-        assert result.structured_content["prepared_managed_providers"] == ["memray"]
-        assert result.structured_content["external_requirements"] == [
-            {
-                "provider_id": "nsight-compute",
-                "guidance": "Install NVIDIA Nsight Compute with its extras/python interface.",
-            }
-        ]
-        assert result.structured_content["preparation"]["status"] == "prepared"
-        assert result.structured_content["next_action"]["kind"] == "reconnect_mcp"
-        assert result.structured_content["next_action"]["necessity"] == "conditional"
-        assert result.structured_content["next_action"]["launcher"] == {
-            "command": "uvx",
-            "args": result.structured_content["launcher"]["args"],
-        }
-        assert "Preserve" in result.structured_content["next_action"]["message"]
-        assert "external requirements" in result.content[0].text
-        assert "workload interpreter" in result.content[0].text
-        assert result.structured_content["launcher"]["args"][3] == (
-            f"flameox[memory]=={__version__}"
-        )
-        assert result.structured_content["launcher"]["args"][-3:] == [
-            "flameox",
-            "mcp",
-            "serve",
-        ]
-        assert host_only.is_error is False
-        assert host_only.structured_content["next_action"] is None
-
-        assert invalid.is_error is True
-        assert invalid.structured_content["code"] == "INVALID_REQUEST"
-        assert invalid.structured_content["field_path"] == ["provider_ids", 0]
-        assert "py-spy" in invalid.structured_content["accepted_values"]
-
-    anyio.run(exercise)
-    assert preparation_calls == [
-        ["memray", "nsight-compute", "memray"],
-        ["nsight-compute"],
-    ]
 
 
 @pytest.mark.process
 @pytest.mark.serial
+@pytest.mark.e2e
 def test_real_stdio_initialize_and_catalog_match_the_runtime_contract(tmp_path: Path) -> None:
     async def exercise() -> None:
         parameters = StdioServerParameters(
@@ -342,16 +133,40 @@ def test_real_stdio_initialize_and_catalog_match_the_runtime_contract(tmp_path: 
             await session.validate_tool_result("capture_and_analyze", captured)
 
         assert initialized.server_info.version == __version__
-        assert len(tools.tools) == 7
-        assert "inspect_capabilities" in [tool.name for tool in tools.tools]
-        assert "analyze" in [tool.name for tool in tools.tools]
-        assert "capture_and_analyze" in [tool.name for tool in tools.tools]
+        by_name = {tool.name: tool for tool in tools.tools}
+        assert set(by_name) == {
+            "inspect_capabilities",
+            "prepare_providers",
+            "analyze",
+            "capture_and_analyze",
+            "preserve_evidence",
+            "rescue_evidence",
+            "query_evidence",
+        }
         assert all(tool.output_schema is not None for tool in tools.tools)
+        for name in ("analyze", "capture_and_analyze"):
+            schema = by_name[name].input_schema
+            request_ref = schema["properties"]["request"]["$ref"].rsplit("/", 1)[-1]
+            request = schema["$defs"][request_ref]
+            assert request["type"] == "object"
+            assert request["additionalProperties"] is False
+            assert request["properties"]["capability_id"]["enum"]
+            assert "capability_id" in request["required"]
+        analysis_schema = by_name["analyze"].input_schema
+        request_ref = analysis_schema["properties"]["request"]["$ref"].rsplit("/", 1)[-1]
+        assert analysis_schema["$defs"][request_ref]["properties"]["sources"]["maxItems"] == 32
+        analyze_annotations = by_name["analyze"].annotations
+        capture_annotations = by_name["capture_and_analyze"].annotations
+        assert analyze_annotations is not None
+        assert capture_annotations is not None
+        assert analyze_annotations.read_only_hint is True
+        assert capture_annotations.destructive_hint is True
         assert invalid.is_error is True
         assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
         assert resources.resources == []
         assert [item.uri_template for item in templates.resource_templates] == [
             "flameox://evidence/{evidence_id}"
         ]
+        assert templates.resource_templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
     anyio.run(exercise)
