@@ -83,7 +83,7 @@ result.
 ## Validation and proof gaps
 
 The clean pre-change Flameox baseline at HEAD `706e205` exposed seven tools and 87,300 bytes
-of compact JSON. The replacement exposes 50 tools and 911,561 bytes, an increase of 824,261
+of compact JSON. The initial replacement at `d946123` exposes 50 tools and 911,561 bytes, an increase of 824,261
 bytes. These sizes serialize `{"tools": [...]}` with each tool's
 `model_dump(mode="json", by_alias=True, exclude_none=True)` and
 `json.dumps(..., separators=(",", ":"))`. Direct tool selection trades the smaller gateway catalog
@@ -118,3 +118,40 @@ reader, and their private protocol fields are removed. Both memory capabilities 
 native-profile baseline exactly for public metrics, attribution rows, coverage, truncation and
 limitations at row limits 1 and 100. The four metric aggregations still participate in bounded
 frame selection, and the harness still enforces timeout and RSS limits.
+
+## Live hardening follow-up
+
+Fresh stdio probes on 2026-10-09 found and fixed these contract issues:
+
+- Omitted page sizes previously supplied 100 even when startup policy allowed only two rows.
+  Requests now inherit startup limits and can lower typed decoder, input, output, memory and
+  provenance limits. Continuations retain the effective limits across preservation and restart.
+- Pydantic coercion previously accepted numeric strings and booleans outside the advertised
+  integer schema. The boundary now validates the original arguments against the generated JSON
+  Schema before execution, while accepting integral JSON numbers such as `2.0`.
+- Evidence selectors now advertise their non-null mutual exclusion. Query creation bounds require
+  timezone-aware strings and ordered dates; admission failures include an actionable field path.
+- Missing optional AIPerf dependencies now report unavailable capability through the worker
+  protocol instead of looking like corrupt evidence. Output-limit recovery distinguishes a request
+  increase within the startup ceiling from a server restart to raise that ceiling.
+
+The Python SDK and type package are pinned to `2.3.0`. Fresh legacy stdio sessions and the SDK's
+high-level client both worked; the latter negotiated protocol `2026-07-28`. The current 50-tool
+catalog measures 999,785 compact bytes by the method above. The increase carries typed request
+limits and corrected schema constraints; output contracts remain advertised in full.
+
+Live probes exercised direct execution success, failure, timeout and cancellation; coverage,
+cProfile, Memray, Node CPU and heap captures; native-format analysis and pagination; source changes;
+immutable corruption; preservation, rescue and restart; and representative invalid schemas.
+An actual Xcode Instruments Time Profiler capture also paged through its native trace metadata.
+Independent follow-up probes found no further actionable issues in those exercised workflows.
+Unavailable vendor profilers, GPU hardware and other operating systems remain proof gaps.
+
+The default suite passes with 269 tests, one host skip (`systemd-run` unavailable), and five
+optional/performance cases deselected. Ruff, formatting, strict mypy, import boundaries, dead-code
+and dependency checks also pass. New schema regressions extend the existing real transport
+workflow; a single new stdio workflow covers startup limits and preservation/replay.
+
+The follow-up removes an unused Torch option compatibility wrapper, the pass-through MCP server
+factory and package re-exports, and redundant subclass exception catches. The retained server class,
+runtime and provider boundaries continue to own their existing behavior.
