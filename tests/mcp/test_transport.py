@@ -156,6 +156,24 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 ("preview_artifact", {"sources": []}, None),
                 (
                     "preview_artifact",
+                    {"sources": [{"path": "/tmp/impossible\x00path"}]},
+                    ["sources", 0, "path"],
+                ),
+                (
+                    "rescue_evidence",
+                    {"analysis_id": "0" * 64, "destination": "/tmp/impossible\x00path"},
+                    ["destination"],
+                ),
+                (
+                    "capture_artifact_preview",
+                    {
+                        "target": {"argv": [sys.executable], "cwd": "/tmp/impossible\x00path"},
+                        "provider": {"kind": "direct"},
+                    },
+                    ["target", "cwd"],
+                ),
+                (
+                    "preview_artifact",
                     {"sources": [{"path": str(artifact)}], "page_size": 0},
                     None,
                 ),
@@ -281,6 +299,17 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     },
                     ["page_size"],
                 ),
+            )
+            invalid_calls += tuple(
+                (
+                    "capture_artifact_preview",
+                    {
+                        "target": {"argv": argv, "cwd": str(tmp_path)},
+                        "provider": {"kind": "direct"},
+                    },
+                    None,
+                )
+                for argv in ([""], [sys.executable, "bad\x00argument"], ["x" * 16_385])
             )
             invalid_calls += tuple(
                 (

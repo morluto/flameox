@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -45,12 +46,31 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _valid_argv(value: list[str]) -> list[str]:
+    if not value[0]:
+        raise ValueError("argv[0] must identify an executable")
+    return value
+
+
+def _argv_schema(schema: dict[str, Any]) -> None:
+    schema["prefixItems"] = [{**schema["items"], "minLength": 1}]
+
+
+type Argument = Annotated[str, Field(max_length=16_384, pattern=r"^[^\x00]*$")]
+type Argv = Annotated[
+    list[Argument],
+    Field(min_length=1, json_schema_extra=_argv_schema),
+    AfterValidator(_valid_argv),
+]
+
+
 class PathSource(StrictModel):
     kind: Literal["path"] = "path"
     path: str = Field(
         description="Path to the native artifact or artifact directory.",
         min_length=1,
         max_length=4096,
+        pattern=r"^[^\x00]*$",
     )
     format: str | None = Field(
         default=None,
@@ -353,6 +373,10 @@ class RequestLimits(StrictModel):
                             "startup_setting": name,
                         },
                     },
+                    remediation=(
+                        f"Retry with limits.{name}={ceiling}. To raise the server ceiling, "
+                        "restart or reconnect Flameox with the desired --limits setting.",
+                    ),
                 )
             effective[name] = requested
         return RequestLimits.model_validate(effective)
@@ -393,29 +417,24 @@ class DirectTarget(StrictModel):
             "semantic-oracle inputs always retain full output; preservation alone does not."
         ),
     )
-    argv: list[str] = Field(
+    argv: Argv = Field(
         description="Executable and arguments passed directly without a shell.",
-        min_length=1,
         max_length=256,
     )
     cwd: str = Field(
         description="Existing absolute directory in which to execute the target.",
         min_length=1,
         max_length=4_096,
+        pattern=r"^[^\x00]*$",
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
         description=(
             "Variables added to Flameox's minimal allowlisted environment (normally PATH); "
-            "sensitive loader overrides are rejected."
+            "credential names and sensitive loader overrides are rejected."
         ),
         max_length=32,
     )
-
-    @field_validator("argv")
-    @classmethod
-    def valid_argv(cls, value: list[str]) -> list[str]:
-        return _valid_argv(value)
 
     @field_validator("cwd")
     @classmethod
@@ -816,10 +835,9 @@ class ExperimentCase(StrictModel):
     name: str = Field(
         description="Stable case label used in comparison evidence.", min_length=1, max_length=80
     )
-    argv: list[str] | None = Field(
+    argv: Argv | None = Field(
         default=None,
         description="Case-specific executable and arguments; omit to inherit target.argv.",
-        min_length=1,
         max_length=256,
     )
     environment: dict[str, str] = Field(
@@ -827,11 +845,6 @@ class ExperimentCase(StrictModel):
         description="Case variables merged over target.environment.",
         max_length=32,
     )
-
-    @field_validator("argv")
-    @classmethod
-    def valid_argv(cls, value: list[str] | None) -> list[str] | None:
-        return _valid_argv(value) if value is not None else None
 
     @field_validator("environment")
     @classmethod
@@ -856,7 +869,8 @@ class ExperimentDesign(StrictModel):
         le=MAX_SAFE_JSON_INTEGER,
     )
     metric: Literal["wall_time_ns"] = Field(
-        description="Per-execution metric used for paired differences."
+        description="Total wall-clock time of each invoked capture process, including collector "
+        "startup and overhead, used for paired differences."
     )
     estimand: Literal["median_difference", "mean_difference"] = Field(
         description="Summary statistic of candidate-minus-baseline paired differences."
@@ -868,15 +882,16 @@ class ExperimentDesign(StrictModel):
         ),
         ge=0,
     )
-    semantic_oracle: list[str] | None = Field(
+    semantic_oracle: Argv | None = Field(
         default=None,
         description=(
             "Separate executable argv run after each successful capture; element zero is "
             f"resolved without a shell. {SEMANTIC_ORACLE_STDOUT_ENV} and "
-            f"{SEMANTIC_ORACLE_STDERR_ENV} name the captured files. A nonzero exit excludes "
+            f"{SEMANTIC_ORACLE_STDERR_ENV} name the capture process console files. Wrapped "
+            "collectors may produce summary-only console output; use workload-owned results "
+            "for semantic checks when needed. A nonzero exit excludes "
             "that case-block pair."
         ),
-        min_length=1,
         max_length=256,
     )
 
@@ -886,19 +901,6 @@ class ExperimentDesign(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError("experiment case names must be unique")
         return self
-
-    @field_validator("semantic_oracle")
-    @classmethod
-    def valid_semantic_oracle(cls, value: list[str] | None) -> list[str] | None:
-        return _valid_argv(value) if value is not None else None
-
-
-def _valid_argv(value: list[str]) -> list[str]:
-    if not value[0]:
-        raise ValueError("argv[0] must identify an executable")
-    if any("\x00" in item or len(item) > 16_384 for item in value):
-        raise ValueError("argv entries must be bounded and contain no NUL")
-    return value
 
 
 def _valid_environment(value: dict[str, str]) -> dict[str, str]:

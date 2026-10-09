@@ -68,6 +68,31 @@ def test_stdio_inherits_startup_limits_and_preserves_request_limits_on_replay(
                 )
                 assert rejected["code"] in {"LIMIT_EXCEEDED", "INVALID_REQUEST"}
                 assert not marker.exists()
+                if arguments == {"page_size": 3}:
+                    assert rejected["next_action"]["kind"] == "adjust_request"
+                    assert rejected["next_action"]["field_path"] == ["page_size"]
+                    assert "page_size=2" in rejected["next_action"]["message"]
+
+            shorthand = {"sources": [{"path": str(artifact)}], "page_size": 3.0}
+            rejected_shorthand = await call("preview_artifact", shorthand)
+            retry_shorthand = dict(shorthand)
+            retry_shorthand["page_size"] = rejected_shorthand["details"]["safe_retry"]["max_rows"]
+            recovered_shorthand = await call("preview_artifact", retry_shorthand)
+            assert recovered_shorthand["coverage"]["rows_returned"] == 2
+
+            both_limits = {
+                "sources": [{"path": str(artifact)}],
+                "page_size": 3,
+                "limits": {"max_rows": 3},
+            }
+            rejected_both = await call("preview_artifact", both_limits)
+            assert rejected_both["next_action"]["field_path"] == ["page_size"]
+            assert "page_size=2 and limits.max_rows=2" in rejected_both["next_action"]["message"]
+            retry_both = dict(both_limits)
+            retry_both["page_size"] = rejected_both["details"]["safe_retry"]["max_rows"]
+            retry_both["limits"] = {"max_rows": rejected_both["details"]["safe_retry"]["max_rows"]}
+            recovered_both = await call("preview_artifact", retry_both)
+            assert recovered_both["coverage"]["rows_returned"] == 2
 
             rejected_input = await call(
                 "preview_artifact",

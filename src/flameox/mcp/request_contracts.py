@@ -235,6 +235,7 @@ class RescueArguments(PreserveArguments):
     destination: str = Field(
         min_length=1,
         max_length=4096,
+        pattern=r"^[^\x00]*$",
         description="Agent-selected absolute path for a distinct new evidence directory.",
     )
 

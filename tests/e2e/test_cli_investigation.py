@@ -32,6 +32,54 @@ def run_cli(store: Path, *argv: str, exit_code: int = 0) -> dict[str, Any]:
     return payload
 
 
+def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> None:
+    store = tmp_path / "evidence"
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("one\n")
+    executable = str(Path(sys.executable).with_name("flameox"))
+    environment = {**os.environ, "FLAMEOX_DATA_DIR": str(store)}
+
+    invalid = subprocess.run(
+        [
+            executable,
+            "analyze",
+            "artifact.preview",
+            str(artifact),
+            "--arguments",
+            '{"secret_field":"PRIVATE-CLI-INPUT"}',
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert invalid.returncode == 1
+    assert invalid.stdout == ""
+    failure = json.loads(invalid.stderr)
+    assert failure["code"] == "INVALID_INPUT"
+    assert failure["field_path"] == ["secret_field"]
+    assert failure["details"]["error_type"] == "extra_forbidden"
+    assert "PRIVATE-CLI-INPUT" not in invalid.stderr
+    assert "input_value" not in invalid.stderr
+    assert "errors.pydantic.dev" not in invalid.stderr
+
+    malformed = subprocess.run(
+        [executable, "analyze", "artifact.preview", str(artifact), "--arguments", "{bad"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert malformed.returncode == 2
+    assert malformed.stdout == ""
+    assert "Usage: flameox analyze" in malformed.stderr
+    assert "invalid JSON" in malformed.stderr
+
+
 def test_capture_preserve_restart_and_replay_native_evidence(tmp_path: Path) -> None:
     store = tmp_path / "evidence"
     preview = run_cli(

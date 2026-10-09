@@ -83,7 +83,12 @@ def _failure_result(value: ToolFailureEnvelope) -> CallToolResult:
     )
 
 
-def _runtime_failure(error: RuntimeFailure, *, tool: str | None = None) -> CallToolResult:
+def _runtime_failure(
+    error: RuntimeFailure,
+    *,
+    tool: str | None = None,
+    arguments: Mapping[str, Any] | None = None,
+) -> CallToolResult:
     provider_id = error.details.get("provider_id")
     remediation = " ".join(error.remediation) or error.message
     if error.retryable:
@@ -139,7 +144,31 @@ def _runtime_failure(error: RuntimeFailure, *, tool: str | None = None) -> CallT
             accepted = candidate
             break
     source_index = error.details.get("source_index")
-    if isinstance(source_index, int) and "accepted_formats" in error.details:
+    safe_retry = error.details.get("safe_retry")
+    if (
+        error.details.get("scope") == "request_limit"
+        and isinstance(safe_retry, Mapping)
+        and len(safe_retry) == 1
+    ):
+        safe_field = next(iter(safe_retry))
+        if isinstance(safe_field, str):
+            field_path = ["limits", safe_field]
+            if (
+                safe_field == "max_rows"
+                and arguments is not None
+                and arguments.get("page_size") is not None
+            ):
+                ceiling = safe_retry[safe_field]
+                field_path = ["page_size"]
+                adjustment = f"page_size={ceiling}"
+                limits = arguments.get("limits")
+                if isinstance(limits, Mapping) and safe_field in limits:
+                    adjustment += f" and limits.{safe_field}={ceiling}"
+                remediation = (
+                    f"Retry with {adjustment}. To raise the server ceiling, restart "
+                    "or reconnect Flameox with the desired --limits setting."
+                )
+    elif isinstance(source_index, int) and "accepted_formats" in error.details:
         field_path = ["sources", source_index, "format"]
     elif "accepted_provider_ids" in error.details:
         field_path = ["provider", "kind"]
@@ -359,7 +388,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 )
             return _failure_result(normalize_validation_error(error))
         except RuntimeFailure as error:
-            return _runtime_failure(error, tool=params.name)
+            return _runtime_failure(error, tool=params.name, arguments=arguments)
         except OSError:
             if params.name in ANALYSIS_TOOLS.values():
                 code = "DECODE_FAILURE"

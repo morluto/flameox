@@ -44,6 +44,7 @@ from flameox.setup import (
     plan_client_setup,
     prepare_providers,
 )
+from flameox.validation import validation_failure
 
 app = typer.Typer(
     name="flameox",
@@ -99,7 +100,7 @@ def _write(value: object) -> None:
 
 def _cli_failure(error: RuntimeFailure | ValidationError) -> NoReturn:
     if isinstance(error, ValidationError):
-        value = {"code": "INVALID_INPUT", "message": str(error), "details": {}}
+        value = validation_failure(error)
     else:
         value = {
             "code": error.code,
