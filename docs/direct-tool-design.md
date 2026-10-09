@@ -195,3 +195,29 @@ resource artifact selection and reanalysis after restart. Separate probes repeat
 ordinary comparison and numeric failures and validated every tested MCP result against its output
 schema. This does not establish all-platform or all-provider correctness; unavailable hardware,
 vendor collectors, MCP host behavior and empirical agent tool selection remain proof gaps.
+
+## Native event and CLI admission follow-up
+
+Fresh CLI and MCP probes from `dc1abd6` found a looser observation reader than the SDK writer:
+boolean timestamps, empty labels and non-finite values were accepted, while excessive nesting
+could escape as a CLI traceback. The reader now consumes the same label and value bounds as SDK
+emission, bounds each line before parsing, and reports malformed native records as `DECODE_FAILURE`.
+Lone Unicode surrogates are rejected in labels, values and keys; provider projections also enforce
+canonical Unicode before serialization, through the same typed provider-failure boundary.
+Observation records use the SDK's 16 KiB limit; pytest retains its 64 KiB limit. The shared contract
+replaces duplicated validation, and the existing SDK workflow now uses the installed CLI throughout.
+
+CLI JSON options now turn excessive nesting and integer parsing limits into concise usage errors.
+Experiment thresholds must be finite, so a JSON number such as `1e999` fails typed admission before
+execution instead of reaching canonical-identity serialization. An unused server resource-list
+convenience method and duplicate phase-label validation were removed; protocol resource listing
+still works through its existing handler.
+
+Independent repeat probes validated malformed-record failures, valid label and collection bounds,
+arbitrary signed monotonic timestamps, server reuse after failures, large finite thresholds,
+failed-capture preservation, exact CLI query handoffs, and rescue continuation after reconnect.
+They found no further actionable issue in those exercised workflows. The fresh stdio catalog
+remains 50 tools and 1,006,029 compact bytes; all advertised schemas validate. The default suite
+passes with 270 tests, one host skip and five optional/performance cases deselected, with no new
+test definitions. Formatting, Ruff, strict mypy, import, dead-code and dependency checks pass.
+The hardware, platform, vendor and agent-selection proof gaps above remain.
