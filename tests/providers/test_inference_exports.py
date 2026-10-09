@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -343,6 +344,43 @@ def test_aiperf_runtime_comparison_uses_prompt_free_request_metrics(tmp_path: Pa
     ]
     assert "must never leave the isolated reader" not in json.dumps(result)
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.process
+def test_aiperf_analysis_reports_missing_optional_package_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    if importlib.util.find_spec("aiperf") is not None:
+        pytest.skip("AIPerf is installed; its successful analysis path is covered separately")
+
+    export = tmp_path / "missing-reader.aiperf.jsonl"
+    export.write_text(
+        json.dumps(
+            {
+                "metadata": {"session_num": 1, "request_start_ns": 1},
+                "metrics": {
+                    "input_sequence_length": {"value": 20, "unit": "tokens"},
+                    "output_sequence_length": {"value": 3, "unit": "tokens"},
+                    "request_latency": {"value": 10, "unit": "ms"},
+                },
+                "error": None,
+            }
+        )
+        + "\n"
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "inference.summary",
+                [PathSource(path=str(export), format="aiperf", producer="aiperf")],
+                {},
+            )
+    finally:
+        runtime.close()
+
+    assert failure.value.code == "UNAVAILABLE_CAPABILITY"
+    assert "uv sync --extra inference" in failure.value.message
 
 
 @pytest.mark.optional

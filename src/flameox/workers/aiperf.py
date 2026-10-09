@@ -5,14 +5,10 @@ import importlib.metadata
 import math
 import os
 from pathlib import Path
-from typing import cast
-
-from aiperf.common.models import (  # type: ignore[import-not-found,import-untyped,unused-ignore]
-    MetricRecordInfo,
-    MetricValue,
-)
+from typing import TYPE_CHECKING, cast
 
 from flameox.canonical import sha256_id
+from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.aiperf_contract import (
     AIPERF_WORKER,
     AIPerfErrorCategory,
@@ -27,6 +23,9 @@ from flameox.workers.protocol import (
     WorkerOutputFile,
     run_typed_worker,
 )
+
+if TYPE_CHECKING:
+    from aiperf.common.models import MetricRecordInfo, MetricValue  # type: ignore[import-not-found]
 
 _ERROR_TYPES = {
     "AuthenticationError": "authentication",
@@ -131,6 +130,15 @@ def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRo
 
 
 def _handle(request: AIPerfWorkerRequest, job_root: Path) -> AIPerfWorkerResult:
+    try:
+        from aiperf.common.models import MetricRecordInfo
+    except ImportError as error:
+        raise DomainError(
+            ErrorCode.UNAVAILABLE_CAPABILITY,
+            "AIPerf analysis requires the optional aiperf package; install Flameox's inference "
+            "extra with `uv sync --extra inference`.",
+        ) from error
+
     source = Path(request.artifact_path)
     output = job_root / "projection.jsonl"
     temporary = output.with_suffix(".tmp")
