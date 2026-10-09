@@ -73,18 +73,20 @@ its parent before decoding or executing the workload, then returns the same resc
 destination is unambiguous.
 
 Each analysis tool exposes `sources`, its capability-specific typed fields, optional `continuation`,
-and `page_size` at the top level. Each capture tool exposes `target`, a discriminated `provider`
-object with `kind` and that collector's typed fields, capability-specific fields, `preserve`, and
-`page_size`; only capabilities with multi-source analysis expose `experiment`. No request wrapper,
+`limits`, and `page_size` at the top level. Each capture tool exposes `target`, a discriminated `provider`
+object with `kind` and that collector's typed fields, capability-specific fields, `preserve`,
+`limits`, and `page_size`; only capabilities with multi-source analysis expose `experiment`. No request wrapper,
 opaque `options` bag, or capability selector appears in MCP arguments. Strict validation applies
 source cardinality, format compatibility, provider compatibility, and experiment support against
 the domain registries before runtime execution. Invalid combinations use Flameox's structured
 failure contract, not raw Pydantic diagnostics. Capability-specific schemas are part of
 `tools/list`, with optional CLI discovery for compact views.
 
-Both tool families expose only the semantic `page_size` beside their task inputs. Input-byte, traversal, worker,
-process-output, memory, and provenance ceilings are server policy rather than caller-facing MCP
-knobs. Field descriptions are part of the public MCP contract. Shared source, target, provider,
+Both tool families accept typed `limits` that can lower the server's input-byte, traversal, worker,
+process-output, memory, and provenance ceilings. Omitted limits inherit server policy. `page_size`
+is shorthand for `limits.max_rows`; when both are supplied, they must agree. Continuation handoffs
+carry the effective limits so exact replay retains the original bounds. Field descriptions are
+part of the public MCP contract. Shared source, target, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
 runtime validation, and every generated capability tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
@@ -290,6 +292,9 @@ Requests cannot raise server limits.
 
 `query_evidence` returns 1-200 manifests per page. Its cursor is bound to both the immutable
 inventory snapshot and the original filters; callers resume by repeating those filters unchanged.
+Creation bounds accept timezone-aware RFC3339 strings, and the upper bound must not precede the
+lower bound. Advertised JSON Schema types are enforced before execution, including rejection of
+numeric strings and booleans for integer fields; integral JSON numbers such as `2.0` remain valid.
 
 ## Capture
 
@@ -400,8 +405,9 @@ For example, `flameox capture --workload-budget
 '{"max_memory_bytes":8589934592}' ...` requests an 8 GiB workload process-tree
 budget without changing decoder protection. Unspecified analysis limits retain
 their defaults and hard contract
-maxima still apply. MCP tools expose `page_size`; they cannot modify or reveal the server's
-enforcement policy. No workspace configuration is created.
+maxima still apply. MCP tools accept `limits` to lower these ceilings and `page_size` to lower the
+row bound. Raising a server ceiling requires restart or reconnect with new `--limits`.
+No workspace configuration is created.
 Paginated `flameox evidence query` output also carries an executable `next_page.argv` with the
 original filters, page size, and snapshot-bound cursor.
 

@@ -12,6 +12,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import anyio
+from jsonschema.exceptions import ValidationError as SchemaValidationError
 from mcp import types
 from mcp.server import CacheHint, Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
@@ -42,7 +43,7 @@ from flameox.mcp.result_contracts import (
 from flameox.mcp.tool_registry import (
     bind_tool_contracts,
 )
-from flameox.mcp.validation import normalize_validation_error
+from flameox.mcp.validation import normalize_schema_error, normalize_validation_error
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
@@ -173,6 +174,7 @@ def _attach_next_page(value: dict[str, Any], request: dict[str, Any] | None) -> 
         "sources": request["sources"],
         "continuation": request["continuation"],
         "page_size": request["limits"]["max_rows"],
+        "limits": request["limits"],
     }
     if "analysis_id" in value and "capability_id" in value:
         value["continuation"] = None
@@ -336,9 +338,13 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 )
             )
         try:
-            request = contract.input_model.model_validate(params.arguments or {})
+            arguments = params.arguments or {}
+            request = contract.input_model.model_validate(arguments)
+            contract.input_validator.validate(arguments)
         except ValidationError as error:
             return _failure_result(normalize_validation_error(error))
+        except SchemaValidationError as error:
+            return _failure_result(normalize_schema_error(error))
         try:
             result = await contract.handler(request, ctx)
             contract.output_model.model_validate(result.structured_content)
@@ -365,7 +371,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 code = "IO_FAILURE"
                 message = "Flameox could not complete the operation's local file access."
             return _runtime_failure(RuntimeFailure(code, message))
-        except (ValueError, json.JSONDecodeError):
+        except ValueError:
             return _runtime_failure(RuntimeFailure("DECODE_FAILURE", "Input could not be decoded."))
         except asyncio.CancelledError:
             raise
@@ -451,7 +457,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     capability.id,
                     sources,
                     options,
-                    limits=RequestLimits(max_rows=analysis_args.page_size),
+                    limits=analysis_args.request_limits(),
                     continuation=analysis_args.continuation,
                 )
             )
@@ -478,7 +484,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 target,
                 capability.id,
                 experiment=getattr(capture_args, "experiment", None),
-                limits=RequestLimits(max_rows=capture_args.page_size),
+                limits=capture_args.request_limits(),
                 progress=progress,
                 preserve=capture_args.preserve,
             )
@@ -616,15 +622,9 @@ class FlameoxServer(Server[AnalysisRuntime]):
         )
 
 
-def create_server(
-    *, evidence_directory: Path | None = None, limits: RequestLimits | None = None
-) -> FlameoxServer:
-    return FlameoxServer(evidence_directory=evidence_directory, limits=limits)
-
-
 def run_server(*, limits: RequestLimits | None = None) -> None:
     async def serve() -> None:
-        server = create_server(limits=limits)
+        server = FlameoxServer(limits=limits)
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
                 read_stream,

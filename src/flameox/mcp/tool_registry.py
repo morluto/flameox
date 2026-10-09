@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
+from jsonschema import Draft202012Validator
 from mcp.server import ServerRequestContext
 from mcp_types import CallToolResult, Tool, ToolAnnotations
 from pydantic import BaseModel, RootModel
@@ -54,12 +56,20 @@ class ToolContract:
     output_model: type[RootModel[Any]]
     annotations: ToolAnnotations
     handler: Callable[[BaseModel, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]]
+    input_schema: dict[str, Any] = field(init=False, repr=False, compare=False)
+    input_validator: Draft202012Validator = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        schema = self.input_model.model_json_schema(mode="validation")
+        Draft202012Validator.check_schema(schema)
+        object.__setattr__(self, "input_schema", schema)
+        object.__setattr__(self, "input_validator", Draft202012Validator(schema))
 
     def project(self) -> Tool:
         return Tool(
             name=self.name,
             description=self.description,
-            input_schema=self.input_model.model_json_schema(mode="validation"),
+            input_schema=deepcopy(self.input_schema),
             output_schema=self.output_model.model_json_schema(mode="serialization"),
             annotations=self.annotations,
         )

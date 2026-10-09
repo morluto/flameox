@@ -4,10 +4,47 @@ from __future__ import annotations
 
 import re
 
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema.exceptions import best_match
 from pydantic import ValidationError
 
-from flameox.mcp.result_contracts import ToolFailureEnvelope
+from flameox.mcp.result_contracts import AdjustRequestAction, ToolFailureEnvelope
 from flameox.runtime_contracts import CAPTURE_PROVIDER_CONTRACTS
+
+
+def normalize_schema_error(error: JsonSchemaValidationError) -> ToolFailureEnvelope:
+    """Project schema failures without including rejected values or private paths."""
+    issue = best_match(error.context) if error.context else error
+    if issue is None:
+        issue = error
+    location = [part for part in issue.absolute_path if isinstance(part, (str, int))]
+    constraint = str(issue.validator or "input")
+    expected = issue.validator_value
+    accepted: list[str] | None = None
+    if (
+        constraint == "enum"
+        and isinstance(expected, list)
+        and all(isinstance(item, str) for item in expected)
+    ):
+        accepted = expected
+        message = "Value must be one of the advertised values."
+    elif constraint == "type" and isinstance(expected, str):
+        message = f"Input must match the advertised {expected} type."
+    else:
+        message = f"Input must match the advertised {constraint} constraint."
+    next_action = AdjustRequestAction(
+        kind="adjust_request",
+        field_path=location or None,
+        message=message,
+    )
+    return ToolFailureEnvelope(
+        code="INVALID_REQUEST",
+        message=message,
+        field_path=location,
+        accepted_values=accepted,
+        next_action=next_action,
+        details={"error_type": f"schema_{constraint}"},
+    )
 
 
 def normalize_validation_error(
@@ -45,10 +82,16 @@ def normalize_validation_error(
             accepted = [item.strip(" '") for item in expected_tags.split(",")]
         elif discriminator.strip("'") == "mode":
             accepted = ["list", "get"]
+    next_action = AdjustRequestAction(
+        kind="adjust_request",
+        field_path=location or None,
+        message=message,
+    )
     return ToolFailureEnvelope(
         code="INVALID_REQUEST",
         message=message,
         field_path=location,
         accepted_values=accepted,
+        next_action=next_action,
         details={"error_type": str(issue["type"])},
     )

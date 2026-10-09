@@ -6,14 +6,14 @@ from typing import Any, NoReturn
 
 import anyio
 import pytest
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from jsonschema import Draft202012Validator
 from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 
 from flameox import __version__
-from flameox.mcp import create_server
 from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
+from flameox.mcp.server import FlameoxServer
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
@@ -53,7 +53,7 @@ def test_mcp_failures_classify_operations_without_exposing_private_diagnostics(
 
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / "store"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / "store"), raise_exceptions=True
         ) as client:
             result = await client.call_tool(tool, arguments)
             assert result.is_error is True
@@ -102,6 +102,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert all(tool.output_schema for tool in listed.tools)
             for tool in listed.tools:
                 Draft202012Validator.check_schema(tool.input_schema)
+                assert tool.output_schema is not None
                 Draft202012Validator.check_schema(tool.output_schema)
                 input_validator = Draft202012Validator(tool.input_schema)
                 for example in tool.input_schema.get("examples", []):
@@ -110,9 +111,35 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 assert by_name[name].input_schema["additionalProperties"] is False
                 assert "sources" in by_name[name].input_schema["required"]
 
+            evidence_source = {"kind": "evidence", "evidence_id": "0" * 64}
+
+            query_schema = Draft202012Validator(by_name["query_evidence"].input_schema)
+            iso_query = {"created_after": "2026-01-01T00:00:00Z"}
+            assert query_schema.is_valid(iso_query)
+            queried = await session.call_tool("query_evidence", iso_query)
+            await session.validate_tool_result("query_evidence", queried)
+            assert queried.is_error is False
+            timestamp_query = {"created_after": 0}
+            assert not query_schema.is_valid(timestamp_query)
+            invalid_timestamp = await session.call_tool("query_evidence", timestamp_query)
+            await session.validate_tool_result("query_evidence", invalid_timestamp)
+            assert invalid_timestamp.is_error is True
+            assert invalid_timestamp.structured_content["code"] == "INVALID_REQUEST"
+            assert invalid_timestamp.structured_content["field_path"] == ["created_after"]
+            assert invalid_timestamp.structured_content["next_action"]["kind"] == "adjust_request"
+            reversed_query = {
+                "created_after": "2026-01-01T00:00:00Z",
+                "created_before": "2025-01-01T00:00:00Z",
+            }
+            assert query_schema.is_valid(reversed_query)
+            reversed_result = await session.call_tool("query_evidence", reversed_query)
+            await session.validate_tool_result("query_evidence", reversed_result)
+            assert reversed_result.is_error is True
+            assert reversed_result.structured_content["code"] == "INVALID_REQUEST"
+            assert reversed_result.structured_content["field_path"] == ["created_before"]
             preview = await session.call_tool(
                 "preview_artifact",
-                {"sources": [{"path": str(artifact)}], "page_size": 2},
+                {"sources": [{"path": str(artifact)}], "page_size": 2.0},
             )
             assert Draft202012Validator(by_name["preview_artifact"].input_schema).is_valid(
                 {"sources": [{"path": str(artifact)}], "page_size": 2}
@@ -131,6 +158,29 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     "preview_artifact",
                     {"sources": [{"path": str(artifact)}], "page_size": 0},
                     None,
+                ),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": str(artifact)}], "page_size": "2"},
+                    ["page_size"],
+                ),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": str(artifact)}], "page_size": True},
+                    ["page_size"],
+                ),
+                (
+                    "preview_artifact",
+                    {
+                        "sources": [
+                            {
+                                **evidence_source,
+                                "artifact_role": "stdout",
+                                "artifact_selector": "1" * 64,
+                            }
+                        ]
+                    },
+                    ["sources", 0],
                 ),
                 (
                     "preview_artifact",
@@ -207,6 +257,30 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     },
                     None,
                 ),
+                (
+                    "capture_artifact_preview",
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "page_size": "1",
+                    },
+                    ["page_size"],
+                ),
+                (
+                    "capture_artifact_preview",
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "page_size": True,
+                    },
+                    ["page_size"],
+                ),
             )
             invalid_calls += tuple(
                 (
@@ -233,6 +307,10 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 assert result.structured_content["code"] == "INVALID_REQUEST"
                 if expected_field_path is not None:
                     assert result.structured_content["field_path"] == expected_field_path
+                    action = result.structured_content["next_action"]
+                    assert action["kind"] == "adjust_request"
+                    assert action["field_path"] == expected_field_path
+                    assert action["message"] == result.structured_content["message"]
                 if tool_name == "rank_cpu_hotspots" and arguments["sources"][0].get("format"):
                     assert "pstats" in result.structured_content["accepted_values"]
             assert not marker.exists(), (
@@ -268,6 +346,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert captured.is_error is False
             assert marker.read_text().splitlines() == ["started"]
             assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
+
             capture_page = captured.structured_content.get("next_page")
             assert capture_page is not None
             assert capture_page["tool"] == "preview_artifact"

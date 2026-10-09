@@ -8,7 +8,7 @@ import pytest
 from mcp import Client
 from mcp_types import TextContent
 
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.repository import EvidenceRepository
 
 
@@ -18,7 +18,7 @@ def test_mcp_unavailable_provider_names_preparation_and_capture_retry(
 ) -> None:
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             empty_path = tmp_path / "empty-bin"
             empty_path.mkdir()
@@ -54,7 +54,7 @@ def test_mcp_unavailable_provider_names_preparation_and_capture_retry(
 @pytest.mark.process
 def test_mcp_oracle_failure_does_not_become_a_workload_failure(tmp_path: Path) -> None:
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
                 "capture_artifact_preview",
                 {
@@ -97,7 +97,7 @@ def test_failed_capture_returns_full_provenance_once(tmp_path: Path) -> None:
 
     async def exercise() -> str:
         async with Client(
-            create_server(
+            FlameoxServer(
                 evidence_directory=directory,
             )
         ) as client:

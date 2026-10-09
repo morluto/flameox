@@ -12,7 +12,7 @@ from mcp import Client
 from mcp.shared.exceptions import MCPError
 from mcp_types import TextContent, TextResourceContents
 
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
@@ -32,7 +32,7 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
 
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             arguments: dict[str, Any] = {
                 "sources": [{"kind": "path", "path": str(artifact), "format": "coverage"}],
@@ -90,7 +90,7 @@ def test_mcp_keeps_complete_large_continuation_arguments(tmp_path: Path) -> None
 
     async def exercise() -> None:
         async with Client(
-            create_server(
+            FlameoxServer(
                 evidence_directory=tmp_path / ".flameox",
             ),
             raise_exceptions=True,
@@ -121,7 +121,7 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
     rescue = tmp_path / "rescue"
 
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=store), raise_exceptions=True) as client:
+        async with Client(FlameoxServer(evidence_directory=store), raise_exceptions=True) as client:
             captured = await client.call_tool(
                 "capture_artifact_preview",
                 {
@@ -144,7 +144,7 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
             next_page = rescued.structured_content["next_page"]
 
         async with Client(
-            create_server(evidence_directory=rescue), raise_exceptions=True
+            FlameoxServer(evidence_directory=rescue), raise_exceptions=True
         ) as client:
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
 
@@ -167,7 +167,7 @@ def test_mcp_query_returns_an_exact_next_page(tmp_path: Path) -> None:
         runtime.close()
 
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=store), raise_exceptions=True) as client:
+        async with Client(FlameoxServer(evidence_directory=store), raise_exceptions=True) as client:
             first = await client.call_tool(
                 "query_evidence", {"capability_id": "artifact.preview", "page_size": 1}
             )
@@ -200,7 +200,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
 
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
                 "preview_artifact",
@@ -218,7 +218,7 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             assert resource.contents[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
         async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as restarted:
             reanalyzed = await restarted.call_tool(
                 "preview_artifact",
@@ -254,7 +254,7 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
 
     async def exercise() -> str:
         async with Client(
-            create_server(evidence_directory=configured), raise_exceptions=True
+            FlameoxServer(evidence_directory=configured), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
                 "preview_artifact",
@@ -290,7 +290,7 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
 
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             captured = await client.call_tool(
                 "capture_artifact_preview",
@@ -341,7 +341,7 @@ def test_query_distinguishes_unavailable_empty_and_no_matches(tmp_path: Path) ->
     EvidenceRepository(empty_store, "test").initialize()
 
     async def query(directory: Path) -> dict[str, object]:
-        async with Client(create_server(evidence_directory=directory)) as client:
+        async with Client(FlameoxServer(evidence_directory=directory)) as client:
             result = await client.call_tool("query_evidence", {})
             assert result.is_error is False
             return cast(dict[str, object], result.structured_content)
@@ -349,7 +349,7 @@ def test_query_distinguishes_unavailable_empty_and_no_matches(tmp_path: Path) ->
     async def populated_no_matches(directory: Path) -> dict[str, object]:
         artifact = tmp_path / "artifact.json"
         artifact.write_text("[1]")
-        async with Client(create_server(evidence_directory=directory)) as client:
+        async with Client(FlameoxServer(evidence_directory=directory)) as client:
             analyzed = await client.call_tool(
                 "preview_artifact",
                 {"sources": [{"kind": "path", "path": str(artifact)}]},

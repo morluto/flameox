@@ -2143,7 +2143,10 @@ class AnalysisRuntime:
         elif cause.value == "output_limit":
             configured = limits.max_output_bytes
             unit = "bytes"
-            recovery = "Retry with a larger max_output_bytes or reduce target output."
+            recovery = (
+                "Reduce target output or raise limits.max_output_bytes within the server ceiling. "
+                "A higher server ceiling requires restart or reconnect with --limits."
+            )
         elif cause.value == "memory_limit_exceeded":
             configured = budget.max_memory_bytes
             observed = process.peak_rss_bytes
@@ -2154,7 +2157,10 @@ class AnalysisRuntime:
             if resources is not None and resources.writable_root_growth_bytes:
                 observed = sum(resources.writable_root_growth_bytes.values())
             unit = "bytes"
-            recovery = "Retry with a larger max_output_bytes or reduce capture artifacts."
+            recovery = (
+                "Reduce capture artifacts or raise limits.max_output_bytes within the server "
+                "ceiling. A higher server ceiling requires restart or reconnect with --limits."
+            )
         elif cause.value == "storage_reserve_exceeded":
             configured = resources.minimum_free_bytes if resources is not None else None
             unit = "bytes_free"
@@ -3134,7 +3140,7 @@ class AnalysisRuntime:
             if type(offset) is not int or offset < 0:
                 raise ValueError
             return offset
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"
             ) from exc

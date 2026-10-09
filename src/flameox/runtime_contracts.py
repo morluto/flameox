@@ -72,6 +72,18 @@ class PathSource(StrictModel):
 
 
 class EvidenceSource(StrictModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "not": {
+                "required": ["artifact_role", "artifact_selector"],
+                "properties": {
+                    "artifact_role": {"type": "string"},
+                    "artifact_selector": {"type": "string"},
+                },
+            }
+        }
+    )
+
     kind: Literal["evidence"]
     evidence_id: str = Field(
         description="Identifier of previously preserved immutable evidence.",

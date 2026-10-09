@@ -6,7 +6,7 @@ import anyio
 import pytest
 from mcp import Client
 
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import EvidenceSource, PathSource, RequestLimits, RuntimeFailure
 
@@ -85,7 +85,7 @@ def test_mcp_exposes_and_executes_optional_text_fragments(tmp_path: Path) -> Non
 
     async def exercise() -> None:
         async with Client(
-            create_server(evidence_directory=tmp_path / "store"), raise_exceptions=True
+            FlameoxServer(evidence_directory=tmp_path / "store"), raise_exceptions=True
         ) as client:
             result = await client.call_tool(
                 "preview_artifact",

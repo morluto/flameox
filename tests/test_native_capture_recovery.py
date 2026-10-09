@@ -10,7 +10,7 @@ import pytest
 from mcp import Client
 from mcp_types import ResourceLink, TextResourceContents
 
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget, EvidenceSource, RequestLimits
 
@@ -87,7 +87,7 @@ def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
     async def exercise() -> None:
         target = _coverage_target(tmp_path)
         async with Client(
-            create_server(
+            FlameoxServer(
                 evidence_directory=tmp_path / "store",
                 limits=RequestLimits(max_input_bytes=1024, max_input_files=1),
             )

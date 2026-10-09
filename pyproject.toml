@@ -16,8 +16,9 @@ dependencies = [
     "defusedxml>=0.7.1,<0.8",
     "ijson>=3.4,<4",
     "json5>=0.12,<1",
-    "mcp==2.0.0",
-    "mcp-types==2.0.0",
+    "jsonschema>=4.20,<5",
+    "mcp==2.3.0",
+    "mcp-types==2.3.0",
     "packaging>=24,<27",
     "pyperf>=2.10,<2.11",
     "pyarrow>=20,<26",
@@ -61,6 +62,7 @@ dev = [
     "pytest-cov>=6.1",
     "pyarrow-stubs>=20.0.0.20260625",
     "ruff>=0.11",
+    "types-jsonschema>=4.20,<5",
     "vulture>=2.14",
 ]
 

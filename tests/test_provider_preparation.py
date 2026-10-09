@@ -9,14 +9,14 @@ import anyio
 import pytest
 from mcp import Client
 
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.providers.preparation import PY_SPY_VERSION
 
 
 @pytest.mark.integration
 def test_host_provider_preparation_reports_requirements_without_installing(tmp_path: Path) -> None:
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool("prepare_providers", {"provider_ids": ["xctrace"]})
             assert not result.is_error
             value = result.structured_content
@@ -70,7 +70,7 @@ def test_prepare_activates_verified_collector_for_the_live_session_and_reuses_it
     monkeypatch.setattr("flameox.providers.preparation.active_provider_status", lambda _: "unknown")
 
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             rejected = await client.call_tool(
                 "prepare_providers", {"provider_ids": ["py-spy", "memray"]}
             )

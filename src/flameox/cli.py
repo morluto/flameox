@@ -12,7 +12,7 @@ import typer
 from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
-from flameox.mcp import create_server, run_server
+from flameox.mcp.server import FlameoxServer, run_server
 from flameox.mcp.tool_registry import capability_descriptor, capability_detail
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
@@ -626,7 +626,7 @@ def mcp_inspect(
         return
 
     async def inspect_server() -> dict[str, Any]:
-        server = create_server()
+        server = FlameoxServer()
         return {
             "tools": [item.model_dump(mode="json") for item in await server.list_tools()],
             "resources": [

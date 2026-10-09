@@ -44,6 +44,10 @@ older `inspect_capabilities`, `analyze`, and `capture_and_analyze` surface has
 been replaced. Keep transport tests aligned with the current catalog rather
 than encoding an old tool count or wrapper contract.
 
+A separate real stdio workflow starts with reduced server ceilings and verifies inherited defaults,
+pre-execution limit rejection, and exact preservation/replay of lower request limits. Schema
+regressions belong in the existing transport workflow, including numeric coercion and query bounds.
+
 ## Evidence and limits
 
 The retained scale check publishes 1,000 real immutable manifests, closes the

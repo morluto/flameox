@@ -7,7 +7,18 @@ from datetime import datetime
 from types import GenericAlias
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, create_model
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    create_model,
+    field_validator,
+    model_validator,
+)
 
 from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS, SYSTEM_PROVIDER_GUIDANCE
 from flameox.runtime_contracts import (
@@ -18,6 +29,7 @@ from flameox.runtime_contracts import (
     EvidenceSource,
     ExperimentDesign,
     PathSource,
+    RequestLimits,
     StrictModel,
     compatible_capture_providers,
 )
@@ -61,17 +73,48 @@ McpSource = Annotated[
 ]
 
 
-class AnalysisArguments(StrictModel):
+class EvidenceArguments(StrictModel):
+    limits: RequestLimits | None = Field(
+        default=None,
+        description="Lower analysis, decoder, output and provenance limits for this request. "
+        "Omitted fields inherit server policy; requests cannot raise server limits.",
+    )
+    page_size: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_ROWS,
+        description="Rows per page; omit to inherit limits.max_rows or the server default. "
+        "If both page_size and limits.max_rows are supplied, they must agree.",
+    )
+
+    @model_validator(mode="after")
+    def consistent_page_size(self) -> EvidenceArguments:
+        if (
+            self.page_size is not None
+            and self.limits is not None
+            and "max_rows" in self.limits.model_fields_set
+            and self.page_size != self.limits.max_rows
+        ):
+            raise ValueError("page_size and limits.max_rows must agree when both are supplied")
+        return self
+
+    def request_limits(self) -> RequestLimits:
+        limits = self.limits.model_copy(deep=True) if self.limits is not None else RequestLimits()
+        if self.page_size is not None:
+            limits.max_rows = self.page_size
+        return limits
+
+
+class AnalysisArguments(EvidenceArguments):
     sources: list[McpSource] = Field(
         description="Ordered native paths or preserved evidence sources."
     )
     continuation: str | None = Field(
         default=None, description="Opaque continuation from next_page; copy its complete call."
     )
-    page_size: int = Field(default=100, ge=1, le=MAX_ROWS, description="Evidence rows per page.")
 
 
-class CaptureArguments(StrictModel):
+class CaptureArguments(EvidenceArguments):
     target: DirectTarget = Field(
         description="Explicit argv and absolute cwd for workload execution."
     )
@@ -79,7 +122,6 @@ class CaptureArguments(StrictModel):
     preserve: bool = Field(
         default=False, description="Publish native artifacts as immutable evidence."
     )
-    page_size: int = Field(default=100, ge=1, le=MAX_ROWS, description="Evidence rows per page.")
 
 
 def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
@@ -207,7 +249,21 @@ class QueryArguments(StrictModel):
     )
     provider_id: str | None = None
     input_sha256: str | None = Field(default=None, pattern=LOWERCASE_SHA256_PATTERN)
-    created_after: datetime | None = None
-    created_before: datetime | None = None
+    created_after: AwareDatetime | None = Field(
+        default=None, description="Inclusive lower creation bound as a timezone-aware RFC3339 date."
+    )
+    created_before: AwareDatetime | None = Field(
+        default=None, description="Inclusive upper creation bound as a timezone-aware RFC3339 date."
+    )
     page_size: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
+
+    @field_validator("created_before")
+    @classmethod
+    def ordered_creation_bounds(
+        cls, value: datetime | None, info: ValidationInfo
+    ) -> datetime | None:
+        after = info.data.get("created_after")
+        if value is not None and after is not None and value < after:
+            raise ValueError("created_before must not precede created_after")
+        return value

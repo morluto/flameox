@@ -12,7 +12,7 @@ from mcp import Client
 from mcp_types import TextResourceContents
 
 from flameox.canonical import canonical_bytes
-from flameox.mcp import create_server
+from flameox.mcp.server import FlameoxServer
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
@@ -318,7 +318,7 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
     )
 
     async def exercise() -> None:
-        async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
                 "capture_cpu_hotspots",
                 {
