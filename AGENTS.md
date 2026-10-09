@@ -3,15 +3,10 @@
 ## Product Direction
 
 flameox is a permanently local evidence layer for coding agents investigating
-performance, memory, execution, concurrency, and reliability. It gives an agent
-a reproducible path from a runtime symptom to a conclusion that another person
-or agent can inspect and try to disprove.
-
-Existing profilers, benchmark tools, debuggers, and trace processors measure
-runtime behavior. flameox coordinates those tools, preserves their native
-artifacts and provenance, extracts bounded evidence, and compares runs and
-experiments. The agent forms hypotheses, chooses discriminating experiments,
-and explains the conclusion.
+performance, memory, execution, concurrency, and reliability. It coordinates
+existing measurement tools, preserves native artifacts and provenance, extracts
+bounded evidence, and compares runs and experiments. The agent forms hypotheses
+and chooses experiments; conclusions must remain inspectable and falsifiable.
 
 A typical investigation moves through:
 
@@ -53,18 +48,15 @@ performance improvement. Confirmatory claims require representative workloads,
 declared metrics and estimands, compatible identities, preserved samples, and
 a semantic oracle.
 
-A passing test suite does not prove the documented behavior complete. Before
-calling work complete, identify the relevant behavioral contracts and state any
-remaining proof gaps.
-
 ## Project Structure & Module Organization
 
 flameox is a Python 3.12+ package using a `src/` layout. `runtime.py` owns the
-process-lifespan capability runtime; `runtime_contracts.py` owns strict public contracts; `repository.py`
-owns optional immutable preservation; `execution.py` owns bounded subprocess
-work; capability integrations live in `providers/`; reusable format parsers live
-in `adapters/`; isolated protocols live in `workers/`; and `cli.py` plus `mcp/`
-are thin transports. Tests mirror these semantic owners under `tests/`.
+process-lifespan capability runtime; `runtime_contracts.py` owns strict public
+contracts; `repository.py` owns optional immutable preservation; `execution.py`
+owns bounded subprocess work; capability integrations live in `providers/`;
+reusable format parsers live in `adapters/`; isolated protocols live in
+`workers/`; and `cli.py` plus `mcp/` are thin transports. Tests mirror these
+semantic owners under `tests/`.
 
 Read the relevant contract before changing product behavior:
 
@@ -77,7 +69,19 @@ Read the relevant contract before changing product behavior:
   behavior;
 - `docs/runtime-safety.md` for concurrency, recovery, retention, integrity,
   security, privacy, and observability;
-- `docs/interfaces.md` for CLI and MCP behavior and trust boundaries;
+- `docs/interfaces.md` for CLI and MCP behavior and trust boundaries.
+
+## Tool Changes
+
+- Expose named, task-shaped MCP tools from the capability registry. Do not add
+  search/execute gateways or compatibility aliases for removed tools.
+- Keep public fields, bounds, and descriptions in canonical runtime models;
+  project transport schemas from them rather than maintaining parallel models.
+  Validate admitted arguments against the advertised schema before execution.
+- Fix behavior in its semantic owner. Add a wrapper, abstraction, or reexport
+  only when it serves a distinct contract or removes meaningful duplication.
+- Preserve exact continuation and recovery handoffs. Reading another page must
+  not rerun a capture; session handles and durable evidence have different lifetimes.
 
 ## Build, Test, and Development Commands
 
@@ -88,34 +92,40 @@ uv sync --extra dev --extra memory --extra trace --extra cpu
 uv run flameox --help
 uv run pytest -q
 uv run ruff check src tests tools
+uv run ruff format --check src tests tools
 uv run mypy src tests tools
 ```
 
 The first command installs development tools and supported lightweight
 integrations. Run a focused test while iterating, for example
-`uv run pytest tests/test_runtime.py -q`. Marked performance checks
-can be selected with `uv run pytest -m performance`.
+`uv run pytest tests/test_runtime.py -q`. See [docs/testing.md](docs/testing.md)
+for optional and performance selections and the CI workflow for additional checks.
 
 ## Coding Style & Naming Conventions
 
 Use four-space indentation, complete type annotations, and Python 3.12 syntax.
 Ruff enforces a 100-character line limit, import ordering, modernization, and
-common bug patterns; mypy runs in strict mode. Keep modules and functions
-`snake_case`, classes `PascalCase`, and constants `UPPER_SNAKE_CASE`. Follow
-existing architectural boundaries: keep request/runtime coordination in
-`runtime.py`, repository publication in `repository.py`, transports thin, and
-provider-specific behavior in `providers/`, with shared format parsing in
-`adapters/` and isolated protocols in `workers/`.
+common bug patterns; mypy runs in strict mode.
 
 ## Testing Guidelines
 
-Pytest is configured with strict markers and configuration. Name files
-`test_<area>.py` and tests `test_<observable_behavior>`. Prefer proof through
-real end-to-end workflows, then integration behavior, then focused golden
-examples. Keep narrower tests only for contracts those workflows cannot prove;
-avoid tests that mirror implementation details. See [docs/testing.md](docs/testing.md)
-for current selections and known proof gaps. CI reports combined coverage from both test jobs
-without a percentage gate.
+Prefer real end-to-end workflows, then integration behavior, then focused golden
+examples. Extend an existing workflow when it can prove the regression. Remove
+redundant tests, private-helper assertions, and mock scaffolding; retain narrower
+tests only for distinct contracts those workflows cannot reliably prove. When
+pruning, identify the remaining proof for each distinct behavior or record the gap
+in [docs/testing.md](docs/testing.md).
+
+For tool changes, exercise the installed CLI and real MCP stdio transport with
+valid and adversarial inputs, native evidence, and relevant continuation or
+recovery flows. Check advertised schemas against accepted inputs and emitted
+results. Include failure paths; a passing suite alone does not establish the
+documented behavior. Report the exercised surface and remaining proof gaps.
+
+Name files `test_<area>.py` and tests `test_<observable_behavior>`. Mark tests that
+spawn or communicate with subprocesses `process`; use `e2e` for installed CLI or
+MCP workflows with real processes and native evidence. CI reports combined branch
+coverage without a percentage gate.
 
 ## Commit & Pull Request Guidelines
 
