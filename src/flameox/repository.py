@@ -952,7 +952,7 @@ class EvidenceRepository:
             return offset
         except RepositoryError:
             raise
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             raise RepositoryError(
                 "INVALID_INPUT", "Repository query continuation is invalid."
             ) from exc
