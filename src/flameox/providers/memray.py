@@ -5,7 +5,6 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from flameox.canonical import sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.harness import IsolatedWorkerHarness
@@ -19,11 +18,8 @@ from flameox.workers.memray_contract import (
 
 _PROTOCOL_OVERHEAD_BYTES = 2 * 1024 * 1024
 _EXPECTED_OUTPUTS = {
-    "measurements": "measurements.parquet",
     "frames": "frames.parquet",
     "frame_measurements": "frame_measurements.parquet",
-    "call_edges": "call_edges.parquet",
-    "stacks": "stacks.parquet",
 }
 
 
@@ -37,7 +33,6 @@ class MemrayProvider:
         self,
         capability_id: str,
         path: Path,
-        input_sha256: str,
         *,
         max_rows: int,
         max_input_bytes: int,
@@ -55,16 +50,10 @@ class MemrayProvider:
             max_frames=min(10_000_000, aggregate_limit),
             max_stack_depth=256,
             max_aggregate_rows=aggregate_limit,
-            max_unique_edges=min(20_000_000, aggregate_limit),
-            max_representative_stacks=min(10_000_000, max_rows),
             max_output_bytes=max_output_bytes,
-            wall_time_seconds=timeout_seconds,
-            max_worker_memory_bytes=maximum_rss_bytes,
         )
         request = MemrayWorkerRequest(
             artifact_path=str(path),
-            run_id=f"direct-{input_sha256[:32]}",
-            artifact_id=sha256_id(input_sha256),
             limits=limits,
         )
         try:

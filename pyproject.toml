@@ -22,7 +22,7 @@ dependencies = [
     "pyperf>=2.10,<2.11",
     "pyarrow>=20,<26",
     "pydantic>=2.13.4,<2.14",
-    "pytz>=2024.2",
+    "pytz>=2024.2", # DuckDB loads this for TIMESTAMPTZ conversion.
     "questionary>=2.1,<3",
     "rfc8785==0.1.4",
     "tomlkit>=0.13,<1",

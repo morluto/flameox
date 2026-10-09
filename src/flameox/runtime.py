@@ -2615,7 +2615,6 @@ class AnalysisRuntime:
                 return self.memray.analyze(
                     capability_id,
                     sources[0].path,
-                    sources[0].sha256,
                     max_rows=max_rows,
                     max_input_bytes=limits.max_input_bytes,
                     max_output_bytes=limits.max_output_bytes,

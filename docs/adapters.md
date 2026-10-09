@@ -178,6 +178,9 @@ retained and omitted byte counts, plus its typed exit or signal termination.
 Nsight Systems prefers `parquetdir` export. Flameox does not read or create a
 Nsight SQLite export. Memray aggregation streams bounded records or uses
 session-local in-memory DuckDB; it does not create a temporary SQLite database.
+Its worker returns only frame identities and frame measurements consumed by the
+provider. Scalar metrics travel in the typed worker result; native captures stay
+authoritative. Timeout and RSS enforcement remain at the worker harness boundary.
 
 ## Provider setup boundary
 
