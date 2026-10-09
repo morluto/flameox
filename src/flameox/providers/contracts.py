@@ -41,17 +41,19 @@ def canonical_provider_projection(analysis: ProviderAnalysis | None) -> Provider
     if analysis is None:
         return None
     return ProviderAnalysis(
-        provider_id=analysis.provider_id,
-        provider_version=analysis.provider_version,
+        provider_id=_canonical_text(analysis.provider_id),
+        provider_version=_canonical_text(analysis.provider_version),
         blocks=_canonical_value(analysis.blocks),
         rows_observed=analysis.rows_observed,
         complete=analysis.complete,
-        limitations=analysis.limitations,
+        limitations=[_canonical_text(item) for item in analysis.limitations],
     )
 
 
 def _canonical_value(value: Any) -> Any:
-    if isinstance(value, bool | str) or value is None:
+    if isinstance(value, str):
+        return _canonical_text(value)
+    if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, int):
         if value < _MIN_CANONICAL_INTEGER or value > _MAX_CANONICAL_INTEGER:
@@ -66,5 +68,15 @@ def _canonical_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_canonical_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _canonical_value(item) for key, item in value.items()}
-    return str(value)
+        return {_canonical_text(str(key)): _canonical_value(item) for key, item in value.items()}
+    return _canonical_text(str(value))
+
+
+def _canonical_text(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ProviderFailure(
+            "DECODE_FAILURE", "Provider output contains invalid Unicode text."
+        ) from error
+    return value

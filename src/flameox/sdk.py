@@ -17,13 +17,17 @@ from flameox.benchmark_samples import (
     BenchmarkSamplesV1,
     BenchmarkSeries,
 )
+from flameox.observations import (
+    MAX_OBSERVATION_EVENT_BYTES,
+    bounded_observation_value,
+    validate_observation_label,
+)
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "flameox_phase",
     default=None,
 )
 _WRITE_LOCK = threading.Lock()
-_MAX_EVENT_BYTES = 16 * 1024
 _TORCH_PROFILER_CONFIG = "FLAMEOX_TORCH_PROFILER_CONFIG"
 _TORCH_PROFILER_OUTPUT_ROOT = "FLAMEOX_TORCH_PROFILER_OUTPUT_ROOT"
 _TORCH_BENCHMARK_CONFIG = "FLAMEOX_TORCH_BENCHMARK_CONFIG"
@@ -32,8 +36,7 @@ _TORCH_BENCHMARK_OUTPUT = "FLAMEOX_BENCHMARK_OUTPUT"
 
 def observe(name: str, **values: Any) -> None:
     """Emit one bounded semantic observation when capture has enabled the SDK."""
-    if not name or len(name) > 200:
-        raise ValueError("observation names must contain 1 to 200 characters")
+    validate_observation_label(name)
     path = os.environ.get("FLAMEOX_OBSERVATIONS_PATH")
     if path is None:
         return
@@ -41,12 +44,12 @@ def observe(name: str, **values: Any) -> None:
         "name": name,
         "phase": _PHASE.get(),
         "monotonic_ns": time.monotonic_ns(),
-        "values": _bounded_value(values),
+        "values": bounded_observation_value(values),
     }
     encoded = (
         json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True) + "\n"
     ).encode()
-    if len(encoded) > _MAX_EVENT_BYTES:
+    if len(encoded) > MAX_OBSERVATION_EVENT_BYTES:
         raise ValueError("observation exceeds the 16 KiB event limit")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -63,8 +66,7 @@ def phase(name: str) -> Iterator[None]:
     the closing observation fail, the body failure remains primary and receives
     a bounded note naming the secondary instrumentation failure.
     """
-    if not name or len(name) > 200:
-        raise ValueError("phase names must contain 1 to 200 characters")
+    validate_observation_label(name)
     token = _PHASE.set(name)
     body_error: BaseException | None = None
     try:
@@ -272,8 +274,6 @@ class TorchProfilerSession:
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
         """Emit both a semantic phase and a trace-visible record-function range."""
-        if not name or len(name) > 200:
-            raise ValueError("phase names must contain 1 to 200 characters")
         with ExitStack() as stack:
             stack.enter_context(phase(name))
             stack.enter_context(self._torch.profiler.record_function(f"flameox.phase:{name}"))
@@ -362,23 +362,3 @@ def torch_profiler() -> Iterator[TorchProfilerSession]:
             raise RuntimeError(
                 f"torch.profiler emitted {cycle} of {cycle_count} requested trace cycles"
             )
-
-
-def _bounded_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 8:
-        raise ValueError("observation nesting exceeds eight levels")
-    if value is None or isinstance(value, str | int | bool):
-        return value
-    if isinstance(value, float):
-        if value != value or value in {float("inf"), float("-inf")}:
-            raise ValueError("observations cannot contain non-finite numbers")
-        return value
-    if isinstance(value, list | tuple):
-        if len(value) > 256:
-            raise ValueError("observation lists cannot exceed 256 items")
-        return [_bounded_value(item, depth=depth + 1) for item in value]
-    if isinstance(value, dict):
-        if len(value) > 256 or any(not isinstance(key, str) for key in value):
-            raise ValueError("observation objects require at most 256 string keys")
-        return {key: _bounded_value(item, depth=depth + 1) for key, item in value.items()}
-    raise TypeError(f"unsupported observation value: {type(value).__name__}")

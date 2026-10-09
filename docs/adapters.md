@@ -101,6 +101,13 @@ table projects only failed, errored, interrupted, and unexecuted identities. Fai
 reports retain their collector identity; successful collection events, passing tests, and skipped
 tests cannot consume the diagnostic row budget.
 
+Native event readers bound each line before parsing: 64 KiB for pytest and 16 KiB for SDK
+observations. Observation imports share the SDK's label and value bounds: names and non-null phases
+contain 1–200 characters, values nest at most eight levels, and each collection has at most 256
+entries. Timestamps are integers, excluding booleans. Text must be valid Unicode encodable as UTF-8,
+including labels and object keys. Non-finite values, invalid Unicode, excessive nesting, and
+oversized records produce `DECODE_FAILURE`; they do not become successful evidence or CLI tracebacks.
+
 Support is honest rather than substitutive. A missing Trace Processor does not
 turn a Perfetto request into a JSON preview; a missing `ncu` does not become an
 empty kernel report.

@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from flameox.observations import (
+    MAX_OBSERVATION_EVENT_BYTES,
+    bounded_observation_value,
+    validate_observation_label,
+)
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_LINE_BYTES = 64 * 1024
+
+
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("event contains a non-finite number")
+    return number
 
 
 class ReliabilityProvider:
@@ -378,7 +392,7 @@ class ReliabilityProvider:
     def _observations(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         rows: list[dict[str, Any]] = []
         observed = 0
-        for index, event in self._events(path):
+        for index, event in self._events(path, max_line_bytes=MAX_OBSERVATION_EVENT_BYTES):
             if set(event) != {"name", "phase", "monotonic_ns", "values"}:
                 raise ProviderFailure(
                     "DECODE_FAILURE", "Observation fields differ from the SDK contract"
@@ -386,10 +400,20 @@ class ReliabilityProvider:
             if (
                 not isinstance(event["name"], str)
                 or not isinstance(event["monotonic_ns"], int)
+                or isinstance(event["monotonic_ns"], bool)
                 or (event["phase"] is not None and not isinstance(event["phase"], str))
                 or not isinstance(event["values"], dict)
             ):
                 raise ProviderFailure("DECODE_FAILURE", "Observation field types are invalid")
+            try:
+                validate_observation_label(event["name"])
+                if event["phase"] is not None:
+                    validate_observation_label(event["phase"])
+                values = bounded_observation_value(event["values"])
+            except ValueError as error:
+                raise ProviderFailure(
+                    "DECODE_FAILURE", "Observation fields exceed the SDK contract"
+                ) from error
             observed += 1
             if len(rows) < max_rows:
                 rows.append(
@@ -398,7 +422,7 @@ class ReliabilityProvider:
                         "name": event["name"],
                         "phase": event["phase"],
                         "monotonic_ns": event["monotonic_ns"],
-                        "values": event["values"],
+                        "values": values,
                     }
                 )
         return ProviderAnalysis(
@@ -414,19 +438,26 @@ class ReliabilityProvider:
         )
 
     @staticmethod
-    def _events(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+    def _events(
+        path: Path, *, max_line_bytes: int = _MAX_LINE_BYTES
+    ) -> Iterator[tuple[int, dict[str, Any]]]:
         try:
             with path.open("rb") as stream:
-                for index, raw in enumerate(stream):
-                    if len(raw) > _MAX_LINE_BYTES:
+                lines = iter(partial(stream.readline, max_line_bytes + 1), b"")
+                for index, raw in enumerate(lines):
+                    if len(raw) > max_line_bytes:
                         raise ValueError("event line exceeds its byte bound")
                     if not raw.strip():
                         continue
-                    event = json.loads(raw)
+                    event = json.loads(
+                        raw,
+                        parse_float=_finite_float,
+                        parse_constant=_finite_float,
+                    )
                     if not isinstance(event, dict):
                         raise ValueError("event must be an object")
                     yield index, event
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", "Event stream is invalid") from error
 
     @staticmethod

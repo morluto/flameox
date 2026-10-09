@@ -681,16 +681,25 @@ class AnalysisRuntime:
         cached = self._cached_projection(projection_key)
         if cached is not None:
             return cached
-        projected = canonical_provider_projection(
-            self._provider_analysis(
-                capability_id,
-                sources,
-                arguments,
-                # Every page slices the same bounded provider population.
-                max_rows=MAX_ROWS + 1,
-                limits=limits,
+        try:
+            projected = canonical_provider_projection(
+                self._provider_analysis(
+                    capability_id,
+                    sources,
+                    arguments,
+                    # Every page slices the same bounded provider population.
+                    max_rows=MAX_ROWS + 1,
+                    limits=limits,
+                )
             )
-        )
+        except ProviderFailure as error:
+            raise RuntimeFailure(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
         if projected is not None:
             self._cache_projection(projection_key, projected)
         return projected
@@ -2684,14 +2693,6 @@ class AnalysisRuntime:
                 maximum_rss_bytes=limits.max_memory_bytes,
                 maximum_output_bytes=limits.max_output_bytes,
             )
-        except ProviderFailure as error:
-            raise RuntimeFailure(
-                error.code,
-                error.message,
-                retryable=error.retryable,
-                details=error.details,
-                remediation=error.remediation,
-            ) from error
         except DomainError as error:
             code = (
                 "UNAVAILABLE_CAPABILITY"

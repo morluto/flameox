@@ -13,6 +13,7 @@ from flameox.runtime_contracts import (
     CaptureTarget,
     PathSource,
     RequestLimits,
+    RuntimeFailure,
 )
 
 
@@ -47,6 +48,17 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
             {},
             limits=RequestLimits(max_rows=2),
         )
+        invalid_events = tmp_path / "invalid-pytest.jsonl"
+        invalid_events.write_text(
+            json.dumps(
+                {"event": "test_phase", "nodeid": "\ud800", "phase": "call", "outcome": "failed"}
+            )
+            + "\n"
+        )
+        with pytest.raises(RuntimeFailure) as invalid:
+            runtime.analyze(
+                "failures.summary", [PathSource(path=str(invalid_events), format="pytest")], {}
+            )
     finally:
         runtime.close()
 
@@ -62,6 +74,7 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
     }
     assert result["coverage"] == {"rows_returned": 1, "rows_observed": 1, "complete": True}
     assert result["blocks"][1]["rows"][0]["classification"] == "unexecuted"
+    assert invalid.value.code == "DECODE_FAILURE"
 
 
 @pytest.mark.golden
