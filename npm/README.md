@@ -1,19 +1,23 @@
 # flameox
 
-This npm package starts the matching Python 0.2 setup command through `uvx`:
+The npm package provides the `setup` command for configuring Flameox as a local MCP server:
 
 ```console
 npx flameox@latest setup
 ```
 
-Setup detects supported coding agents, asks which global MCP clients to configure, and writes a
-Python 3.12 `uvx` launcher pinned to the exact Flameox release resolved by npm. It preserves
-unrelated configuration and tells you which clients must restart or reconnect. Use
-`--client codex --yes`, repeated `--client` options, or `--all --yes` for automation, and
-`--dry-run` to inspect the resolved paths without writing them.
+It requires Node.js 18 or newer and `uv`. The launcher runs the matching version of the Python
+package on Python 3.12 through `uvx`; it does not install a persistent global `uv` tool. Setup
+detects supported MCP clients, asks which configurations to update, and preserves unrelated
+settings. Changed clients need a restart or reconnect.
 
-Without explicit `--provider` options, setup does not install profilers, optional packages, a
-persistent managed runtime, or project state. The Python server has no workspace binding. Explicit
-preservation writes to Flameox's user-level data directory.
+For non-interactive use, select clients explicitly with `--client codex --yes`, repeat `--client`,
+or use `--all --yes`. `--dry-run` reports the selected paths and planned actions without writing.
+Detection does not select clients automatically in non-interactive mode. Optional `--provider`
+arguments prepare the complete managed provider set for the launcher. Host tools and drivers
+remain separately managed.
 
-For direct CLI use, install or run the Python package with `uv`/`uvx`.
+The npm command only exposes setup. For analysis, capture, evidence management, and MCP server
+commands, use the Python CLI through `uv` or `uvx`. See the
+[interface guide](https://github.com/morluto/flameox/blob/main/docs/interfaces.md) for setup and
+CLI contracts.

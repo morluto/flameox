@@ -1,78 +1,41 @@
 # flameox
 
-Flameox 是面向编码代理的本地、有界运行时证据层。它协调分析器、基准工具、
-跟踪处理器和明确指定的本地命令，但本身不是分析器或托管可观测平台。
+**面向编码代理的本地、有界运行时证据层。**
 
-Flameox 无需初始化工作区，也没有命名工作负载、SQLite 控制面、持久 DuckDB 目录
-或可轮询的后台任务。调用方直接传入原生证据的绝对路径，或
-包含 argv、绝对 cwd、环境覆盖、提供方参数和限制的类型化目标。服务本身不绑定项目或工作区。
+Flameox 协调分析器、基准工具、跟踪处理器和明确指定的本地目标，将原生工件或命令转换为有界证据，并可选择保留证据。代理负责提出假设和选择实验；Flameox 记录观测到的输入、执行来源、类型化证据、覆盖范围和限制。
+
+无需初始化工作区或维护项目配置。分析时传入工件的明确路径；采集时传入 argv 和绝对工作目录。Flameox 不搜索父目录、不修改项目文件，也不是托管服务。
+
+## 快速开始
+
+要连接 MCP 客户端，可运行全局配置向导：
 
 ```console
-uv run flameox mcp inspect
-uv run flameox analyze artifact.preview /absolute/path/to/artifact.json
-uv run flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
-uv run flameox mcp serve
+npx flameox@latest setup
 ```
 
-`npx flameox@latest setup` 会输出 MCP 客户端配置。显式传入 `--provider` 时，它会
-解析保存启动器所需的、按版本固定的 `uvx` 环境；这不会创建持久的 `uv tool` 安装。
-NVIDIA 等系统或厂商工具则提供外部安装指引。setup 不会初始化或修改项目。
+直接使用 CLI 时，传入工件的绝对路径或明确命令：
 
-分析和未保存的采集不会写入持久状态。显式调用 `preserve_evidence` 或 CLI `--preserve`
-才会创建用户级 Flameox 数据目录；`rescue_evidence` 和 CLI `--rescue-to` 则将证据发布到
-指定的新目录。`FLAMEOX_DATA_DIR` 可覆盖平台默认位置。原生字节和证据清单按 SHA-256
-寻址，并通过同一文件系统上的暂存、
-校验、fsync 和原子重命名发布。Flameox 不修改项目的 Git 配置。
-
-MCP 工具目录包含 26 个具名分析工具、20 个具名采集工具和 4 个生命周期工具。工具名
-直接表示证据问题，例如 `preview_artifact`、`rank_cpu_hotspots`、
-`capture_artifact_preview` 和 `capture_cpu_hotspots`。分析与采集分开注册，以准确表达
-只读与执行效果。每个工具的 schema 都公开对应能力的类型化字段；能力字段位于顶层，
-采集器字段与 `provider.kind` 一起放在 `provider` 对象中。没有能力选择器、请求包装层
-或不透明的 `options` 字典。完整目录和契约见[接口文档](docs/interfaces.md)。
-
-可用 `flameox mcp inspect` 查看紧凑目录，用 `--capability CAPABILITY_ID` 查看直接调用示例、
-能力字段和兼容采集器字段 schema，或用 `--tool TOOL_NAME` 查看单个工具的完整 MCP schema。MCP 调用无需先做
-目录发现。证据生命周期由 `prepare_providers`、`preserve_evidence`、`rescue_evidence`
-和 `query_evidence` 管理。唯一资源模板是
-`flameox://evidence/{evidence_id}`，只返回带摘要绑定的脱敏清单视图，不公开原生载荷。
-
-例如，有界预览直接调用 `preview_artifact`，将来源和能力字段放在顶层：
-
-```json
-{
-  "sources": [{"kind": "path", "path": "/absolute/path/to/output.log", "format": "text"}],
-  "text_fragment_chars": 1024,
-  "page_size": 100
-}
+```console
+uvx flameox analyze artifact.preview /absolute/path/to/artifact.json
+uvx flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
 ```
 
-采集示例使用 `capture_artifact_preview`：`target` 和 `provider` 与能力字段一样位于顶层；
-采集器专属字段与 `kind` 并列放在 `provider` 内。默认执行一次目标。仅支持实验设计的
-采集工具才会公开顶层 `experiment`，用于描述随机顺序、重复次数、指标、估计量和可选语义
-预言机，无需额外的执行模式开关。若结果包含 `next_page`，应原样调用其中指定的分析工具
-和参数。采集的后续页只读取已生成的原生工件，不会再次执行目标。
+向导会检测受支持的客户端，并询问要修改哪些配置。自动化时应明确指定客户端，例如
+`--client codex --yes` 或 `--all --yes`；`--dry-run` 只报告路径和操作，不会写入配置。
+向导会保留客户端配置中的其他内容，也不会修改项目文件。详见
+[npm 包说明](npm/README.md)。
 
-```json
-{
-  "target": {
-    "argv": ["python", "benchmark.py"],
-    "cwd": "/absolute/path/to/project"
-  },
-  "provider": {"kind": "direct"}
-}
-```
+## 证据与存储
 
-服务端的字节数、内存、超时等保护上限不是 MCP 调节旋钮；公开的响应范围参数只有
-顶层 `page_size`。
+分析和未保留的采集使用有界会话暂存。缓存淘汰或服务停止后，`analysis_id` 会过期。显式保留证据时，Flameox 才会创建用户级数据目录，并按 SHA-256 保存原生字节和规范化证据包。可用 `FLAMEOX_DATA_DIR` 指定其他位置。保留证据不会自动要求保留完整控制台输出。
 
-`analysis_id` 仅在当前服务进程内有效，可能因缓存淘汰或重启而过期。`evidence_id` 是持久的
-内容身份。长任务属于当前 MCP 请求，通过 SDK 报告进度并响应取消；不存在脱离请求、
-跨重启恢复的任务。
+Flameox 区分观测、推导和推断。性能剖析可用于探索，但不能单独证明因果关系或性能提升。确认性结论需要有代表性的工作负载、明确的指标和估计量、兼容的身份、保留的样本以及语义预言机。
 
-详细契约见英文文档：
-[architecture](docs/architecture.md)、
-[storage and evidence](docs/storage-and-evidence.md)、
-[interfaces](docs/interfaces.md)、
-[runtime safety](docs/runtime-safety.md) 和
-[investigations](docs/investigations.md)。
+## MCP
+
+MCP 服务不绑定工作区。它与 CLI 共用能力注册表，提供具名分析和采集工具。分析工具接收明确来源；采集工具接收类型化目标和采集器。能力专属字段直接显示在工具 schema 中。运行 `flameox mcp inspect` 查看目录；添加 `--capability CAPABILITY_ID` 或 `--tool TOOL_NAME` 查看对应 schema 和示例。完整工具目录及契约见[接口文档](docs/interfaces.md)。
+
+采集接受 argv，不接受 shell 字符串。直接目标需提供绝对工作目录和有界环境覆盖。结果可能包含 `next_page`；请原样调用其中指定的分析工具和参数。采集后续页读取已生成的工件，不会再次执行目标。MCP 工作属于当前请求，因此取消会作用于该请求，服务重启后也不会留下脱离请求的后台任务。
+
+详细设计见英文文档：[架构](docs/architecture.md)、[存储与证据](docs/storage-and-evidence.md)、[调查与实验](docs/investigations.md)、[适配器](docs/adapters.md)、[运行时安全](docs/runtime-safety.md)、[接口](docs/interfaces.md)和[测试](docs/testing.md)。开发流程见[贡献指南](CONTRIBUTING.md)。

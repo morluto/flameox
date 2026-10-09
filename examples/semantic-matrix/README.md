@@ -1,26 +1,20 @@
-# Semantic outcome matrix
+# Semantic outcome example
 
-This standard-library-only example shows why process success and semantic
-outcomes are different evidence. Its explicit cells cover matching behavior, a
-typed candidate mismatch, an expected rejection, and an unavailable backend.
+This standard-library-only program emits a JSON record for one set of command-line inputs. It is
+useful for exercising direct capture and artifact preview, but a single run does not compare
+implementations or establish a semantic result. The program's `expected_rejection` case also
+reports its expected marker itself; it is not an independent correctness oracle.
 
-Run each case as a typed target or send the cases together through MCP
-`capture_and_analyze` with `request.capability_id: "artifact.preview"`, provider `direct`, and
-an optional `request.experiment` design. Declare the blocks, seed, metric,
-estimand, practical threshold, and semantic-oracle argv in that request; no
-workspace or configuration file is required.
+Run one sample from this directory and retain full console output:
 
 ```console
-flameox capture --provider direct --cwd "$PWD" --preserve -- \
+uv run flameox capture --provider direct --cwd "$PWD" \
+  --console-output full --preserve -- \
   python semantic_workload.py reference portable float32 contiguous 4 stateless ordinary
 ```
 
-The CLI's `--preserve` retains evidence before the process exits. In an MCP session,
-call `preserve_evidence` with the returned `analysis_id` when durability is needed. The resulting
-manifest records the exact argv, input/output digests, episode timestamp,
-coverage, limitations, and native artifact roles. Keep the agent's hypothesis
-and interpretation in its own notes and cite the durable `evidence_id`.
-
-The exit code and raw receipt bytes are observed facts. Parsed outcome fields are
-derived evidence. A claim that one mismatch explains a broader application
-symptom remains an inference requiring a representative experiment.
+Use [the investigation guide](../../docs/investigations.md) for the requirements on a meaningful
+comparison or confirmatory experiment. In particular, validate candidate behavior with an
+independent semantic oracle and preserve representative samples. The resulting evidence records
+the command, execution provenance, captured output, coverage, and limitations; keep hypotheses
+and interpretation in the agent's notes.
