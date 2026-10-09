@@ -9,34 +9,12 @@ from typing import Any
 import anyio
 import psutil
 import pytest
-from mcp import Client
 
 from flameox.command_binding import ExecutableResolver
 from flameox.executable_models import ResolvedExecutable
 from flameox.execution import ExecutionRequest
-from flameox.mcp import create_server
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CaptureTarget
-
-
-@pytest.mark.integration
-@pytest.mark.anyio
-async def test_mcp_rejects_undeclared_analysis_options(tmp_path: Path) -> None:
-    source = tmp_path / "input.json"
-    source.write_text("[]")
-    async with Client(create_server(evidence_directory=tmp_path / "evidence")) as client:
-        result = await client.call_tool(
-            "analyze",
-            {
-                "request": {
-                    "capability_id": "artifact.preview",
-                    "sources": [{"kind": "path", "path": str(source)}],
-                    "options": {"not_an_artifact_preview_option": True},
-                }
-            },
-        )
-
-    assert result.is_error
 
 
 @pytest.mark.integration

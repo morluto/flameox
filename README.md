@@ -97,53 +97,49 @@ coverage, truncation, limitations, and optional immutable preservation.
 
 ## MCP interface
 
-The server exposes six operations. Read-only analysis and executing capture remain separate for
-accurate MCP effect annotations, while each accepts a discriminated capability request that retains
-capability-specific options and provider validation:
+The MCP catalog has 26 named analysis tools, 20 named capture tools, and four lifecycle tools.
+Analysis and capture remain separate for accurate effect annotations. Tool names identify the
+evidence question, and each input schema exposes that capability's typed fields directly:
 
 ```text
-analyze              capture_and_analyze
+summarize_trace      rank_cpu_hotspots      preview_artifact
+... 23 other analysis tools ...
+capture_trace_summary capture_cpu_hotspots  capture_artifact_preview
+... 17 other capture tools ...
 prepare_providers    preserve_evidence
 rescue_evidence      query_evidence
 ```
 
-The two operation schemas advertise every capability's exact options and compatible providers.
-Analysis and capture have separate names and annotations because reading an artifact and executing a
-target are materially different effects. Tool search happens in the MCP client; Flameox does not
-require an additional catalog-search call.
+`flameox mcp inspect` lists tools compactly; `--capability CAPABILITY_ID` shows direct examples and
+capability/provider field schemas, and `--tool TOOL_NAME` shows one tool's full MCP schema. No
+discovery call is required during MCP use. The complete named catalog is documented in
+[interfaces](docs/interfaces.md).
 
-For example, a bounded artifact preview calls `analyze` with the capability inside `request` and
-the response bound beside it:
+For example, a bounded artifact preview passes its source and capability-specific setting directly:
 
 ```json
 {
-  "request": {
-    "capability_id": "artifact.preview",
-    "sources": [{"kind": "path", "path": "/absolute/path/to/output.log"}]
-  },
+  "sources": [{"kind": "path", "path": "/absolute/path/to/output.log"}],
+  "text_fragment_chars": 1024,
   "page_size": 100
 }
 ```
 
-`capture_and_analyze` uses the same outer shape, with `target` and `provider` added to `request`.
-Omit `request.experiment` for one run. Add an experiment design only when the capability supports
-paired cases:
+Capture inputs use `target`, a typed `provider` object, and capability fields at the top level.
+Provider settings are siblings of `kind`; for example:
 
 ```json
 {
-  "request": {
-    "capability_id": "artifact.preview",
-    "target": {
-      "argv": ["python", "benchmark.py"],
-      "cwd": "/absolute/path/to/project"
-    },
-    "provider": {"kind": "direct"}
-  }
+  "target": {
+    "argv": ["python", "benchmark.py"],
+    "cwd": "/absolute/path/to/project"
+  },
+  "provider": {"kind": "direct"}
 }
 ```
 
-When a result contains `next_page`, call its named tool with its arguments unchanged. Capture
-continuations use `analyze`; they never run the target again.
+When a result contains `next_page`, call its named analysis tool with its arguments unchanged.
+Capture continuations read existing captured artifacts and never execute the target again.
 
 It exposes one resource template, `flameox://evidence/{evidence_id}`, for the
 digest-bound, redacted projection of the canonical immutable manifest. Full
@@ -170,11 +166,10 @@ message, and the launcher to use. The managed provider IDs are `aiperf`, `memray
 result reports their setup guidance.
 
 Comparison is intentionally a two-stage workflow. Flameox captures representative baseline and
-candidate summaries separately, optionally preserves them, and then passes both artifacts to an
-`analyze` call with the matching comparison `request.capability_id`: `benchmark.compare`,
-`inference.compare`, or `kernel.compare`. Those variants are intentionally absent from
-`capture_and_analyze`: experiment capture measures cases and reports an effect, but it is not a
-substitute for comparing explicit native artifacts.
+candidate summaries separately, optionally preserves them, then passes both artifacts to
+`compare_benchmarks`, `compare_inference`, or `compare_kernel_validation`. Comparison tools read
+explicit artifact identities; an experiment capture measures cases and reports an effect, which is
+different evidence.
 
 ## Evidence quality
 

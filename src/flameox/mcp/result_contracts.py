@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field, GetJsonSchemaHandler, JsonValue, RootModel
+from pydantic import Field, GetJsonSchemaHandler, JsonValue, RootModel, field_validator
 from pydantic.json_schema import JsonSchemaValue
 
 from flameox.evidence_models import CaptureExecution
+from flameox.mcp.catalog import ANALYSIS_TOOLS
 from flameox.runtime_contracts import (
     LOWERCASE_SHA256_PATTERN,
     AnalysisResult,
@@ -71,12 +72,10 @@ NextAction = (
     | PreserveThenAnalyzeAction
 )
 
-type FailureCode = str
-
 
 class ToolFailureEnvelope(StrictModel):
     status: Literal["failed"] = "failed"
-    code: FailureCode = Field(description="Stable machine-readable failure code.")
+    code: str = Field(description="Stable machine-readable failure code.")
     message: str = Field(description="Human-readable failure and recovery guidance.")
     retryable: bool = False
     field_path: list[str | int] | None = None
@@ -98,8 +97,18 @@ class RecoverableEnvelope(StrictModel):
 class ToolCallEnvelope(StrictModel):
     """Executable next call without recursively embedding another tool schema."""
 
-    tool: Literal["analyze", "query_evidence"]
+    tool: str = Field(
+        description="Exact named read tool for this continuation.",
+        json_schema_extra={"enum": [*ANALYSIS_TOOLS.values(), "query_evidence"]},
+    )
     arguments: dict[str, JsonValue]
+
+    @field_validator("tool")
+    @classmethod
+    def require_read_tool(cls, value: str) -> str:
+        if value not in ANALYSIS_TOOLS.values() and value != "query_evidence":
+            raise ValueError("Continuation must name an analysis tool or query_evidence.")
+        return value
 
 
 class EvidenceReferenceEnvelope(StrictModel):
@@ -207,51 +216,6 @@ class QueryEnvelope(StrictModel):
     next_page: ToolCallEnvelope | None = None
 
 
-class CaptureProviderSummary(StrictModel):
-    id: str
-    artifact_formats: list[str]
-    option_schema: dict[str, JsonValue]
-
-
-class CapabilityListRecord(StrictModel):
-    capability_id: str
-    summary: str
-    accepted_formats: list[str]
-    minimum_sources: int = Field(ge=1)
-    maximum_sources: int = Field(ge=1)
-    capture_providers: list[str]
-    capture_supported: bool
-    experiment_supported: bool
-
-
-class CapabilityDetail(StrictModel):
-    capability_id: str
-    summary: str
-    accepted_formats: list[str]
-    minimum_sources: int = Field(ge=1)
-    maximum_sources: int = Field(ge=1)
-    capture_supported: bool
-    experiment_supported: bool
-    capture_providers: list[CaptureProviderSummary]
-    analysis_option_schema: dict[str, JsonValue]
-    analysis_example: dict[str, JsonValue]
-    capture_example: dict[str, JsonValue] | None = None
-    limitations: list[str] = Field(default_factory=list)
-    routing_exclusions: list[str] = Field(default_factory=list)
-
-
-class CapabilityListEnvelope(StrictModel):
-    status: Literal["complete"] = "complete"
-    mode: Literal["list"]
-    capabilities: list[CapabilityListRecord]
-
-
-class CapabilityGetEnvelope(StrictModel):
-    status: Literal["complete"] = "complete"
-    mode: Literal["get"]
-    capabilities: list[CapabilityDetail]
-
-
 class _ObjectOutcome(RootModel[Any]):
     """Keep MCP's required object root while validating result variants."""
 
@@ -286,7 +250,3 @@ class RescueOutcome(_ObjectOutcome):
 
 class QueryOutcome(_ObjectOutcome):
     root: QueryEnvelope | RecoverableEnvelope | ToolFailureEnvelope
-
-
-class CapabilityInspectionOutcome(_ObjectOutcome):
-    root: CapabilityListEnvelope | CapabilityGetEnvelope | ToolFailureEnvelope

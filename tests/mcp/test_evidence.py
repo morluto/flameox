@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -13,7 +13,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import TextContent, TextResourceContents
 
 from flameox.mcp import create_server
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
+from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     MAX_ROWS,
@@ -35,21 +35,12 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             arguments: dict[str, Any] = {
-                "request": {
-                    "capability_id": "coverage.summary",
-                    "sources": [
-                        {
-                            "kind": "path",
-                            "path": str(artifact),
-                            "format": "coverage",
-                        }
-                    ],
-                },
+                "sources": [{"kind": "path", "path": str(artifact), "format": "coverage"}],
                 "page_size": 100,
             }
             terminal = None
             for _ in range(12):
-                terminal = await client.call_tool("analyze", arguments)
+                terminal = await client.call_tool("summarize_coverage", arguments)
                 next_page = terminal.structured_content.get("next_page")
                 if next_page is None:
                     break
@@ -63,78 +54,6 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
         assert "narrow" in summary.text
         assert "bounded evidence" in summary.text
         assert "preserve" not in summary.text
-
-    anyio.run(exercise)
-
-
-@pytest.mark.integration
-def test_mcp_continuation_summary_names_safe_analysis_handoff(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            captured = await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [
-                                sys.executable,
-                                "-c",
-                                "[print(index) for index in range(4)]",
-                            ],
-                            "cwd": str(tmp_path),
-                            "console_output": "full",
-                        },
-                        "provider": {"kind": "direct"},
-                    },
-                    "page_size": 2,
-                },
-            )
-            preserved = await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [
-                                sys.executable,
-                                "-c",
-                                "[print(index) for index in range(4)]",
-                            ],
-                            "cwd": str(tmp_path),
-                            "console_output": "full",
-                        },
-                        "provider": {"kind": "direct"},
-                        "preserve": True,
-                    },
-                    "page_size": 2,
-                },
-            )
-            captured_next = captured.structured_content["next_page"]
-            captured_second = await client.call_tool(
-                captured_next["tool"], captured_next["arguments"]
-            )
-            preserved_next = preserved.structured_content["next_page"]
-            preserved_second = await client.call_tool(
-                preserved_next["tool"], preserved_next["arguments"]
-            )
-
-        assert isinstance(captured.content[0], TextContent)
-        assert "call analyze with the exact next_page arguments" in captured.content[0].text
-        assert "do not rerun capture" in captured.content[0].text
-        assert [row["text"] for row in captured_second.structured_content["blocks"][1]["rows"]] == [
-            "2",
-            "3",
-        ]
-        assert isinstance(preserved.content[0], TextContent)
-        assert "call analyze with the exact next_page arguments" in preserved.content[0].text
-        assert "do not rerun capture" in preserved.content[0].text
-        assert preserved_next["arguments"]["request"]["sources"][0]["kind"] == "evidence"
-        assert [
-            row["text"] for row in preserved_second.structured_content["blocks"][1]["rows"]
-        ] == ["2", "3"]
 
     anyio.run(exercise)
 
@@ -177,97 +96,22 @@ def test_mcp_keeps_complete_large_continuation_arguments(tmp_path: Path) -> None
             raise_exceptions=True,
         ) as client:
             result = await client.call_tool(
-                "analyze",
+                "inspect_performance_candidates",
                 {
-                    "request": {
-                        "capability_id": "static.performance_candidates",
-                        "sources": [{"kind": "path", "path": str(artifact), "format": "sarif"}],
-                        "options": {"include_paths": include_paths},
-                    },
+                    "sources": [{"kind": "path", "path": str(artifact), "format": "sarif"}],
+                    "include_paths": include_paths,
                     "page_size": 1,
                 },
             )
 
         assert result.is_error is not True
         handoff = result.structured_content["next_page"]
-        assert handoff["tool"] == "analyze"
-        assert handoff["arguments"]["request"]["options"]["include_paths"] == include_paths
+        assert handoff["tool"] == "inspect_performance_candidates"
+        assert handoff["arguments"]["include_paths"] == include_paths
         assert result.structured_content["truncation"]["reason"] == "row_limit"
         summary = result.content[0]
         assert isinstance(summary, TextContent)
-        assert "call analyze with the exact next_page arguments" in summary.text
-
-    anyio.run(exercise)
-
-
-def test_mcp_preservation_refreshes_a_live_capture_handoff(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            captured = await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [sys.executable, "-c", "print('one'); print('two')"],
-                            "cwd": str(tmp_path),
-                            "console_output": "full",
-                        },
-                        "provider": {"kind": "direct"},
-                    },
-                    "page_size": 1,
-                },
-            )
-            preserved = await client.call_tool(
-                "preserve_evidence",
-                {"analysis_id": captured.structured_content["analysis_id"]},
-            )
-            refreshed = preserved.structured_content["next_page"]
-            second = await client.call_tool(refreshed["tool"], refreshed["arguments"])
-
-        assert refreshed["arguments"]["request"]["sources"][0]["kind"] == "evidence"
-        assert isinstance(preserved.content[0], TextContent)
-        assert "refreshed evidence-backed next_page" in preserved.content[0].text
-        assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
-
-    anyio.run(exercise)
-
-
-def test_mcp_failed_capture_retains_an_executable_preserved_handoff(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        async with Client(
-            create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
-        ) as client:
-            failed = await client.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [
-                                sys.executable,
-                                "-c",
-                                "print('one'); print('two'); raise SystemExit(7)",
-                            ],
-                            "cwd": str(tmp_path),
-                            "console_output": "full",
-                        },
-                        "provider": {"kind": "direct"},
-                        "preserve": True,
-                    },
-                    "page_size": 1,
-                },
-            )
-            partial = failed.structured_content
-            next_page = partial["next_page"]
-            second = await client.call_tool(next_page["tool"], next_page["arguments"])
-
-        assert failed.is_error is False
-        assert partial["status"] == "partial"
-        assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
-        assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
+        assert "call next_page.tool with its exact arguments" in summary.text
 
     anyio.run(exercise)
 
@@ -279,17 +123,14 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
     async def exercise() -> None:
         async with Client(create_server(evidence_directory=store), raise_exceptions=True) as client:
             captured = await client.call_tool(
-                "capture_and_analyze",
+                "capture_artifact_preview",
                 {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [sys.executable, "-c", "print('one'); print('two')"],
-                            "cwd": str(tmp_path),
-                            "console_output": "full",
-                        },
-                        "provider": {"kind": "direct"},
+                    "target": {
+                        "argv": [sys.executable, "-c", "print('one'); print('two')"],
+                        "cwd": str(tmp_path),
+                        "console_output": "full",
                     },
+                    "provider": {"kind": "direct"},
                     "page_size": 1,
                 },
             )
@@ -307,7 +148,7 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
         ) as client:
             second = await client.call_tool(next_page["tool"], next_page["arguments"])
 
-        assert next_page["arguments"]["request"]["sources"][0]["kind"] == "evidence"
+        assert next_page["arguments"]["sources"][0]["kind"] == "evidence"
         assert second.structured_content["blocks"][1]["rows"][0]["text"] == "two"
 
     anyio.run(exercise)
@@ -362,14 +203,8 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(artifact)}],
-                        "options": {},
-                    }
-                },
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(artifact)}]},
             )
             assert analyzed.is_error is False
             analysis_id = analyzed.structured_content["analysis_id"]
@@ -386,19 +221,11 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as restarted:
             reanalyzed = await restarted.call_tool(
-                "analyze",
+                "preview_artifact",
                 {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [
-                            {
-                                "kind": "evidence",
-                                "evidence_id": evidence_id,
-                                "artifact_role": "input",
-                            }
-                        ],
-                        "options": {},
-                    }
+                    "sources": [
+                        {"kind": "evidence", "evidence_id": evidence_id, "artifact_role": "input"}
+                    ]
                 },
             )
             assert reanalyzed.is_error is False
@@ -430,13 +257,8 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
             create_server(evidence_directory=configured), raise_exceptions=True
         ) as client:
             analyzed = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(artifact)}],
-                    }
-                },
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(artifact)}]},
             )
             rescued = await client.call_tool(
                 "rescue_evidence",
@@ -471,18 +293,14 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
             create_server(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             captured = await client.call_tool(
-                "capture_and_analyze",
+                "capture_artifact_preview",
                 {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {
-                            "argv": [sys.executable, "-c", "print('ok')", secret_argument],
-                            "cwd": str(tmp_path),
-                            "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
-                        },
-                        "provider": {"kind": "direct"},
-                        "options": {},
-                    }
+                    "target": {
+                        "argv": [sys.executable, "-c", "print('ok')", secret_argument],
+                        "cwd": str(tmp_path),
+                        "environment": {"FLAMEOX_TEST_MARKER": secret_environment},
+                    },
+                    "provider": {"kind": "direct"},
                 },
             )
             assert captured.is_error is False
@@ -514,3 +332,45 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
             assert secret_path in manifest
 
     anyio.run(exercise)
+
+
+@pytest.mark.integration
+def test_query_distinguishes_unavailable_empty_and_no_matches(tmp_path: Path) -> None:
+    unavailable_store = tmp_path / "unavailable"
+    empty_store = tmp_path / "empty"
+    EvidenceRepository(empty_store, "test").initialize()
+
+    async def query(directory: Path) -> dict[str, object]:
+        async with Client(create_server(evidence_directory=directory)) as client:
+            result = await client.call_tool("query_evidence", {})
+            assert result.is_error is False
+            return cast(dict[str, object], result.structured_content)
+
+    async def populated_no_matches(directory: Path) -> dict[str, object]:
+        artifact = tmp_path / "artifact.json"
+        artifact.write_text("[1]")
+        async with Client(create_server(evidence_directory=directory)) as client:
+            analyzed = await client.call_tool(
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(artifact)}]},
+            )
+            await client.call_tool(
+                "preserve_evidence",
+                {"analysis_id": analyzed.structured_content["analysis_id"]},
+            )
+            result = await client.call_tool(
+                "query_evidence", {"capability_id": "retired.capability"}
+            )
+            return cast(dict[str, object], result.structured_content)
+
+    unavailable = anyio.run(query, unavailable_store)
+    empty = anyio.run(query, empty_store)
+    no_matches = anyio.run(populated_no_matches, tmp_path / "populated")
+    assert unavailable["inventory_status"] == "absent"
+    assert unavailable["inventory_size"] == 0
+    assert empty["inventory_status"] == "empty"
+    assert empty["inventory_size"] == 0
+    assert empty["match_status"] == "no_matches"
+    assert no_matches["inventory_status"] == "available"
+    assert no_matches["inventory_size"] == 1
+    assert no_matches["match_status"] == "no_matches"

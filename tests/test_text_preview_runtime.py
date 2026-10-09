@@ -111,20 +111,19 @@ def test_mcp_exposes_and_executes_optional_text_fragments(tmp_path: Path) -> Non
     path.write_text("x" * 300_000)
 
     async def exercise() -> None:
-        async with Client(create_server(), raise_exceptions=True) as client:
+        async with Client(
+            create_server(evidence_directory=tmp_path / "store"), raise_exceptions=True
+        ) as client:
             result = await client.call_tool(
-                "analyze",
+                "preview_artifact",
                 {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(path), "format": "text"}],
-                        "options": {"text_fragment_chars": 128},
-                    }
+                    "sources": [{"kind": "path", "path": str(path), "format": "text"}],
+                    "text_fragment_chars": 128,
                 },
             )
             assert result.is_error is False
             assert result.structured_content["coverage"]["complete"] is False
             assert result.structured_content["continuation"] is None
-            assert result.structured_content["next_page"]["tool"] == "analyze"
+            assert result.structured_content["next_page"]["tool"] == "preview_artifact"
 
     anyio.run(exercise)

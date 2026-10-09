@@ -320,18 +320,15 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
     async def exercise() -> None:
         async with Client(create_server(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
-                "capture_and_analyze",
+                "capture_cpu_hotspots",
                 {
-                    "request": {
-                        "capability_id": "cpu.hotspots",
-                        "target": {
-                            "argv": [sys.executable, "-c", "pass"],
-                            "cwd": str(tmp_path),
-                            **({"console_output": "full"} if full_output else {}),
-                        },
-                        "provider": {"kind": "py-spy"},
-                        "preserve": True,
-                    }
+                    "target": {
+                        "argv": [sys.executable, "-c", "pass"],
+                        "cwd": str(tmp_path),
+                        **({"console_output": "full"} if full_output else {}),
+                    },
+                    "provider": {"kind": "py-spy"},
+                    "preserve": True,
                 },
             )
             assert result.is_error is False
@@ -351,13 +348,8 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
             for artifact in projection["body"]["artifacts"]:
                 if artifact["format"] == "text":
                     preview = await client.call_tool(
-                        "analyze",
-                        {
-                            "request": {
-                                "capability_id": "artifact.preview",
-                                "sources": [artifact["source"]],
-                            }
-                        },
+                        "preview_artifact",
+                        {"sources": [artifact["source"]]},
                     )
                     texts.extend(
                         row["text"] for row in preview.structured_content["blocks"][1]["rows"]

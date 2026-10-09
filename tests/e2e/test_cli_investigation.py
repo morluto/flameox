@@ -201,14 +201,8 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
             ]
             for invalid in requests:
                 rejected = await session.call_tool(
-                    "capture_and_analyze",
-                    {
-                        "request": {
-                            "capability_id": "artifact.preview",
-                            "provider": {"kind": "direct"},
-                            **invalid,
-                        }
-                    },
+                    "capture_artifact_preview",
+                    {"provider": {"kind": "direct"}, **invalid},
                 )
                 assert rejected.is_error is True
                 assert rejected.structured_content is not None
@@ -221,29 +215,19 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
             assert str(tmp_path) not in content.text
             assert "capture_argv" not in content.text
             unknown_source = await session.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "mystery", "path": str(script)}],
-                    }
-                },
+                "preview_artifact",
+                {"sources": [{"kind": "mystery", "path": str(script)}]},
             )
             assert unknown_source.is_error is True
             assert unknown_source.structured_content is not None
             assert unknown_source.structured_content["code"] == "INVALID_REQUEST"
             replay = await session.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "coverage.summary",
-                        "sources": projection["analysis_sources"],
-                    }
-                },
+                "summarize_coverage",
+                {"sources": projection["analysis_sources"]},
             )
             assert replay.is_error is False
             assert replay.structured_content is not None
             assert replay.structured_content["blocks"] == captured["blocks"]
-            await session.validate_tool_result("analyze", replay)
+            await session.validate_tool_result("summarize_coverage", replay)
 
     anyio.run(replay_over_stdio)

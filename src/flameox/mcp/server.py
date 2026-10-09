@@ -20,11 +20,11 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 import flameox.providers.environment as provider_setup
 from flameox import __version__
+from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPABILITY_BY_TOOL, CAPTURE_TOOLS
 from flameox.mcp.descriptions import SERVER_DESCRIPTION, SERVER_INSTRUCTIONS
 from flameox.mcp.request_contracts import (
-    AnalyzeArguments,
+    AnalysisArguments,
     CaptureArguments,
-    InspectCapabilitiesArguments,
     PrepareProvidersArguments,
     PreserveArguments,
     QueryArguments,
@@ -33,10 +33,6 @@ from flameox.mcp.request_contracts import (
 from flameox.mcp.result_contracts import (
     AdjustRequestAction,
     CallToolAction,
-    CapabilityDetail,
-    CapabilityGetEnvelope,
-    CapabilityListEnvelope,
-    CapabilityListRecord,
     OperatorAction,
     PreserveThenAnalyzeAction,
     RecoverableEnvelope,
@@ -45,20 +41,16 @@ from flameox.mcp.result_contracts import (
 )
 from flameox.mcp.tool_registry import (
     bind_tool_contracts,
-    capability_descriptor,
-    capability_detail,
 )
 from flameox.mcp.validation import normalize_validation_error
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITY_BY_ID,
-    CAPTURE_PROVIDER_CONTRACTS,
     CaptureTarget,
     RequestLimits,
     RuntimeFailure,
     Source,
-    compatible_capture_providers,
 )
 
 
@@ -90,17 +82,17 @@ def _failure_result(value: ToolFailureEnvelope) -> CallToolResult:
     )
 
 
-def _runtime_failure(error: RuntimeFailure) -> CallToolResult:
+def _runtime_failure(error: RuntimeFailure, *, tool: str | None = None) -> CallToolResult:
     provider_id = error.details.get("provider_id")
     remediation = " ".join(error.remediation) or error.message
     if error.retryable:
         retry_action: CallToolAction | WaitAndRetryAction
-        if isinstance(provider_id, str):
+        if isinstance(provider_id, str) and tool in CAPTURE_TOOLS.values():
             retry_action = CallToolAction(
                 kind="call_tool",
                 tool="prepare_providers",
                 arguments=cast(dict[str, JsonValue], {"provider_ids": [provider_id]}),
-                then_retry="capture_and_analyze",
+                then_retry=tool,
                 message=remediation,
             )
         else:
@@ -147,9 +139,9 @@ def _runtime_failure(error: RuntimeFailure) -> CallToolResult:
             break
     source_index = error.details.get("source_index")
     if isinstance(source_index, int) and "accepted_formats" in error.details:
-        field_path = ["request", "sources", source_index, "format"]
+        field_path = ["sources", source_index, "format"]
     elif "accepted_provider_ids" in error.details:
-        field_path = ["request", "provider", "kind"]
+        field_path = ["provider", "kind"]
     next_action: AdjustRequestAction | OperatorAction | None
     if field_path is not None or accepted is not None:
         next_action = AdjustRequestAction(
@@ -176,14 +168,19 @@ def _attach_next_page(value: dict[str, Any], request: dict[str, Any] | None) -> 
     if request is None:
         value["next_page"] = None
         return
-    limits = request.pop("limits")
+    arguments = {
+        **request["options"],
+        "sources": request["sources"],
+        "continuation": request["continuation"],
+        "page_size": request["limits"]["max_rows"],
+    }
     if "analysis_id" in value and "capability_id" in value:
         value["continuation"] = None
     else:
         value.pop("continuation", None)
     value["next_page"] = {
-        "tool": "analyze",
-        "arguments": {"request": request, "page_size": limits["max_rows"]},
+        "tool": ANALYSIS_TOOLS[request["capability_id"]],
+        "arguments": arguments,
     }
 
 
@@ -224,7 +221,7 @@ def _summary(value: Mapping[str, Any]) -> str:
             "partial" if status == "partial" else "complete" if coverage_complete else "bounded"
         )
         if value.get("next_page") is not None:
-            action = "call analyze with the exact next_page arguments; do not rerun capture"
+            action = "call next_page.tool with its exact arguments; do not rerun capture"
         elif isinstance(value.get("preserved"), Mapping):
             action = "follow the returned evidence resource"
         elif isinstance(truncation, Mapping) and truncation.get("reason") == "provider_limit":
@@ -356,24 +353,29 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 )
             return _failure_result(normalize_validation_error(error))
         except RuntimeFailure as error:
-            return _runtime_failure(error)
+            return _runtime_failure(error, tool=params.name)
         except OSError:
-            code = "DECODE_FAILURE" if params.name == "analyze" else "EXECUTION_FAILURE"
-            message = (
-                "Input could not be read during analysis."
-                if params.name == "analyze"
-                else "Capture failed unexpectedly without trustworthy evidence."
-            )
+            if params.name in ANALYSIS_TOOLS.values():
+                code = "DECODE_FAILURE"
+                message = "Input could not be read during analysis."
+            elif params.name in CAPTURE_TOOLS.values():
+                code = "EXECUTION_FAILURE"
+                message = "Capture failed unexpectedly without trustworthy evidence."
+            else:
+                code = "IO_FAILURE"
+                message = "Flameox could not complete the operation's local file access."
             return _runtime_failure(RuntimeFailure(code, message))
         except (ValueError, json.JSONDecodeError):
             return _runtime_failure(RuntimeFailure("DECODE_FAILURE", "Input could not be decoded."))
         except asyncio.CancelledError:
             raise
         except Exception:
-            code = "ANALYSIS_FAILURE" if params.name == "analyze" else "INTERNAL_FAILURE"
+            code = (
+                "ANALYSIS_FAILURE" if params.name in ANALYSIS_TOOLS.values() else "INTERNAL_FAILURE"
+            )
             message = (
                 "Analysis failed unexpectedly."
-                if params.name == "analyze"
+                if params.name in ANALYSIS_TOOLS.values()
                 else "Flameox operation failed unexpectedly."
             )
             return _runtime_failure(RuntimeFailure(code, message))
@@ -385,8 +387,6 @@ class FlameoxServer(Server[AnalysisRuntime]):
         ctx: ServerRequestContext[AnalysisRuntime],
     ) -> CallToolResult:
         runtime = ctx.lifespan_context
-        if name == "inspect_capabilities":
-            return self._inspect(cast(InspectCapabilitiesArguments, request))
         if name == "prepare_providers":
             prepare_args = cast(PrepareProvidersArguments, request)
             await ctx.session.report_progress(0.0, message="preparing selected providers")
@@ -437,48 +437,12 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 value,
                 summary=f"Provider preparation completed; next: {action}.",
             )
-        if name == "analyze":
-            analysis_args = cast(AnalyzeArguments, request)
-            capability = CAPABILITY_BY_ID[analysis_args.request.capability_id]
-            if (
-                not capability.minimum_sources
-                <= len(analysis_args.request.sources)
-                <= capability.maximum_sources
-            ):
-                raise RuntimeFailure(
-                    "INVALID_INPUT",
-                    f"{capability.id} requires {capability.minimum_sources} to "
-                    f"{capability.maximum_sources} source(s).",
-                    details={
-                        "minimum_sources": capability.minimum_sources,
-                        "maximum_sources": capability.maximum_sources,
-                        "actual_sources": len(analysis_args.request.sources),
-                    },
-                )
-            for source_index, source in enumerate(analysis_args.request.sources):
-                if (
-                    source.kind == "path"
-                    and source.format is not None
-                    and source.format not in capability.formats
-                ):
-                    raise RuntimeFailure(
-                        "UNSUPPORTED_FORMAT",
-                        f"{capability.id} does not accept artifact format {source.format!r}.",
-                        details={
-                            "source_index": source_index,
-                            "accepted_formats": list(capability.formats),
-                        },
-                    )
-            try:
-                options = capability.model.model_validate(
-                    analysis_args.request.options
-                ).model_dump()
-            except ValidationError as error:
-                return _failure_result(
-                    normalize_validation_error(error, prefix=("request", "options"))
-                )
+        if name in ANALYSIS_TOOLS.values():
+            analysis_args = cast(AnalysisArguments, request)
+            capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
+            options = analysis_args.model_dump(include=set(capability.model.model_fields))
             sources = TypeAdapter(list[Source]).validate_python(
-                [item.model_dump(mode="python") for item in analysis_args.request.sources]
+                [item.model_dump(mode="python") for item in analysis_args.sources]
             )
             await ctx.session.report_progress(0.0, message=f"analyzing {capability.id}")
             value, next_request = await runtime.run_in_request(
@@ -488,44 +452,21 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     sources,
                     options,
                     limits=RequestLimits(max_rows=analysis_args.page_size),
-                    continuation=analysis_args.request.continuation,
+                    continuation=analysis_args.continuation,
                 )
             )
             value["status"] = "complete"
             _attach_next_page(value, next_request)
             return _text_result(value, summary=_summary(value))
-        if name == "capture_and_analyze":
+        if name in CAPTURE_TOOLS.values():
             capture_args = cast(CaptureArguments, request)
-            capability = CAPABILITY_BY_ID[capture_args.request.capability_id]
-            compatible = {item.id for item in compatible_capture_providers(capability)}
-            if capture_args.request.provider.kind not in compatible:
-                raise RuntimeFailure(
-                    "INVALID_INPUT",
-                    f"Provider {capture_args.request.provider.kind!r} cannot produce artifacts for "
-                    f"{capability.id}.",
-                    details={"accepted_provider_ids": sorted(compatible)},
-                )
-            try:
-                provider_options = (
-                    CAPTURE_PROVIDER_CONTRACTS[capture_args.request.provider.kind]
-                    .argument_model.model_validate(capture_args.request.provider.options)
-                    .model_dump()
-                )
-            except ValidationError as error:
-                return _failure_result(
-                    normalize_validation_error(error, prefix=("request", "provider", "options"))
-                )
-            try:
-                analysis_options = capability.model.model_validate(
-                    capture_args.request.options
-                ).model_dump()
-            except ValidationError as error:
-                return _failure_result(
-                    normalize_validation_error(error, prefix=("request", "options"))
-                )
+            capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
+            provider_options = capture_args.provider.model_dump()
+            provider_id = provider_options.pop("kind")
+            analysis_options = capture_args.model_dump(include=set(capability.model.model_fields))
             target = CaptureTarget(
-                **capture_args.request.target.model_dump(),
-                provider_id=capture_args.request.provider.kind,
+                **capture_args.target.model_dump(),
+                provider_id=provider_id,
                 capture_arguments=provider_options,
                 analysis_arguments=analysis_options,
             )
@@ -536,10 +477,10 @@ class FlameoxServer(Server[AnalysisRuntime]):
             value, next_request = await runtime.capture_analysis_page(
                 target,
                 capability.id,
-                experiment=capture_args.request.experiment,
+                experiment=getattr(capture_args, "experiment", None),
                 limits=RequestLimits(max_rows=capture_args.page_size),
                 progress=progress,
-                preserve=capture_args.request.preserve,
+                preserve=capture_args.preserve,
             )
             _attach_next_page(value, next_request)
             capture = cast(dict[str, Any], value["capture"])
@@ -561,7 +502,8 @@ class FlameoxServer(Server[AnalysisRuntime]):
                         dict[str, JsonValue], {"analysis_id": value["analysis_id"]}
                     ),
                     message=(
-                        "Preserve this trustworthy capture, then retry analyze over its "
+                        "Preserve this trustworthy capture, then retry "
+                        f"{ANALYSIS_TOOLS[capability.id]} over its "
                         "analysis sources after addressing the observed failure."
                     ),
                 ).model_dump(mode="json")
@@ -647,39 +589,6 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 value["next_page"] = {"tool": "query_evidence", "arguments": next_arguments}
             return _text_result(value, summary=_summary(value))
         raise RuntimeFailure("UNKNOWN_TOOL", f"Unknown Flameox tool: {name}")
-
-    @staticmethod
-    def _inspect(args: InspectCapabilitiesArguments) -> CallToolResult:
-        selected = args.root
-        if selected.mode == "get":
-            detail = CapabilityDetail.model_validate(
-                capability_detail(CAPABILITY_BY_ID[selected.capability_id])
-            )
-            value = CapabilityGetEnvelope(mode="get", capabilities=[detail]).model_dump(mode="json")
-            return _text_result(value, summary="Found 1 matching capability contract.")
-
-        capabilities: list[CapabilityListRecord] = []
-        for capability in CAPABILITY_BY_ID.values():
-            providers = compatible_capture_providers(capability)
-            if (
-                selected.artifact_format is not None
-                and selected.artifact_format not in capability.formats
-            ):
-                continue
-            if (
-                selected.capture_supported is not None
-                and bool(providers) != selected.capture_supported
-            ):
-                continue
-            capabilities.append(
-                CapabilityListRecord.model_validate(capability_descriptor(capability))
-            )
-        value = CapabilityListEnvelope(mode="list", capabilities=capabilities).model_dump(
-            mode="json"
-        )
-        return _text_result(
-            value, summary=f"Found {len(capabilities)} matching capability contract(s)."
-        )
 
     async def _on_read_resource(
         self,

@@ -94,20 +94,11 @@ def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
             )
         ) as client:
             response = await client.call_tool(
-                "capture_and_analyze",
+                "capture_coverage_summary",
                 {
-                    "request": {
-                        "capability_id": "coverage.summary",
-                        "target": {
-                            "argv": target.argv,
-                            "cwd": target.cwd,
-                        },
-                        "provider": {
-                            "kind": "coverage",
-                            "options": target.capture_arguments,
-                        },
-                        "preserve": True,
-                    }
+                    "target": {"argv": target.argv, "cwd": target.cwd},
+                    "provider": {"kind": "coverage", **target.capture_arguments},
+                    "preserve": True,
                 },
             )
 

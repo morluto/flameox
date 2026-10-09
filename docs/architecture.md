@@ -82,14 +82,17 @@ catalog. Flameox production code must not create or depend on SQLite state.
 ## Capability boundary
 
 One registry entry owns a capability descriptor, strict argument model, accepted formats,
-capture/analysis semantics, and model-visible selection guidance. MCP projects compact global
-envelopes for the read-only `analyze` tool and the executing `capture_and_analyze` tool. Agents
-select `request.capability_id`; transport validation then applies that registry entry's exact
-typed options, source cardinality, and compatible capture providers. `inspect_capabilities`
-projects one selected entry's detailed schemas and examples without expanding `tools/list`.
+capture/analysis semantics, and model-visible selection guidance. MCP projects a named analysis
+tool for each capability and a named capture tool for each capturable capability. Their typed
+schemas flatten capability fields into top-level arguments; capture tools nest only the typed
+provider choice and its provider-specific fields under `provider`. This makes the question being
+asked explicit in the tool name while keeping runtime capability IDs and evidence contracts stable.
+`flameox mcp inspect` lists these names, and `--capability CAPABILITY_ID` shows the corresponding
+direct schemas and examples.
 
-Capture-provider contracts supply typed options for each compatible capability request, exposed
-by discovery and checked at admission. Missing packages, executables, permissions, versions, or platforms do not
+Capture-provider contracts supply typed fields for each compatible capture tool; the tool schema
+advertises them and CLI capability inspection can show examples. Admission checks them before
+execution. Missing packages, executables, permissions, versions, or platforms do not
 change the catalog; the attempted tool returns typed remediation. The CLI setup command or MCP
 `prepare_providers` tool resolves dependencies according to where they execute. CLI setup prepares
 the complete version-pinned server environment. MCP preparation can activate a pinned standalone

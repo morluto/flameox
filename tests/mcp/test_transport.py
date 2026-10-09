@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import anyio
 import pytest
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 
 from flameox import __version__
 from flameox.mcp import create_server
+from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
@@ -20,56 +21,45 @@ from flameox.runtime_errors import DomainError, ErrorCode
 
 
 @pytest.mark.integration
-def test_mcp_errors_do_not_expose_untrusted_paths_or_provider_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure", ["analysis_io", "lifecycle_io", "provider"])
+def test_mcp_failures_classify_operations_without_exposing_private_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     private_path = "/private/customer/workspace/profile.json"
     private_diagnostic = "decoder stderr contains customer token"
-    original_resolve = AnalysisRuntime._resolve_sources
+    error: Exception = OSError(2, "No such file", private_path)
+    tool, arguments, expected_code = "preview_artifact", {}, "DECODE_FAILURE"
+    owner: Any = AnalysisRuntime
+    method = "_resolve_sources"
+    if failure == "lifecycle_io":
+        tool, method, expected_code = "query_evidence", "query_evidence", "IO_FAILURE"
+    else:
+        profile = tmp_path / "profile.json"
+        profile.write_text("{}")
+        arguments = {"sources": [{"path": str(profile)}]}
+        if failure == "provider":
+            arguments["sources"][0]["format"] = "py-spy"
+            tool, owner, method = "rank_cpu_hotspots", CpuProfileProvider, "analyze"
+            error = DomainError(
+                ErrorCode.DECODE_FAILURE,
+                "CPU profile worker failed before a trustworthy response.",
+                details={"stderr": private_diagnostic, "path": private_path},
+            )
 
-    def fail_read(*_args: Any, **_kwargs: Any) -> Any:
-        raise OSError(2, "No such file", private_path)
+    def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        raise error
 
-    def fail_provider(*_args: Any, **_kwargs: Any) -> Any:
-        raise DomainError(
-            ErrorCode.DECODE_FAILURE,
-            "CPU profile worker transport failed before a trustworthy response.",
-            details={"stderr": private_diagnostic, "path": private_path},
-        )
+    monkeypatch.setattr(owner, method, fail)
 
     async def exercise() -> None:
-        monkeypatch.setattr(AnalysisRuntime, "_resolve_sources", fail_read)
         async with Client(
             create_server(evidence_directory=tmp_path / "store"), raise_exceptions=True
         ) as client:
-            unreadable = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(tmp_path / "input.json")}],
-                    }
-                },
-            )
-            monkeypatch.setattr(AnalysisRuntime, "_resolve_sources", original_resolve)
-            monkeypatch.setattr(CpuProfileProvider, "analyze", fail_provider)
-            profile = tmp_path / "profile.json"
-            profile.write_text("{}")
-            provider_failure = await client.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "cpu.hotspots",
-                        "sources": [{"kind": "path", "path": str(profile), "format": "py-spy"}],
-                    }
-                },
-            )
-
-        for result in (unreadable, provider_failure):
+            result = await client.call_tool(tool, arguments)
             assert result.is_error is True
-            serialized = json.dumps(result.structured_content)
-            assert private_path not in serialized
-            assert private_diagnostic not in serialized
+            assert result.structured_content["code"] == expected_code
+            assert private_path not in result.model_dump_json()
+            assert private_diagnostic not in result.model_dump_json()
 
     anyio.run(exercise)
 
@@ -77,96 +67,263 @@ def test_mcp_errors_do_not_expose_untrusted_paths_or_provider_diagnostics(
 @pytest.mark.process
 @pytest.mark.serial
 @pytest.mark.e2e
-def test_real_stdio_initialize_and_catalog_match_the_runtime_contract(tmp_path: Path) -> None:
+def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_path: Path) -> None:
     async def exercise() -> None:
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=[
-                "-m",
-                "flameox",
-                "mcp",
-                "serve",
-            ],
+            args=["-m", "flameox", "mcp", "serve"],
             cwd=tmp_path,
         )
+        artifact = tmp_path / "sample.json"
+        artifact.write_text('[{"value":1},{"value":2},{"value":3}]')
+        marker = tmp_path / "started.txt"
+        command = (
+            "from pathlib import Path; import sys; "
+            "Path(sys.argv[1]).open('a').write('started\\n'); "
+            "print('stdio capture\\nsecond row\\nthird row'); sys.exit(int(sys.argv[2]))"
+        )
+
         async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
             initialized = await session.initialize()
-            tools = await session.list_tools()
+            listed = await session.list_tools()
             resources = await session.list_resources()
             templates = await session.list_resource_templates()
-            artifact = tmp_path / "sample.json"
-            artifact.write_text('[{"value":1}]')
-            inspected = await session.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": str(artifact)}],
-                    }
-                },
+            by_name = {tool.name: tool for tool in listed.tools}
+
+            assert initialized.server_info.version == __version__
+            assert initialized.instructions and "native artifacts" in initialized.instructions
+            expected = (
+                set(ANALYSIS_TOOLS.values())
+                | set(CAPTURE_TOOLS.values())
+                | {"prepare_providers", "preserve_evidence", "rescue_evidence", "query_evidence"}
             )
-            invalid = await session.call_tool(
-                "analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [],
-                        "options": {},
-                        "unexpected": True,
-                    }
-                },
+            assert set(by_name) == expected
+            assert not {"inspect_capabilities", "analyze", "capture_and_analyze"} & set(by_name)
+            assert all(tool.output_schema for tool in listed.tools)
+            for tool in listed.tools:
+                Draft202012Validator.check_schema(tool.input_schema)
+                Draft202012Validator.check_schema(tool.output_schema)
+                input_validator = Draft202012Validator(tool.input_schema)
+                for example in tool.input_schema.get("examples", []):
+                    assert input_validator.is_valid(example), (tool.name, example)
+            for name in ANALYSIS_TOOLS.values():
+                assert by_name[name].input_schema["additionalProperties"] is False
+                assert "sources" in by_name[name].input_schema["required"]
+
+            preview = await session.call_tool(
+                "preview_artifact",
+                {"sources": [{"path": str(artifact)}], "page_size": 2},
             )
-            captured = await session.call_tool(
-                "capture_and_analyze",
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
+            assert Draft202012Validator(by_name["preview_artifact"].input_schema).is_valid(
+                {"sources": [{"path": str(artifact)}], "page_size": 2}
+            )
+            await session.validate_tool_result("preview_artifact", preview)
+            assert preview.is_error is False
+            previewed_values = [
+                row["value"] for row in preview.structured_content["blocks"][1]["rows"]
+            ]
+            assert previewed_values == [1, 2]
+
+            invalid_calls: tuple[tuple[str, dict[str, Any], list[str | int] | None], ...] = (
+                ("preview_artifact", {}, None),
+                ("preview_artifact", {"sources": []}, None),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": str(artifact)}], "page_size": 0},
+                    None,
+                ),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": 1}]},
+                    ["sources", 0, "path"],
+                ),
+                (
+                    "preview_artifact",
+                    {"sources": [{"kind": "evidence", "evidence_id": "bad"}]},
+                    ["sources", 0, "evidence_id"],
+                ),
+                (
+                    "preview_artifact",
+                    {"request": {"capability_id": "artifact.preview", "sources": []}},
+                    None,
+                ),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": str(artifact)}], "options": {}},
+                    None,
+                ),
+                (
+                    "rank_cpu_hotspots",
+                    {
+                        "sources": [
+                            {"path": str(artifact)},
+                            {"path": str(artifact)},
+                        ]
+                    },
+                    None,
+                ),
+                (
+                    "rank_cpu_hotspots",
+                    {"sources": [{"path": str(artifact)}], "metric": "bogus"},
+                    None,
+                ),
+                (
+                    "rank_cpu_hotspots",
+                    {"sources": [{"path": str(artifact), "format": "json"}]},
+                    ["sources", 0, "format"],
+                ),
+                (
+                    "inspect_trace_window",
+                    {"sources": [{"path": str(artifact)}]},
+                    None,
+                ),
+                (
+                    "capture_cpu_hotspots",
+                    {
+                        "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
+                        "provider": {"kind": "py-spy", "rate": 0},
+                    },
+                    ["provider", "rate"],
+                ),
+                (
+                    "capture_artifact_preview",
+                    {
                         "target": {
-                            "argv": [sys.executable, "-c", "print('stdio capture')"],
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
                             "cwd": str(tmp_path),
                         },
-                        "provider": {"kind": "direct"},
-                    }
+                        "provider": {"kind": "not-a-provider"},
+                    },
+                    None,
+                ),
+                (
+                    "capture_artifact_preview",
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "py-spy"},
+                    },
+                    None,
+                ),
+            )
+            invalid_calls += tuple(
+                (
+                    "capture_cpu_hotspots",
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "py-spy"},
+                        unsupported: {},
+                    },
+                    [unsupported],
+                )
+                for unsupported in ("execution", "experiment")
+            )
+            for tool_name, arguments, expected_field_path in invalid_calls:
+                assert not Draft202012Validator(by_name[tool_name].input_schema).is_valid(
+                    arguments
+                ), (tool_name, arguments)
+                result = await session.call_tool(tool_name, arguments)
+                await session.validate_tool_result(tool_name, result)
+                assert result.is_error is True
+                assert result.structured_content["code"] == "INVALID_REQUEST"
+                if expected_field_path is not None:
+                    assert result.structured_content["field_path"] == expected_field_path
+                if tool_name == "rank_cpu_hotspots" and arguments["sources"][0].get("format"):
+                    assert "pstats" in result.structured_content["accepted_values"]
+            assert not marker.exists(), (
+                "invalid capture requests must fail before workload execution"
+            )
+
+            evidence_source_arguments = {
+                "sources": [{"evidence_id": "0" * 64}],
+            }
+            assert Draft202012Validator(by_name["preview_artifact"].input_schema).is_valid(
+                evidence_source_arguments
+            )
+            missing_evidence = await session.call_tool(
+                "preview_artifact", evidence_source_arguments
+            )
+            await session.validate_tool_result("preview_artifact", missing_evidence)
+            assert missing_evidence.is_error is True
+            assert missing_evidence.structured_content["code"] == "MISSING_EVIDENCE"
+
+            capture_arguments = {
+                "target": {
+                    "argv": [sys.executable, "-c", command, str(marker), "0"],
+                    "cwd": str(tmp_path),
+                },
+                "provider": {"kind": "direct"},
+                "page_size": 1,
+            }
+            assert Draft202012Validator(by_name["capture_artifact_preview"].input_schema).is_valid(
+                capture_arguments
+            )
+            captured = await session.call_tool("capture_artifact_preview", capture_arguments)
+            await session.validate_tool_result("capture_artifact_preview", captured)
+            assert captured.is_error is False
+            assert marker.read_text().splitlines() == ["started"]
+            assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
+            capture_page = captured.structured_content.get("next_page")
+            assert capture_page is not None
+            assert capture_page["tool"] == "preview_artifact"
+            assert capture_page["arguments"]["sources"][0]["kind"] == "path"
+            page = await session.call_tool(capture_page["tool"], capture_page["arguments"])
+            await session.validate_tool_result(capture_page["tool"], page)
+            assert page.is_error is False
+            assert page.structured_content["blocks"][1]["rows"][0]["text"] == "second row"
+            assert marker.read_text().splitlines() == ["started"]
+            preserved = await session.call_tool(
+                "preserve_evidence",
+                {"analysis_id": captured.structured_content["analysis_id"]},
+            )
+            await session.validate_tool_result("preserve_evidence", preserved)
+            assert preserved.is_error is False
+            assert preserved.structured_content["next_page"] is not None
+            assert (
+                preserved.structured_content["next_page"]["arguments"]["sources"][0]["kind"]
+                == "evidence"
+            )
+            analysis = await session.call_tool(
+                preserved.structured_content["next_page"]["tool"],
+                preserved.structured_content["next_page"]["arguments"],
+            )
+            await session.validate_tool_result("preview_artifact", analysis)
+            assert analysis.is_error is False
+            assert analysis.structured_content["blocks"][1]["rows"][0]["text"] == "second row"
+            assert marker.read_text().splitlines() == ["started"]
+
+            failed = await session.call_tool(
+                "capture_artifact_preview",
+                {
+                    "target": {
+                        "argv": [sys.executable, "-c", command, str(marker), "7"],
+                        "cwd": str(tmp_path),
+                    },
+                    "provider": {"kind": "direct"},
+                    "preserve": True,
+                    "page_size": 1,
                 },
             )
-            await session.validate_tool_result("analyze", inspected)
-            await session.validate_tool_result("capture_and_analyze", captured)
-
-        assert initialized.server_info.version == __version__
-        by_name = {tool.name: tool for tool in tools.tools}
-        assert set(by_name) == {
-            "inspect_capabilities",
-            "prepare_providers",
-            "analyze",
-            "capture_and_analyze",
-            "preserve_evidence",
-            "rescue_evidence",
-            "query_evidence",
-        }
-        assert all(tool.output_schema is not None for tool in tools.tools)
-        for name in ("analyze", "capture_and_analyze"):
-            schema = by_name[name].input_schema
-            request_ref = schema["properties"]["request"]["$ref"].rsplit("/", 1)[-1]
-            request = schema["$defs"][request_ref]
-            assert request["type"] == "object"
-            assert request["additionalProperties"] is False
-            assert request["properties"]["capability_id"]["enum"]
-            assert "capability_id" in request["required"]
-        analysis_schema = by_name["analyze"].input_schema
-        request_ref = analysis_schema["properties"]["request"]["$ref"].rsplit("/", 1)[-1]
-        assert analysis_schema["$defs"][request_ref]["properties"]["sources"]["maxItems"] == 32
-        analyze_annotations = by_name["analyze"].annotations
-        capture_annotations = by_name["capture_and_analyze"].annotations
-        assert analyze_annotations is not None
-        assert capture_annotations is not None
-        assert analyze_annotations.read_only_hint is True
-        assert capture_annotations.destructive_hint is True
-        assert invalid.is_error is True
-        assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
-        assert resources.resources == []
-        assert [item.uri_template for item in templates.resource_templates] == [
-            "flameox://evidence/{evidence_id}"
-        ]
-        assert templates.resource_templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
+            await session.validate_tool_result("capture_artifact_preview", failed)
+            assert failed.structured_content["status"] == "partial"
+            assert failed.structured_content["capture"]["workload_status"] == "failed"
+            failed_page = failed.structured_content["next_page"]
+            assert failed_page["tool"] == "preview_artifact"
+            assert failed_page["arguments"]["sources"][0]["kind"] == "evidence"
+            second = await session.call_tool(failed_page["tool"], failed_page["arguments"])
+            await session.validate_tool_result("preview_artifact", second)
+            assert second.is_error is False
+            assert second.structured_content["blocks"][1]["rows"][0]["text"] == "second row"
+            assert marker.read_text().splitlines() == ["started", "started"]
+            assert resources.resources == []
+            assert [item.uri_template for item in templates.resource_templates] == [
+                "flameox://evidence/{evidence_id}"
+            ]
+            assert templates.resource_templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
 
     anyio.run(exercise)

@@ -1770,7 +1770,7 @@ class AnalysisRuntime:
                     "available_capture_providers": sorted(CAPTURE_PROVIDER_CONTRACTS),
                     "recovery": (
                         "Inspect compatible provider variants with "
-                        "`flameox mcp inspect --tool capture_and_analyze`."
+                        "`flameox mcp inspect --capability CAPABILITY_ID`."
                     ),
                 },
             )

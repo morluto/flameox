@@ -1,41 +1,28 @@
 """Selection-oriented MCP instructions and tool descriptions."""
 
+from flameox.mcp.catalog import ANALYSIS_TOOLS
+from flameox.runtime_contracts import Capability
+
 SERVER_DESCRIPTION = "Bounded local runtime evidence over explicit artifacts and process targets."
 
-SERVER_INSTRUCTIONS = """Use Flameox to investigate local runtime time, memory, execution, and
-reliability with bounded evidence and preserved native artifacts. Start with inspect_capabilities
-list mode filtered by artifact format or capture support, then get the selected capability's exact
-options and compatible providers. Use analyze for existing artifacts; capture_and_analyze executes
-an explicit argv target and cwd. For baseline/candidate comparisons, capture inputs separately and
-analyze them with a .compare capability; a capture experiment instead runs declared randomized
-cases and paired repetitions. static.performance_candidates consumes SARIF rather than scanning
-source files. Session results expire at shutdown or eviction: preserve_evidence makes them durable;
-query_evidence finds preserved records. Copy returned resource URIs and next_page arguments
-verbatim. Preservation returns a refreshed evidence-backed next_page; use it instead of a prior
-scratch-backed page and do not rerun capture to paginate. Partial, retryable, and unavailable
-results are typed product states; follow next_action when present. Profiles are exploratory
-evidence rather than proof of causality."""
+SERVER_INSTRUCTIONS = """Use Flameox for bounded local runtime evidence with native artifacts and
+provenance. Call the named analysis tool that answers the question directly with explicit artifact
+paths or preserved evidence sources. Each tool advertises its exact typed arguments; discovery is
+optional. capture_* tools execute the supplied argv in an explicit cwd with a compatible typed
+collector and immediately analyze its outputs. Comparisons consume existing baseline/candidate
+artifacts; capture experiments declare randomized cases, repetitions, a metric and semantic oracle.
+inspect_performance_candidates reads SARIF rather than scanning source. Follow next_page.tool with
+next_page.arguments verbatim; pagination always reads existing evidence and never recaptures.
+Session analyses expire at shutdown or eviction: preserve_evidence publishes immutable evidence;
+query_evidence finds it later. Preservation refreshes next_page to immutable sources. Copy resource
+URIs verbatim. Partial, retryable and unavailable results are typed product states; follow
+next_action. Profiles locate exploratory evidence and do not prove causality or improvement."""
 
 TOOL_DESCRIPTIONS = {
-    "inspect_capabilities": (
-        "Choose an evidence question before analysis or capture. List capabilities by artifact "
-        "format or capture support, then get one capability's exact options, compatible providers, "
-        "source cardinality, and valid request examples."
-    ),
     "prepare_providers": (
         "Use when a provider result requests dependency preparation. Install the requested managed "
         "dependencies, then follow activation or reconnect guidance before retrying. Host "
         "profilers and workload-interpreter requirements receive guidance rather than installation."
-    ),
-    "analyze": (
-        "Inspect or compare explicit existing native artifacts without executing a workload. "
-        "Use inspect_capabilities for accepted formats and exact options; follow next_page for "
-        "bounded drill-down, then preserve_evidence if the result must survive the session."
-    ),
-    "capture_and_analyze": (
-        "Collect new evidence by executing an explicit argv target and cwd with a compatible "
-        "provider. Analyze native outputs immediately; optionally preserve them or run a declared "
-        "paired experiment. Follow next_page to inspect more rows without rerunning the workload."
     ),
     "preserve_evidence": (
         "Keep a live analysis beyond eviction or shutdown. Publish its native artifacts and "
@@ -50,6 +37,24 @@ TOOL_DESCRIPTIONS = {
     "query_evidence": (
         "Find preserved evidence after a session ends. Search immutable manifest metadata with "
         "typed filters and rows, then read a returned resource URI or use its source selectors "
-        "with analyze. Reports inventory coverage and a next_page when more matches exist."
+        "with a named analysis tool. Reports inventory coverage and a next_page when more matches "
+        "exist."
     ),
 }
+
+
+def analysis_description(capability: Capability) -> str:
+    return (
+        f"{capability.summary} Read existing {', '.join(capability.formats)} artifacts; "
+        "returns input identities, metrics/rows, coverage and limitations. "
+        "Follow next_page for more evidence; preserve_evidence makes it durable."
+    )
+
+
+def capture_description(capability: Capability) -> str:
+    return (
+        f"Execute an explicit argv target and collect native artifacts to: {capability.summary} "
+        "Returns immediate evidence and execution provenance, including failed attempts. "
+        f"For existing artifacts use {ANALYSIS_TOOLS[capability.id]}. "
+        "Pagination reads captured artifacts without executing again."
+    )

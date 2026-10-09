@@ -5,36 +5,56 @@ provider behavior, or lifecycle state.
 
 ## MCP catalog
 
-The catalog exposes seven broad workflow tools. The low-level Python MCP SDK server owns protocol
-initialization, framing, transports, progress, and MCP types. A declarative Flameox tool registry
-projects strict Pydantic input and output schemas and dispatches thin handlers over the shared
-`AnalysisRuntime`; Flameox does not implement a custom MCP protocol.
+The low-level Python MCP SDK server owns protocol initialization, framing, transports, progress,
+and MCP types. A declarative Flameox tool registry projects strict input and output schemas and
+dispatches thin handlers over the shared `AnalysisRuntime`; Flameox does not implement a custom MCP
+protocol. The catalog contains 26 named analysis tools, 20 named capture tools, and four lifecycle
+tools. Analysis tools are read-only and idempotent. Capture tools execute a typed argv and are
+annotated as effects; they never masquerade as reads. Lifecycle tools prepare providers or manage
+immutable evidence.
 
-`inspect_capabilities` keeps capability-specific schemas out of `tools/list`. List mode filters
-compact capability descriptors by artifact format or capture support. Get mode returns one
-capability's exact analysis option schema, compatible provider option schemas, minimal examples,
-limitations, and routing exclusions.
+Analysis tool names, in capability-registry order, are:
 
-`flameox mcp inspect` is compact by default; use `--capability CAPABILITY_ID` for exact analysis
-options, compatible provider options, and valid examples shared with MCP discovery. Use
-`--tool TOOL_NAME` for one transport schema or `--full` for the complete catalog. CLI results omit
-the process-local `analysis_id` because it
-cannot survive command exit.
+```text
+summarize_trace                 inspect_trace_call_graph
+summarize_pytorch_trace         summarize_trace_operations
+summarize_trace_lifecycle       inspect_trace_window
+rank_cpu_hotspots               inspect_cpu_callers
+rank_allocation_hotspots        rank_retained_memory
+summarize_benchmarks            analyze_benchmark_scaling
+compare_benchmarks              summarize_inference
+compare_inference               inspect_gpu_launches
+inspect_gpu_kernel_metrics      inspect_triton_autotune
+inspect_sanitizer_failures      inspect_kernel_validation
+compare_kernel_validation       summarize_failures
+inspect_pytest_fixtures         summarize_coverage
+inspect_performance_candidates  preview_artifact
+```
 
-| Group | Count | Examples | Effect |
-| --- | ---: | --- | --- |
-| Existing-artifact analysis | 1 | `analyze` | Read-only and idempotent. |
-| Capture and immediate analysis | 1 | `capture_and_analyze` | Executes typed argv; not read-only or idempotent. |
-| Capability discovery | 1 | `inspect_capabilities` | Select a capability, format, and provider before requesting detailed schemas. |
-| Evidence lifecycle | 4 | `prepare_providers`, `preserve_evidence`, `rescue_evidence`, `query_evidence` | Prepare an explicit uvx environment or manage immutable evidence. |
+Capture tools exist for capabilities with a compatible provider:
 
-For CLI-side discovery, `flameox mcp inspect` returns compact records containing each tool's name,
-description, required top-level inputs, and standard MCP annotations. After selecting a tool,
-`flameox mcp inspect --tool TOOL_NAME` returns its complete input and output schemas. The unfiltered
-catalog is available explicitly with `--full`. Unknown capability, capture-provider, and tool names
-return the requested value, bounded valid choices, and the exact discovery command to run next.
-An unsupported artifact format similarly returns the detected or declared format, the capability's
-accepted formats, and its exact analysis-tool name before provider decoding begins.
+```text
+capture_trace_summary           capture_trace_call_graph
+capture_trace_pytorch           capture_trace_operations
+capture_trace_lifecycle         capture_trace_window
+capture_cpu_hotspots            capture_cpu_callers
+capture_memory_hotspots         capture_memory_retained
+capture_benchmark_summary       capture_benchmark_scaling
+capture_gpu_launches            capture_gpu_kernel_metrics
+capture_triton_autotune         capture_sanitizer_failures
+capture_failures_summary        capture_pytest_fixtures
+capture_coverage_summary        capture_artifact_preview
+```
+
+The four lifecycle tools are `prepare_providers`, `preserve_evidence`, `rescue_evidence`, and
+`query_evidence`. There are no gateway tools, opaque capability selectors, or compatibility aliases.
+`flameox mcp inspect` lists compact names and annotations; `--capability CAPABILITY_ID` returns
+that capability's direct analysis/capture examples, capability-field schema, and compatible
+provider-field schemas. `--tool TOOL_NAME` shows one exact MCP input/output schema, and `--full`
+shows the complete catalog. CLI results omit process-local `analysis_id`
+because it cannot survive command exit. CLI inspection reports bounded tool/capability choices;
+an unsupported declared artifact format returns the capability's accepted formats before provider
+decoding.
 
 `rescue_evidence` accepts one live session analysis and an agent-selected explicit absolute path
 below an existing parent to a distinct new directory. It stages the normal immutable evidence
@@ -52,28 +72,24 @@ its parent before decoding or executing the workload, then returns the same resc
 `rescued`. The `--preserve` and `--rescue-to` options are mutually exclusive so the publication
 destination is unambiguous.
 
-`analyze` and `capture_and_analyze` retain stable compact outer requests. Their global capability,
-artifact-format, and provider fields are closed enums, while capability and provider `options` are
-JSON objects. The transport validates those nested objects, source cardinality, format
-compatibility, provider compatibility, and experiment support against the domain registries before
-runtime execution. Invalid combinations therefore return Flameox's structured failure contract,
-not raw Pydantic diagnostics. Exact nested schemas are available through `inspect_capabilities`.
+Each analysis tool exposes `sources`, its capability-specific typed fields, optional `continuation`,
+and `page_size` at the top level. Each capture tool exposes `target`, a discriminated `provider`
+object with `kind` and that collector's typed fields, capability-specific fields, `preserve`, and
+`page_size`; only capabilities with multi-source analysis expose `experiment`. No request wrapper,
+opaque `options` bag, or capability selector appears in MCP arguments. Strict validation applies
+source cardinality, format compatibility, provider compatibility, and experiment support against
+the domain registries before runtime execution. Invalid combinations use Flameox's structured
+failure contract, not raw Pydantic diagnostics. Capability-specific schemas are part of
+`tools/list`, with optional CLI discovery for compact views.
 
-Both tools expose only the semantic `page_size` beside the request. Input-byte, traversal, worker,
+Both tool families expose only the semantic `page_size` beside their task inputs. Input-byte, traversal, worker,
 process-output, memory, and provenance ceilings are server policy rather than caller-facing MCP
 knobs. Field descriptions are part of the public MCP contract. Shared source, target, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
 runtime validation, and every generated capability tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
 
-The nesting is consistent across capabilities:
-
-```text
-analyze({request: {capability_id, sources, options?, continuation?}, page_size?})
-capture_and_analyze({request: {capability_id, target, provider, options?, experiment?, preserve?}, page_size?})
-```
-
-Omit `request.experiment` to execute the target once. When present, it contains cases, blocks,
+Capture tools execute the target once by default. When present, `experiment` contains cases, blocks,
 seed, metric, estimand, threshold, and an optional oracle. Experiment-capable requests also accept
 null. There is no separate execution-mode field.
 
@@ -97,68 +113,64 @@ public for one hour. Content-addressed evidence reads are immutable and receive 
 hint so they are reusable within one caller's authorization context. Older negotiated protocol
 revisions omit these fields.
 
-For every paginated MCP result, `next_page` contains the exact `analyze` tool name and complete
+For analysis and capture results, `next_page` contains the exact named analysis tool and complete
 arguments for the next call. It includes ordered live path sources or preserved evidence sources,
-the original options, page size, and continuation. Callers do not reconstruct state
-from prose, and capture continuation never reruns the workload. Preserving a live paginated
-analysis may release its scratch paths, so `preserve_evidence` returns a refreshed evidence-backed
-`next_page` that supersedes the earlier live-path handoff. `rescue_evidence` does the same for the
-alternate store that becomes active after reconnecting.
+capability-specific fields, page size, and continuation. Callers do not reconstruct state from
+prose. Capture continuation always names the corresponding analysis tool and reads captured native
+artifacts; it never reruns the workload. `query_evidence` pagination instead names `query_evidence`
+and returns its exact next query arguments. Preserving a live paginated analysis may release its
+scratch paths, so `preserve_evidence` returns a refreshed evidence-backed `next_page` that
+supersedes the earlier live-path handoff. `rescue_evidence` does the same for the alternate store
+that becomes active after reconnecting.
 
-For example, existing-artifact analysis has this complete outer shape:
+For example, a bounded artifact preview uses a named tool and flattened arguments:
 
 ```json
 {
-  "request": {
-    "capability_id": "artifact.preview",
-    "sources": [
-      {"kind": "path", "path": "/absolute/path/to/output.log", "format": "text"}
-    ],
-    "options": {"text_fragment_chars": 1024}
-  },
+  "sources": [
+    {"kind": "path", "path": "/absolute/path/to/output.log", "format": "text"}
+  ],
+  "text_fragment_chars": 1024,
   "page_size": 100
 }
 ```
 
 If the response is partial, do not copy its continuation token into a newly assembled request.
-Submit `next_page.tool` with `next_page.arguments` unchanged. This preserves source order, options,
-identity checks, and the original page size.
+Submit `next_page.tool` with `next_page.arguments` unchanged. This preserves source order, typed
+analysis fields, identity checks, and the original page size.
 
-Each capability declaration also owns its accepted source cardinality. The compact MCP envelope
-uses the global transport ceiling; transport and runtime validation apply the selected capability's
-exact range before resolving paths or starting capture. Single-artifact summaries require exactly
-one source, comparison operations require at least two, and only intentional aggregations accept a
-larger bounded collection.
+Each capability declaration also owns its accepted source cardinality. The named tool's `sources`
+schema carries that exact range before resolving paths or starting capture. Single-artifact
+summaries require exactly one source, comparison operations require at least two, and only
+intentional aggregations accept a larger bounded collection.
 
-`options` defaults to an empty object. The selected capability model may still require nested
-fields, such as the start and end bounds for `trace.window`; transport validation returns their
-field paths and accepted values where applicable. Unknown nested fields are rejected, and pstats
-CPU metrics use a closed vocabulary in the detailed capability schema.
+Capability-specific fields appear directly at the tool's top level, defaulting according to the
+shared capability model. A capability may require fields such as the start and end bounds for
+`trace.window`; transport validation returns their field paths and accepted values where
+applicable. Unknown fields are rejected, and pstats CPU metrics use a closed vocabulary in the
+tool schema. Its path-source `format` field enumerates the capability's accepted formats.
+An incompatible declared format returns a typed validation failure before path resolution or
+provider decoding. When omitted, the runtime detects the format where it is unambiguous.
 
 For example, a single Nsight Compute capture for kernel metrics has this argument shape:
 
 ```json
 {
-  "request": {
-    "capability_id": "gpu.kernel_metrics",
-    "target": {
-      "argv": ["python", "kernel.py"],
-      "cwd": "/absolute/path/to/project"
-    },
-    "provider": {"kind": "nsight-compute", "options": {"launch_count": 1}},
-    "options": {},
-    "preserve": true
-  }
+  "target": {
+    "argv": ["python", "kernel.py"],
+    "cwd": "/absolute/path/to/project"
+  },
+  "provider": {"kind": "nsight-compute", "launch_count": 1},
+  "preserve": true
 }
 ```
 
 Analysis and capture remain separate tools even when they return the same evidence envelope. MCP
 annotations describe a whole tool, so combining read-only artifact analysis and target execution
-behind a mode flag would conceal a material effect change. Provider choice stays inside a capture
-tool because it is a typed implementation choice for one evidence question. The compact transport
-schema enumerates provider kinds; admission rejects incompatible capability/provider pairs before
-execution. `inspect_capabilities` exposes the selected capability's compatible providers and their
-exact options schemas.
+behind a mode flag would conceal a material effect change. Provider choice stays inside each capture
+tool because it is a typed implementation choice for one evidence question. Its schema enumerates
+compatible provider kinds and their exact fields; admission rejects incompatible
+capability/provider pairs before execution.
 
 There is one resource template:
 
@@ -294,10 +306,10 @@ retained, and omitted byte counts and stream completeness; full-output metadata
 is reported under `output_streams`. Omitted bytes cannot be recovered later.
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
-overrides after experiment-case overrides are merged. Provider fields live in the capture tool's
-selected provider's typed `options` model, and analysis fields live in the selected capability's
-`options` model. Discovery returns both exact schemas; admission validates them before execution.
-Shell command strings are not accepted.
+overrides after experiment-case overrides are merged. Provider fields appear directly beside
+`provider.kind` inside that capture tool's discriminated provider object; capability fields appear
+directly at the tool's top level. The runtime models remain the validation authority, and admission
+validates those projected typed fields before execution. Shell command strings are not accepted.
 
 `target.budget` controls workload execution independently of analysis limits:
 
@@ -327,7 +339,7 @@ preservation publishes the native artifacts even if immediate analysis fails; th
 reports separate capture execution state and a typed `analysis_failure`. An analysis failure is
 never converted into empty successful evidence.
 
-Adding `request.experiment` runs 2-16 cases across 1-100 blocks with a seed, metric, estimand,
+Adding `experiment` runs 2-16 cases across 1-100 blocks with a seed, metric, estimand,
 practical threshold, and optional semantic-oracle argv. Flameox evaluates
 `wall_time_ns` with a paired `median_difference` or `mean_difference`, reports
 eligible blocks and a deterministic percentile interval when at least three

@@ -22,39 +22,26 @@ def isolated_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("FLAMEOX_DATA_DIR", str(tmp_path / "flameox-data"))
 
 
-def test_mcp_inspect_supports_compact_discovery_and_exact_tool_drill_down() -> None:
+def test_mcp_inspect_exposes_flat_named_tool_discovery() -> None:
     runner = CliRunner()
-    summary_result = runner.invoke(app, ["mcp", "inspect"])
-    exact_result = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_and_analyze"])
+    summary = runner.invoke(app, ["mcp", "inspect"])
+    exact = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_cpu_hotspots"])
 
-    assert summary_result.exit_code == 0, summary_result.output
-    summary = json.loads(summary_result.output)
-    assert summary["tool_count"] == 7
-    assert all(
-        "input_schema" not in tool and "output_schema" not in tool for tool in summary["tools"]
-    )
-    hotspot_capability = next(
-        item for item in summary["capabilities"] if item["capability_id"] == "cpu.hotspots"
-    )
-    assert hotspot_capability["capture_providers"] == [
+    assert summary.exit_code == 0, summary.output
+    catalog = json.loads(summary.output)
+    tool = next(item for item in catalog["tools"] if item["name"] == "capture_cpu_hotspots")
+    assert tool["required_inputs"] == ["target", "provider"]
+    assert "input_schema" not in tool
+
+    assert exact.exit_code == 0, exact.output
+    schema = json.loads(exact.output)["tools"][0]["input_schema"]
+    assert "metric" in schema["properties"]
+    assert "request" not in schema["properties"]
+    assert set(schema["properties"]["provider"]["discriminator"]["mapping"]) == {
         "py-spy",
         "perf",
         "node-cpu-profile",
-    ]
-    capture = next(tool for tool in summary["tools"] if tool["name"] == "capture_and_analyze")
-    assert capture["annotations"]["destructive_hint"] is True
-    assert capture["required_inputs"] == ["request"]
-
-    assert exact_result.exit_code == 0, exact_result.output
-    exact = json.loads(exact_result.output)
-    assert [tool["name"] for tool in exact["tools"]] == ["capture_and_analyze"]
-    input_schema = exact["tools"][0]["input_schema"]
-    request = input_schema["properties"]["request"]
-    assert request["$ref"].endswith("/CaptureRequest")
-    assert (
-        "cpu.hotspots"
-        in input_schema["$defs"]["CaptureRequest"]["properties"]["capability_id"]["enum"]
-    )
+    }
 
 
 def test_analyze_enforces_cli_startup_input_limit(tmp_path: Path) -> None:

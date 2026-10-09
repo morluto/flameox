@@ -4,25 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from mcp.server import ServerRequestContext
 from mcp_types import CallToolResult, Tool, ToolAnnotations
 from pydantic import BaseModel, RootModel
 
-from flameox.mcp.descriptions import TOOL_DESCRIPTIONS
+from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
+from flameox.mcp.descriptions import TOOL_DESCRIPTIONS, analysis_description, capture_description
 from flameox.mcp.request_contracts import (
-    AnalyzeArguments,
-    CaptureArguments,
-    InspectCapabilitiesArguments,
     PrepareProvidersArguments,
     PreserveArguments,
     QueryArguments,
     RescueArguments,
+    analysis_arguments,
+    analysis_example,
+    capture_arguments,
+    capture_example,
 )
 from flameox.mcp.result_contracts import (
     AnalysisOutcome,
-    CapabilityInspectionOutcome,
     CaptureOutcome,
     PreparationOutcome,
     PreservationOutcome,
@@ -30,7 +32,7 @@ from flameox.mcp.result_contracts import (
     RescueOutcome,
 )
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import Capability, compatible_capture_providers
+from flameox.runtime_contracts import CAPABILITIES, Capability, compatible_capture_providers
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 CAPTURE = ToolAnnotations(
@@ -45,13 +47,13 @@ PREPARE = ToolAnnotations(
 
 
 @dataclass(frozen=True, slots=True)
-class ToolContract[InputT: BaseModel, OutputT: RootModel[Any]]:
+class ToolContract:
     name: str
     description: str
-    input_model: type[InputT]
-    output_model: type[OutputT]
+    input_model: type[BaseModel]
+    output_model: type[RootModel[Any]]
     annotations: ToolAnnotations
-    handler: Callable[[InputT, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]]
+    handler: Callable[[BaseModel, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]]
 
     def project(self) -> Tool:
         return Tool(
@@ -68,10 +70,7 @@ ToolDispatcher = Callable[
 ]
 
 TOOL_SPECS: tuple[tuple[str, type[BaseModel], type[RootModel[Any]], ToolAnnotations], ...] = (
-    ("inspect_capabilities", InspectCapabilitiesArguments, CapabilityInspectionOutcome, READ_ONLY),
     ("prepare_providers", PrepareProvidersArguments, PreparationOutcome, PREPARE),
-    ("analyze", AnalyzeArguments, AnalysisOutcome, READ_ONLY),
-    ("capture_and_analyze", CaptureArguments, CaptureOutcome, CAPTURE),
     ("preserve_evidence", PreserveArguments, PreservationOutcome, PRESERVE),
     ("rescue_evidence", RescueArguments, RescueOutcome, PRESERVE),
     ("query_evidence", QueryArguments, QueryOutcome, READ_ONLY),
@@ -80,28 +79,42 @@ TOOL_SPECS: tuple[tuple[str, type[BaseModel], type[RootModel[Any]], ToolAnnotati
 
 def bind_tool_contracts(
     dispatcher: ToolDispatcher,
-) -> tuple[ToolContract[BaseModel, RootModel[Any]], ...]:
-    def bind(
-        name: str,
-    ) -> Callable[[BaseModel, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]]:
-        async def handler(
-            request: BaseModel, ctx: ServerRequestContext[AnalysisRuntime]
-        ) -> CallToolResult:
-            return await dispatcher(name, request, ctx)
-
-        return handler
-
-    return tuple(
+) -> tuple[ToolContract, ...]:
+    lifecycle = tuple(
         ToolContract(
             name=name,
             description=TOOL_DESCRIPTIONS[name],
             input_model=input_model,
             output_model=output_model,
             annotations=annotations,
-            handler=bind(name),
+            handler=partial(dispatcher, name),
         )
         for name, input_model, output_model, annotations in TOOL_SPECS
     )
+    analysis = tuple(
+        ToolContract(
+            name=ANALYSIS_TOOLS[capability.id],
+            description=analysis_description(capability),
+            input_model=analysis_arguments(capability),
+            output_model=AnalysisOutcome,
+            annotations=READ_ONLY,
+            handler=partial(dispatcher, ANALYSIS_TOOLS[capability.id]),
+        )
+        for capability in CAPABILITIES
+    )
+    capture = tuple(
+        ToolContract(
+            name=CAPTURE_TOOLS[capability.id],
+            description=capture_description(capability),
+            input_model=capture_arguments(capability),
+            output_model=CaptureOutcome,
+            annotations=CAPTURE,
+            handler=partial(dispatcher, CAPTURE_TOOLS[capability.id]),
+        )
+        for capability in CAPABILITIES
+        if capability.id in CAPTURE_TOOLS
+    )
+    return (*analysis, *capture, *lifecycle)
 
 
 def capability_descriptor(capability: Capability) -> dict[str, Any]:
@@ -110,6 +123,8 @@ def capability_descriptor(capability: Capability) -> dict[str, Any]:
     providers = compatible_capture_providers(capability)
     return {
         "capability_id": capability.id,
+        "analysis_tool": ANALYSIS_TOOLS[capability.id],
+        "capture_tool": CAPTURE_TOOLS.get(capability.id),
         "summary": capability.summary,
         "accepted_formats": list(capability.formats),
         "minimum_sources": capability.minimum_sources,
@@ -124,38 +139,17 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
     """Add selected capability schemas, examples, and routing constraints."""
 
     providers = compatible_capture_providers(capability)
-    format_name = capability.formats[0]
     option_schema = capability.model.model_json_schema()
-    options = dict(option_schema.get("examples", [{}])[0])
-    capability.model.model_validate(options)
-    suffix = "sarif" if format_name == "sarif" else format_name.replace("-", ".")
-    analysis_example = {
-        "request": {
-            "capability_id": capability.id,
-            "options": options,
-            "sources": [
-                {
-                    "kind": "path",
-                    "path": f"/absolute/path/artifact-{index + 1}.{suffix}",
-                    "format": format_name,
-                }
-                for index in range(capability.minimum_sources)
-            ],
-        }
+    analysis_call = {
+        "tool": ANALYSIS_TOOLS[capability.id],
+        "arguments": analysis_example(capability),
     }
-    capture_example = (
-        {
-            "request": {
-                "capability_id": capability.id,
-                "options": options,
-                "target": {"argv": ["python", "workload.py"], "cwd": "/absolute/workdir"},
-                "provider": {"kind": providers[0].id},
-            }
-        }
+    capture_call = (
+        {"tool": CAPTURE_TOOLS[capability.id], "arguments": capture_example(capability)}
         if providers
         else None
     )
-    exclusions = ["analyze reads existing artifacts and never executes a workload."]
+    exclusions = ["Analysis tools read existing artifacts and never execute a workload."]
     if capability.id == "static.performance_candidates":
         exclusions.append("Consumes SARIF and does not scan source files.")
     if not providers:
@@ -170,8 +164,8 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
             for provider in providers
         ],
         "analysis_option_schema": option_schema,
-        "analysis_example": analysis_example,
-        "capture_example": capture_example,
+        "analysis_example": analysis_call,
+        "capture_example": capture_call,
         "limitations": [capability.limitation],
         "routing_exclusions": exclusions,
     }

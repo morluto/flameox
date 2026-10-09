@@ -1,93 +1,46 @@
-"""Compact MCP request envelopes over runtime-owned capability contracts."""
+"""Typed direct-tool arguments projected from runtime-owned contracts."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, ClassVar, Literal
+from types import GenericAlias
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import (
-    AfterValidator,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    GetJsonSchemaHandler,
-    JsonValue,
-    RootModel,
-    WithJsonSchema,
-)
-from pydantic.json_schema import JsonSchemaValue
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, create_model
 
 from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS, SYSTEM_PROVIDER_GUIDANCE
 from flameox.runtime_contracts import (
-    CAPABILITIES,
-    CAPTURE_PROVIDER_CONTRACTS,
     LOWERCASE_SHA256_PATTERN,
     MAX_ROWS,
+    Capability,
     DirectTarget,
     EvidenceSource,
     ExperimentDesign,
     PathSource,
     StrictModel,
+    compatible_capture_providers,
 )
 
-CAPABILITY_IDS = tuple(item.id for item in CAPABILITIES)
-ARTIFACT_FORMATS = tuple(
-    sorted({item for capability in CAPABILITIES for item in capability.formats})
-)
-CAPTURE_PROVIDER_IDS = tuple(CAPTURE_PROVIDER_CONTRACTS)
 PREPARABLE_PROVIDER_IDS = tuple(sorted(MANAGED_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
 
 
-def _closed(value: str, values: tuple[str, ...], label: str) -> str:
-    if value not in values:
-        raise ValueError(f"unknown {label}; accepted values: {', '.join(values)}")
+def literal_type(values: tuple[str, ...]) -> Any:
+    """Construct the same Literal used by validation and JSON Schema."""
+    return Literal.__getitem__(values)
+
+
+def _preparable_provider(value: str) -> str:
+    if value not in PREPARABLE_PROVIDER_IDS:
+        raise ValueError(f"unknown provider; accepted values: {', '.join(PREPARABLE_PROVIDER_IDS)}")
     return value
 
 
-def _capability_id(value: str) -> str:
-    return _closed(value, CAPABILITY_IDS, "capability_id")
-
-
-def _artifact_format(value: str) -> str:
-    return _closed(value, ARTIFACT_FORMATS, "artifact format")
-
-
-def _capture_provider_id(value: str) -> str:
-    return _closed(value, CAPTURE_PROVIDER_IDS, "capture provider")
-
-
-def _preparable_provider_id(value: str) -> str:
-    return _closed(value, PREPARABLE_PROVIDER_IDS, "preparable provider")
-
-
-CapabilityId = Annotated[
-    str,
-    AfterValidator(_capability_id),
-    WithJsonSchema({"type": "string", "enum": list(CAPABILITY_IDS)}),
-]
-ArtifactFormat = Annotated[
-    str,
-    AfterValidator(_artifact_format),
-    WithJsonSchema({"type": "string", "enum": list(ARTIFACT_FORMATS)}),
-]
-CaptureProviderId = Annotated[
-    str,
-    AfterValidator(_capture_provider_id),
-    WithJsonSchema({"type": "string", "enum": list(CAPTURE_PROVIDER_IDS)}),
-]
 PreparableProviderId = Annotated[
     str,
-    AfterValidator(_preparable_provider_id),
-    WithJsonSchema({"type": "string", "enum": list(PREPARABLE_PROVIDER_IDS)}),
+    AfterValidator(_preparable_provider),
+    Field(json_schema_extra={"enum": PREPARABLE_PROVIDER_IDS}),
 ]
-
-
-class McpPathSource(PathSource):
-    format: ArtifactFormat | None = Field(
-        default=None,
-        description="Explicit native artifact format. Omission requires unambiguous detection.",
-    )
 
 
 def _normalize_mcp_source_kind(value: Any) -> Any:
@@ -97,53 +50,130 @@ def _normalize_mcp_source_kind(value: Any) -> Any:
     return value
 
 
+class McpEvidenceSource(EvidenceSource):
+    kind: Literal["evidence"] = "evidence"
+
+
 McpSource = Annotated[
-    McpPathSource | EvidenceSource,
+    PathSource | McpEvidenceSource,
     Field(discriminator="kind"),
     BeforeValidator(_normalize_mcp_source_kind),
 ]
 
 
-class AnalysisRequest(StrictModel):
-    """Stable MCP envelope; capability option details are discovered separately."""
-
-    capability_id: CapabilityId = Field(description="Capability selected for this analysis.")
+class AnalysisArguments(StrictModel):
     sources: list[McpSource] = Field(
-        description="Native artifact paths or preserved evidence sources.",
-        min_length=1,
-        max_length=32,
-    )
-    options: dict[str, JsonValue] = Field(
-        default_factory=dict,
-        description="Capability-specific options from inspect_capabilities.",
+        description="Ordered native paths or preserved evidence sources."
     )
     continuation: str | None = Field(
-        default=None, description="Opaque continuation returned by the preceding page."
+        default=None, description="Opaque continuation from next_page; copy its complete call."
     )
+    page_size: int = Field(default=100, ge=1, le=MAX_ROWS, description="Evidence rows per page.")
 
 
-class CaptureProviderRequest(StrictModel):
-    kind: CaptureProviderId = Field(description="Capture provider selected for this request.")
-    options: dict[str, JsonValue] = Field(
-        default_factory=dict,
-        description="Provider-specific options from inspect_capabilities.",
+class CaptureArguments(StrictModel):
+    target: DirectTarget = Field(
+        description="Explicit argv and absolute cwd for workload execution."
     )
-
-
-class CaptureRequest(StrictModel):
-    capability_id: CapabilityId = Field(description="Capability to run over captured artifacts.")
-    target: DirectTarget = Field(description="Explicit process target executed without a shell.")
-    provider: CaptureProviderRequest
-    options: dict[str, JsonValue] = Field(
-        default_factory=dict,
-        description="Capability-specific analysis options from inspect_capabilities.",
-    )
-    experiment: ExperimentDesign | None = Field(
-        default=None, description="Optional randomized paired experiment design."
-    )
+    provider: StrictModel = Field(description="Collector and its typed settings.")
     preserve: bool = Field(
-        default=False, description="Preserve native artifacts and the result as immutable evidence."
+        default=False, description="Publish native artifacts as immutable evidence."
     )
+    page_size: int = Field(default=100, ge=1, le=MAX_ROWS, description="Evidence rows per page.")
+
+
+def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
+    """Expose capability options as fields while retaining their validators."""
+    path_model = create_model(
+        _model_name(capability.id, "PathSource"),
+        __base__=PathSource,
+        format=(
+            literal_type(capability.formats) | None,
+            Field(default=None, description="Native format; omit for unambiguous detection."),
+        ),
+    )
+    source_type = cast(Any, Annotated)[
+        path_model | McpEvidenceSource,
+        Field(discriminator="kind"),
+        BeforeValidator(_normalize_mcp_source_kind),
+    ]
+    model = create_model(
+        _model_name(capability.id, "Analysis"),
+        __base__=cast(tuple[type[BaseModel], ...], (capability.model, AnalysisArguments)),
+        __config__=ConfigDict(json_schema_extra={"examples": [analysis_example(capability)]}),
+        sources=(
+            GenericAlias(list, source_type),
+            Field(
+                description=f"Ordered artifacts in these formats: {', '.join(capability.formats)}.",
+                min_length=capability.minimum_sources,
+                max_length=capability.maximum_sources,
+            ),
+        ),
+    )
+
+    return cast(type[AnalysisArguments], model)
+
+
+def capture_arguments(capability: Capability) -> type[CaptureArguments]:
+    """Advertise only compatible collectors, including their exact typed fields."""
+    providers: Any = None
+    for contract in compatible_capture_providers(capability):
+        provider_model = create_model(
+            _model_name(contract.id, "Collector"),
+            __base__=contract.argument_model,
+            kind=(literal_type((contract.id,)), Field(description="Selected capture collector.")),
+        )
+        providers = provider_model if providers is None else providers | provider_model
+    fields: dict[str, Any] = {
+        "provider": (providers, Field(discriminator="kind", description="Compatible collector.")),
+    }
+    if capability.maximum_sources > 1:
+        fields["experiment"] = (
+            ExperimentDesign | None,
+            Field(
+                default=None, description="Randomized paired experiment; omit for one execution."
+            ),
+        )
+    model = create_model(
+        _model_name(capability.id, "Capture"),
+        __base__=cast(tuple[type[BaseModel], ...], (capability.model, CaptureArguments)),
+        __config__=ConfigDict(json_schema_extra={"examples": [capture_example(capability)]}),
+        **fields,
+    )
+
+    return cast(type[CaptureArguments], model)
+
+
+def option_example(capability: Capability) -> dict[str, Any]:
+    example = dict(capability.model.model_json_schema().get("examples", [{}])[0])
+    capability.model.model_validate(example)
+    return example
+
+
+def analysis_example(capability: Capability) -> dict[str, Any]:
+    format_name = capability.formats[0]
+    return {
+        **option_example(capability),
+        "sources": [
+            {"path": f"/absolute/path/artifact-{index + 1}.{format_name}", "format": format_name}
+            for index in range(capability.minimum_sources)
+        ],
+    }
+
+
+def capture_example(capability: Capability) -> dict[str, Any]:
+    provider = compatible_capture_providers(capability)[0]
+    executable = "node" if provider.id.startswith("node-") else "python"
+    workload = "workload.js" if executable == "node" else "workload.py"
+    return {
+        **option_example(capability),
+        "target": {"argv": [executable, workload], "cwd": "/absolute/workdir"},
+        "provider": {"kind": provider.id},
+    }
+
+
+def _model_name(identity: str, suffix: str) -> str:
+    return "".join(word.title() for word in identity.replace("-", ".").split(".")) + suffix
 
 
 class PrepareProvidersArguments(StrictModel):
@@ -153,51 +183,6 @@ class PrepareProvidersArguments(StrictModel):
         max_length=16,
     )
     timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
-
-
-class AnalyzeArguments(StrictModel):
-    request: AnalysisRequest
-    page_size: int = Field(default=100, ge=1, le=MAX_ROWS)
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(
-        json_schema_extra={
-            "examples": [
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "sources": [{"kind": "path", "path": "/tmp/results.json"}],
-                    }
-                },
-                {
-                    "request": {
-                        "capability_id": "static.performance_candidates",
-                        "sources": [
-                            {"kind": "path", "path": "/tmp/report.sarif", "format": "sarif"}
-                        ],
-                    }
-                },
-            ]
-        }
-    )
-
-
-class CaptureArguments(StrictModel):
-    request: CaptureRequest
-    page_size: int = Field(default=100, ge=1, le=MAX_ROWS)
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(
-        json_schema_extra={
-            "examples": [
-                {
-                    "request": {
-                        "capability_id": "artifact.preview",
-                        "target": {"argv": ["python", "-c", "print('ok')"], "cwd": "/tmp"},
-                        "provider": {"kind": "direct"},
-                    }
-                }
-            ]
-        }
-    )
 
 
 class PreserveArguments(StrictModel):
@@ -226,38 +211,3 @@ class QueryArguments(StrictModel):
     created_before: datetime | None = None
     page_size: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
-
-
-class InspectCapabilitiesList(StrictModel):
-    mode: Literal["list"]
-    artifact_format: ArtifactFormat | None = Field(
-        default=None, description="Filter to capabilities that consume this artifact format."
-    )
-    capture_supported: bool | None = Field(
-        default=None, description="Filter by whether compatible capture providers exist."
-    )
-
-
-class InspectCapabilitiesGet(StrictModel):
-    mode: Literal["get"]
-    capability_id: CapabilityId
-
-
-InspectCapabilitiesRequest = Annotated[
-    InspectCapabilitiesList | InspectCapabilitiesGet,
-    Field(discriminator="mode"),
-]
-
-
-class InspectCapabilitiesArguments(RootModel[InspectCapabilitiesRequest]):
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: Any, handler: GetJsonSchemaHandler
-    ) -> JsonSchemaValue:
-        schema = handler(core_schema)
-        schema["type"] = "object"
-        schema["examples"] = [
-            {"mode": "list", "artifact_format": "sarif", "capture_supported": False},
-            {"mode": "get", "capability_id": "static.performance_candidates"},
-        ]
-        return schema
