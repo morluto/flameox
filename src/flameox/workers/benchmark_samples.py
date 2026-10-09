@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
+from statistics import mean
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -67,10 +69,17 @@ def _series_row(series: BenchmarkSeries, *, series_index: int) -> dict[str, Any]
     row["value_int"] = None
     row["value_float"] = None
     row["sample_sum"] = sum(series.samples)
+    row["sample_sum_overflow"] = isinstance(row["sample_sum"], float) and not math.isfinite(
+        row["sample_sum"]
+    )
     row["sample_count"] = len(series.samples)
     positive_samples = [value for value in series.samples if value > 0]
     row["positive_sample_sum"] = sum(positive_samples)
     row["positive_sample_count"] = len(positive_samples)
+    try:
+        row["positive_sample_mean"] = mean(positive_samples) if positive_samples else None
+    except OverflowError:
+        row["positive_sample_mean"] = None
     return row
 
 

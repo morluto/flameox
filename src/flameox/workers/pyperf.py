@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, cast
@@ -70,12 +71,16 @@ def _handle(request: PyperfWorkerRequest, _job_root: Path) -> PyperfWorkerResult
                                 "loop_count": loops,
                                 "is_warmup": False,
                                 "sample_sum": 0.0,
+                                "sample_sum_overflow": False,
                                 "sample_count": 0,
                                 "positive_sample_sum": 0.0,
                                 "positive_sample_count": 0,
                             }
                             series_rows[key] = aggregate
                         aggregate["sample_sum"] += float(normalized_value)
+                        aggregate["sample_sum_overflow"] = not math.isfinite(
+                            aggregate["sample_sum"]
+                        )
                         aggregate["sample_count"] += 1
                         if normalized_value > 0:
                             aggregate["positive_sample_sum"] += float(normalized_value)

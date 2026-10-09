@@ -98,8 +98,12 @@ def test_pyperf_summary_uses_native_isolated_reader(tmp_path: Path) -> None:
 def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
+    overflowing_baseline = tmp_path / "overflowing-baseline.json"
+    overflowing_candidate = tmp_path / "overflowing-candidate.json"
     _write_pyperf_suite(baseline, [0.010, 0.012])
     _write_pyperf_suite(candidate, [0.005, 0.006])
+    _write_pyperf_suite(overflowing_baseline, [1.7e299, 1.7e299])
+    _write_pyperf_suite(overflowing_candidate, [1.7e299, 1.7e299])
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
@@ -128,6 +132,15 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
             ],
             {"metric": "workload", "baseline_index": 0},
         )
+        with pytest.raises(RuntimeFailure) as overflow_failure:
+            runtime.analyze(
+                "benchmark.compare",
+                [
+                    PathSource(path=str(overflowing_baseline), format="pyperf"),
+                    PathSource(path=str(overflowing_candidate), format="pyperf"),
+                ],
+                {"metric": "workload"},
+            )
     finally:
         runtime.close()
 
@@ -137,6 +150,8 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
     assert row["candidate_mean"] == 5_500_000
     assert row["ratio"] == 0.5
     assert reanalyzed["blocks"][1]["rows"][0]["ratio"] == 0.5
+    assert overflow_failure.value.code == "LIMIT_EXCEEDED"
+    assert "sample sum" in overflow_failure.value.message
     assert (tmp_path / ".flameox" / "repository.json").is_file()
 
 
@@ -146,6 +161,33 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
     candidate = tmp_path / "candidate.samples.json"
     _write_benchmark_samples(baseline, [10, 12])
     _write_benchmark_samples(candidate, [5, 6])
+    sum_overflow = tmp_path / "sum-overflow.samples.json"
+    ratio_baseline = tmp_path / "ratio-baseline.samples.json"
+    ratio_candidate = tmp_path / "ratio-candidate.samples.json"
+
+    def write_ratio(path: Path, values: list[float]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "flameox.benchmark-samples.v1",
+                    "producer": "example-benchmark",
+                    "producer_version": "1.0",
+                    "benchmarks": [
+                        {
+                            "name": "operation",
+                            "unit": "ratio",
+                            "measurement_clock": "host_monotonic",
+                            "synchronization": "not_required",
+                            "samples": values,
+                        }
+                    ],
+                }
+            )
+        )
+
+    write_ratio(sum_overflow, [1.7e308, 1.7e308])
+    write_ratio(ratio_baseline, [1e-308])
+    write_ratio(ratio_candidate, [1e308])
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
@@ -161,12 +203,34 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
             ],
             {"metric": "operation"},
         )
+        with pytest.raises(RuntimeFailure) as sum_failure:
+            runtime.analyze(
+                "benchmark.compare",
+                [
+                    PathSource(path=str(sum_overflow), format="samples"),
+                    PathSource(path=str(sum_overflow), format="samples"),
+                ],
+                {"metric": "operation"},
+            )
+        with pytest.raises(RuntimeFailure) as ratio_failure:
+            runtime.analyze(
+                "benchmark.compare",
+                [
+                    PathSource(path=str(ratio_baseline), format="samples"),
+                    PathSource(path=str(ratio_candidate), format="samples"),
+                ],
+                {"metric": "operation"},
+            )
     finally:
         runtime.close()
 
     assert summary["provider"]["id"] == "benchmark-samples"
     assert summary["blocks"][0]["values"]["measurement_count"] == 2
     assert comparison["blocks"][1]["rows"][0]["ratio"] == 0.5
+    assert sum_failure.value.code == "LIMIT_EXCEEDED"
+    assert "sample sum" in sum_failure.value.message
+    assert ratio_failure.value.code == "LIMIT_EXCEEDED"
+    assert "ratio" in ratio_failure.value.message
     assert not (tmp_path / ".flameox").exists()
 
 
@@ -243,6 +307,57 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
             [PathSource(path=str(artifact), format="samples")],
             {"input_dimension": "elements", "metric": "operation"},
         )
+        large_value = 1.7e308
+
+        def large_series(size: int, samples: list[float]) -> dict[str, object]:
+            return {
+                "name": "operation",
+                "unit": "ratio",
+                "measurement_clock": "host_monotonic",
+                "synchronization": "not_required",
+                "dimensions": {"elements": str(size)},
+                "samples": samples,
+            }
+
+        large_document = {
+            "schema_version": "flameox.benchmark-samples.v1",
+            "producer": "example-benchmark",
+            "producer_version": "1.0",
+        }
+        large_sources: list[PathSource] = []
+        for index, size in enumerate((2, 2, 4)):
+            source_path = tmp_path / f"large-scaling-{index}.samples.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        **large_document,
+                        "benchmarks": [large_series(size, [large_value])],
+                    }
+                )
+            )
+            large_sources.append(PathSource(path=str(source_path), format="samples"))
+        large_result = runtime.analyze(
+            "benchmark.scaling",
+            large_sources,
+            {"input_dimension": "elements", "metric": "operation"},
+        )
+        same_source_path = tmp_path / "same-source-large-scaling.samples.json"
+        same_source_path.write_text(
+            json.dumps(
+                {
+                    **large_document,
+                    "benchmarks": [
+                        large_series(2, [large_value, large_value]),
+                        large_series(4, [large_value]),
+                    ],
+                }
+            )
+        )
+        same_source_result = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(same_source_path), format="samples")],
+            {"input_dimension": "elements", "metric": "operation"},
+        )
     finally:
         runtime.close()
 
@@ -256,6 +371,18 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
     assert row["coefficient"] == pytest.approx(2_002 / 1_002)
     assert row["r_squared"] == pytest.approx(1.0)
     assert result["coverage"]["complete"] is True
+
+    for large_analysis in (large_result, same_source_result):
+        assert large_analysis["blocks"][0]["values"]["scaling_status"] == "estimated"
+        large_row = large_analysis["blocks"][1]["rows"][0]
+        assert large_row["point_count"] == 2
+        assert large_row["exponent"] == pytest.approx(0.0, abs=1e-12)
+        assert large_row["coefficient"] == pytest.approx(large_value)
+        assert large_row["dimensions"] == {
+            "measurement_clock": "host_monotonic",
+            "synchronization": "not_required",
+        }
+        assert large_analysis["coverage"]["complete"] is True
 
 
 @pytest.mark.process

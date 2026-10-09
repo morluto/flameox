@@ -256,6 +256,11 @@ class BenchmarkProvider:
                 }
                 if requested_metric is not None and identity["benchmark"] != requested_metric:
                     continue
+                if row.get("sample_sum_overflow") is True:
+                    raise ProviderFailure(
+                        "LIMIT_EXCEEDED",
+                        "Benchmark comparison sample sum exceeds finite numeric range.",
+                    )
                 sample_sum = row.get("sample_sum")
                 sample_count = row.get("sample_count")
                 value = (
@@ -301,6 +306,12 @@ class BenchmarkProvider:
                 if input_index != baseline_index:
                     candidate_total, candidate_count = values[key]
                     candidate_mean = candidate_total / candidate_count
+                    ratio = candidate_mean / baseline_mean if baseline_mean else None
+                    if ratio is not None and not math.isfinite(ratio):
+                        raise ProviderFailure(
+                            "LIMIT_EXCEEDED",
+                            "Benchmark comparison ratio exceeds finite numeric range.",
+                        )
                     output.append(
                         {
                             **identities[baseline_index][key],
@@ -308,7 +319,7 @@ class BenchmarkProvider:
                             "candidate_index": input_index,
                             "baseline_mean": baseline_mean,
                             "candidate_mean": candidate_mean,
-                            "ratio": candidate_mean / baseline_mean if baseline_mean else None,
+                            "ratio": ratio,
                         }
                     )
         return ProviderAnalysis(

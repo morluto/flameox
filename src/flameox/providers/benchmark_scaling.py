@@ -10,6 +10,46 @@ from typing import Any
 from flameox.providers.contracts import ProviderAnalysis
 
 
+def _positive_measurement_mean(
+    raw_input: Any, row: Mapping[str, Any]
+) -> tuple[float, float, int] | None:
+    sample_mean = row.get("positive_sample_mean")
+    sample_sum = row.get("positive_sample_sum", row.get("sample_sum"))
+    sample_count = row.get("positive_sample_count", row.get("sample_count"))
+    if sample_mean is not None:
+        value = sample_mean
+        count = sample_count
+    else:
+        value = row.get("value_int") if sample_sum is None else sample_sum
+        if value is None:
+            value = row.get("value_float")
+        count = sample_count if sample_sum is not None else 1
+    if (
+        not isinstance(raw_input, str | int | float)
+        or isinstance(raw_input, bool)
+        or not isinstance(value, str | int | float)
+        or isinstance(value, bool)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count <= 0
+    ):
+        return None
+    try:
+        input_value = float(raw_input)
+        numeric_value = float(value)
+    except (ValueError, OverflowError):
+        return None
+    measurement_mean = numeric_value if sample_mean is not None else numeric_value / count
+    if (
+        not math.isfinite(input_value)
+        or not math.isfinite(measurement_mean)
+        or input_value <= 0
+        or measurement_mean <= 0
+    ):
+        return None
+    return input_value, measurement_mean, count
+
+
 def scaling_projection(
     rows: Sequence[Mapping[str, Any]],
     arguments: Mapping[str, Any],
@@ -48,42 +88,20 @@ def scaling_projection(
         )
         identity = (benchmark, unit, dimension_identity)
         identity_dimensions[identity] = non_axis_dimensions
-        sample_sum = row.get("positive_sample_sum", row.get("sample_sum"))
-        sample_count = row.get("positive_sample_count", row.get("sample_count"))
-        value = row.get("value_int") if sample_sum is None else sample_sum
-        if value is None:
-            value = row.get("value_float")
-        count = sample_count if sample_sum is not None else 1
-        if (
-            not isinstance(raw_input, str | int | float)
-            or isinstance(raw_input, bool)
-            or not isinstance(value, str | int | float)
-            or isinstance(value, bool)
-            or not isinstance(count, int)
-            or isinstance(count, bool)
-            or count <= 0
-        ):
+        point = _positive_measurement_mean(raw_input, row)
+        if point is None:
             omitted_measurements += 1
             continue
-        try:
-            input_value = float(raw_input)
-            measurement_total = float(value)
-        except (ValueError, OverflowError):
-            omitted_measurements += 1
-            continue
-        if (
-            not math.isfinite(input_value)
-            or not math.isfinite(measurement_total)
-            or input_value <= 0
-            or measurement_total / count <= 0
-        ):
-            omitted_measurements += 1
-            continue
-        prior_total, prior_count = series[identity][input_value]
-        series[identity][input_value] = (
-            prior_total + measurement_total,
-            prior_count + count,
-        )
+        input_value, measurement_mean, count = point
+        prior_mean, prior_count = series[identity][input_value]
+        combined_count = prior_count + count
+        if prior_count == 0:
+            combined_mean = measurement_mean
+        else:
+            # A positive weighted running mean stays between its finite inputs;
+            # summing finite measurements first can overflow before averaging.
+            combined_mean = prior_mean + (measurement_mean - prior_mean) * (count / combined_count)
+        series[identity][input_value] = (combined_mean, combined_count)
 
     output: list[dict[str, Any]] = []
     estimated = 0
@@ -91,7 +109,7 @@ def scaling_projection(
         benchmark, unit, _dimension_identity = identity
         dimensions = identity_dimensions[identity]
         points = sorted(
-            (input_value, total / count) for input_value, (total, count) in series[identity].items()
+            (input_value, mean) for input_value, (mean, _count) in series[identity].items()
         )
         if len(points) < 2:
             output.append(
