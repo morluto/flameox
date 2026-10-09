@@ -2,6 +2,48 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.8] - 2026-10-09
+
+### Bug Fixes
+
+- **cli:** Reject excessive JSON and nonfinite experiment thresholds
+- **evidence:** Enforce bounded observation and canonical text contracts
+- **evidence:** Recover expired handles and clarify capture provenance
+- **tools:** Align input schemas and actionable validation recovery
+- **benchmarks:** Preserve scaling means and reject numeric overflow
+- **aiperf:** Report missing reader as unavailable capability
+- **mcp:** Enforce direct tool schemas and inherit request limits
+- **providers:** Bound XML parsing and handle benchmark overflow
+- **tools:** Correct V8 evidence and repair discovery, rescue, and cleanup (#525) ([#525](https://github.com/morluto/flameox/pull/525))
+
+### Documentation
+
+- Prune duplicate guides and obsolete audit records
+- **contracts:** Correct interface and evidence guidance
+- **agents:** Align tool and test guidance with current contracts
+- **tools:** Record native evidence and admission probe results
+- **tools:** Record independent live hardening verification
+- **mcp:** Record live probing fixes and remaining proof gaps
+- **mcp:** Record direct tool design and validation
+- Restore original ox mascot in README
+- Add white ox social preview image
+
+### Features
+
+- **mcp:** Replace gateway tools with direct typed operations
+
+### Refactoring
+
+- **mcp:** Remove unused resource-list convenience method
+- Remove obsolete option wrapper and redundant catch
+- **memray:** Remove unused worker evidence outputs
+
+### Testing
+
+- Prune redundant checks and remove coverage gate
+- Prioritize real CLI and MCP workflows
+- **runtime:** Prune duplicate execution and evidence checks
+- **providers:** Replace simulated captures with native evidence
 ## [0.2.7] - 2026-09-12
 
 ### Bug Fixes
