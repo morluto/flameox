@@ -65,19 +65,55 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
     assert "input_value" not in invalid.stderr
     assert "errors.pydantic.dev" not in invalid.stderr
 
-    malformed = subprocess.run(
-        [executable, "analyze", "artifact.preview", str(artifact), "--arguments", "{bad"],
+    marker = tmp_path / "started"
+    experiment = (
+        '{"cases":[{"name":"base"},{"name":"candidate"}],"blocks":1,"seed":1,'
+        '"metric":"wall_time_ns","estimand":"mean_difference","practical_threshold":1e999}'
+    )
+    invalid_capture = subprocess.run(
+        [
+            executable,
+            "capture",
+            "--provider",
+            "direct",
+            "--cwd",
+            str(tmp_path),
+            "--experiment",
+            experiment,
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
         env=environment,
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
+    assert invalid_capture.returncode == 1
+    assert json.loads(invalid_capture.stderr)["field_path"] == ["practical_threshold"]
+    assert not marker.exists()
 
-    assert malformed.returncode == 2
-    assert malformed.stdout == ""
-    assert "Usage: flameox analyze" in malformed.stderr
-    assert "invalid JSON" in malformed.stderr
+    for invalid_json in (
+        "{bad",
+        '{"unused":' + "[" * 10_000 + "0" + "]" * 10_000 + "}",
+        '{"unused":' + "9" * 5_000 + "}",
+    ):
+        malformed = subprocess.run(
+            [executable, "analyze", "artifact.preview", str(artifact), "--arguments", invalid_json],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert malformed.returncode == 2
+        assert malformed.stdout == ""
+        assert "Usage: flameox analyze" in malformed.stderr
+        assert "invalid JSON" in malformed.stderr
+        assert "Traceback" not in malformed.stderr
 
 
 def test_capture_preserve_restart_and_replay_native_evidence(tmp_path: Path) -> None:

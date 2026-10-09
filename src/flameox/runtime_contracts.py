@@ -881,6 +881,7 @@ class ExperimentDesign(StrictModel):
             "Being within this margin does not establish statistical or semantic equivalence."
         ),
         ge=0,
+        allow_inf_nan=False,
     )
     semantic_oracle: Argv | None = Field(
         default=None,

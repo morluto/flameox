@@ -89,6 +89,10 @@ def _json_object(value: str, *, option: str) -> dict[str, Any]:
         parsed = json.loads(value)
     except json.JSONDecodeError as error:
         raise typer.BadParameter(f"invalid JSON: {error.msg}", param_hint=option) from error
+    except (ValueError, RecursionError) as error:
+        raise typer.BadParameter(
+            "invalid JSON: numeric or nesting limits exceeded", param_hint=option
+        ) from error
     if not isinstance(parsed, dict):
         raise typer.BadParameter("value must decode to an object", param_hint=option)
     return cast(dict[str, Any], parsed)
