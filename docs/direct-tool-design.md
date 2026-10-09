@@ -136,8 +136,8 @@ Fresh stdio probes on 2026-10-09 found and fixed these contract issues:
   increase within the startup ceiling from a server restart to raise that ceiling.
 
 The Python SDK and type package are pinned to `2.3.0`. Fresh legacy stdio sessions and the SDK's
-high-level client both worked; the latter negotiated protocol `2026-07-28`. The current 50-tool
-catalog measures 999,785 compact bytes by the method above. The increase carries typed request
+high-level client both worked; the latter negotiated protocol `2026-07-28`. At `86fc837`, the 50-tool
+catalog measured 999,785 compact bytes by the method above. The increase carries typed request
 limits and corrected schema constraints; output contracts remain advertised in full.
 
 Live probes exercised direct execution success, failure, timeout and cancellation; coverage,
@@ -147,11 +147,51 @@ An actual Xcode Instruments Time Profiler capture also paged through its native 
 Independent follow-up probes found no further actionable issues in those exercised workflows.
 Unavailable vendor profilers, GPU hardware and other operating systems remain proof gaps.
 
-The default suite passes with 269 tests, one host skip (`systemd-run` unavailable), and five
-optional/performance cases deselected. Ruff, formatting, strict mypy, import boundaries, dead-code
-and dependency checks also pass. New schema regressions extend the existing real transport
-workflow; a single new stdio workflow covers startup limits and preservation/replay.
+At that checkpoint, the default suite passed with 269 tests, one host skip (`systemd-run`
+unavailable), and five optional/performance cases deselected. Ruff, formatting, strict mypy,
+import boundaries, dead-code and dependency checks also passed. New schema regressions extend
+the existing real transport workflow; a single new stdio workflow covers startup limits and
+preservation/replay.
 
 The follow-up removes an unused Torch option compatibility wrapper, the pass-through MCP server
 factory and package re-exports, and redundant subclass exception catches. The retained server class,
 runtime and provider boundaries continue to own their existing behavior.
+
+## Additional live investigation pass
+
+A second adversarial CLI and fresh-stdio pass found and fixed these issues:
+
+- CLI validation printed Pydantic diagnostics containing raw input values. CLI and MCP now share
+  safe field diagnostics; CLI usage errors still report malformed JSON separately.
+- Empty executable names, oversized or NUL-containing argv entries, and NUL-containing artifact,
+  cwd and rescue paths now fail the advertised schemas before execution. One shared argv contract
+  also validates immutable execution records, replacing duplicate validators.
+- Startup-limit recovery now identifies the submitted `page_size` shorthand and, when supplied,
+  `limits.max_rows`. Following the recovery advice succeeds, including for integral JSON numbers
+  such as `3.0`. Expired preservation and rescue handles explain how to recover from immutable
+  evidence or original sources.
+- Evidence provider filtering now matches both the analysis provider and the capture collector
+  recorded in provenance. Filtered continuations retain their inventory and query identity.
+- Experiment evidence and input descriptions explicitly identify complete capture-process timing
+  and capture-console oracle inputs. A real pyperf experiment verified workload-owned result
+  checks and exclusion of oracle-invalid pairs; collector summaries do not establish workload
+  semantics.
+- Scaling uses stable positive means so finite measurements remain usable when their intermediate
+  sum would overflow. Benchmark-samples and pyperf workers preserve sum-overflow status across
+  JSON serialization. Comparisons report `LIMIT_EXCEEDED` for overflowing sums or derived ratios
+  instead of silently dropping a metric or returning `"Infinity"`.
+
+The catalog remains 50 tools and now measures 1,006,029 compact bytes, carrying the added input
+constraints and scope descriptions. The default suite passes with 270 tests, one host skip and five
+optional/performance cases deselected. Formatting, Ruff, strict mypy, import boundaries, dead-code
+and dependency checks pass. Regressions extend existing real transport and native-artifact
+workflows, consolidate provider-filter and pagination scenarios, and add one installed-CLI
+diagnostic workflow; no new mocked or isolated helper tests were added.
+
+Independent repeat probes through fresh CLI and MCP processes found no further actionable issues
+in these exercised workflows. They verified successful empty later argv entries, typed malformed
+path failures, exact recovery actions, capture collector filtering, and recovery through query,
+resource artifact selection and reanalysis after restart. Separate probes repeated finite scaling,
+ordinary comparison and numeric failures and validated every tested MCP result against its output
+schema. This does not establish all-platform or all-provider correctness; unavailable hardware,
+vendor collectors, MCP host behavior and empirical agent tool selection remain proof gaps.
