@@ -167,17 +167,3 @@ async def test_diagnostics_task_cancellation_with_inherited_pipe_writer_is_incom
     assert error.diagnostic_output is not None
     assert not error.diagnostic_output.stdout_complete
     assert not error.diagnostic_output.stderr_complete
-
-
-@pytest.mark.anyio
-async def test_normal_mode_still_terminates_on_combined_output_cap(tmp_path: Path) -> None:
-    with pytest.raises(ProcessExecutionError) as raised:
-        await SubprocessBroker().run(
-            request(
-                tmp_path,
-                "-c",
-                "import os; os.write(1, b'a'*2048); os.write(2, b'b'*2048)",
-            )
-        )
-    assert raised.value.code is ErrorCode.LIMIT_EXCEEDED
-    assert raised.value.diagnostic_output is None

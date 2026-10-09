@@ -1,40 +1,36 @@
 # Testing
 
-Prioritize tests in this order:
+Prefer evidence in this order:
 
-1. End-to-end workflows using the installed CLI or real MCP stdio transport,
-   real subprocesses, and native evidence, with no substituted services.
-2. Integration tests that cross request, provider, worker, filesystem, or
-   repository boundaries and assert the resulting evidence or failure.
-3. Golden examples with explicit expected projections for native formats,
-   canonical serialization, and edge cases. Small constructed examples prove
-   normalization; they do not prove compatibility with every upstream producer release.
+1. End-to-end workflows through the installed CLI or real MCP stdio transport,
+   using real subprocesses and native evidence.
+2. Integration workflows across runtime, provider, worker, process, filesystem,
+   or repository boundaries.
+3. Golden examples with explicit expected projections for native formats and
+   stable serialization.
 
-Avoid tests that mirror methods, count internal calls, restate library validators,
-or replace the collector and decoder with fabricated successes. Add a focused
-test only for a behavioral contract that a retained workflow cannot establish.
-Fault injection remains useful for publication failures, cancellation races,
-resource observations, and privacy failures that normal execution cannot reliably
-trigger. Test the observable outcome at those boundaries.
+Keep a narrower test only when these workflows cannot establish a behavioral
+contract. Avoid tests that mirror methods, count internal calls, restate library
+validators, or manufacture successful collector and decoder results. Fault
+injection is useful when a real workflow cannot reliably reach a failure
+boundary. Assert the observable outcome and keep the test tied to the contract.
+When asserting a termination cause, keep unrelated limits permissive so they cannot win the race.
 
-There is no unit-test marker. The retained filesystem, executable binding,
-repository, and public runtime checks exercise real boundary behavior. Fixed
-format and serialization examples use the golden marker. Classification alone
-does not justify retaining a test: remove duplicated proof and assertions that
-only restate an implementation.
+Keep assertions tied to the behavior under investigation. Prefer a public preservation or replay
+call over inspecting a private cache, and check the expected result rather than merely accepting
+any valid result. Fold regression checks into an existing workflow when it already reaches the
+same boundary; avoid repeating summary fields across equivalent fixtures.
 
-## Baseline
+There is no unit-test marker. The default pytest selection excludes optional
+provider and performance tests, while process tests remain included. CI divides
+the default suite into deterministic and process-boundary jobs and reports their
+combined coverage. The default local suite is:
 
 ```console
-uv run ruff check src tests tools
-uv run ruff format --check src tests tools
-uv run mypy src tests tools
-uv run lint-imports
 uv run pytest -q
 ```
 
-The default suite includes process tests and the real CLI/MCP workflows. Optional
-providers and representative scale workloads remain explicit selections:
+Useful explicit selections are:
 
 ```console
 uv run pytest -m e2e -q
@@ -42,118 +38,39 @@ uv run pytest -o addopts='' -m golden -q
 uv run pytest -o addopts='' -m performance --durations=0
 ```
 
-Choose the semantic owner while iterating:
+The real MCP stdio test checks the complete current catalog of 50 direct tools
+(26 analysis, 20 capture, and 4 lifecycle), including schemas and examples. The
+older `inspect_capabilities`, `analyze`, and `capture_and_analyze` surface has
+been replaced. Keep transport tests aligned with the current catalog rather
+than encoding an old tool count or wrapper contract.
 
-| Owner | Focused command, including its process cases |
-| --- | --- |
-| Runtime coordination, limits, and capture | `uv run pytest -o addopts='' tests/test_runtime*.py tests/test_capture*.py tests/test_workload_budgets.py -q` |
-| Immutable publication and evidence | `uv run pytest -o addopts='' tests/test_repository.py tests/test_evidence*.py tests/storage -q` |
-| MCP schemas, transport, and evidence handoffs | `uv run pytest -o addopts='' tests/mcp -q` |
-| CLI and setup | `uv run pytest -o addopts='' tests/test_cli.py tests/test_setup.py -q` |
-| Execution and cancellation | `uv run pytest -o addopts='' tests/execution tests/test_worker_lifecycle.py -q` |
-| Installed CLI workflows | `uv run pytest tests/e2e -q` |
-| Native formats and provider integration | `uv run pytest -o addopts='' tests/providers tests/adapters -q` |
+## Evidence and limits
 
-CI discovers the entire `tests/` tree and selects by markers, so these owners
-share the deterministic and process jobs without a path registry. Match those
-jobs locally with `-o addopts='' -m 'not optional and not performance and not process'`
-and `-o addopts='' -m 'not optional and not performance and process'`. Both jobs
-are required on pull requests. Optional provider jobs select `requires_memray`
-or `requires_torch`; the scheduled scale job selects `performance`.
+The retained scale check publishes 1,000 real immutable manifests, closes the
+runtime, and queries every page through a new runtime. Performance claims should
+report the corpus, command, host-relevant limits, and result; compare the same
+workload and environment. This check has no hardware-independent timing target.
 
-Provider readiness lives in `tests/support/providers.py`. Process readiness and
-liveness probes live in `tests/support/processes.py` and are imported explicitly
-by their consumers. Keep mutable runtimes, stores, and clients local to each
-test; transport tests must not import fixtures from provider or runtime test modules.
+Golden projections establish behavior for their supplied artifact and expected
+fields. They do not establish compatibility with every upstream producer
+release or a full provider capture lifecycle. A passing suite also does not
+prove every publication boundary, provider, package-install route, or platform.
+Name the missing evidence when it matters to a change.
 
-## Required behavioral proof
+Known proof gaps include:
 
-Contract tests assert exactly seven MCP tools, one resource template, no concrete resource list,
-compact input envelopes, registry-backed capability/provider discovery, valid examples, output schemas,
-truthful annotations, and direct structured success content without a universal wrapper.
+- Cache bounds and eviction internals lack public-workflow proof.
+- Resource-baseline race handling, bounded file scanning, and unavailable-metric
+  branches lack retained direct proof.
+- Cancellation during subprocess startup, V8 hard traversal ceiling overflow,
+  and perf demangled/unknown-frame conversion lack retained direct proof.
+- A managed dependency reconnect branch and live package installation remain
+  unproved.
+- Vendor tools, optional hardware, permissions, and other platforms are not
+  exercised by the ordinary CI suite. Node CPU and heap stdio captures were
+  manually proved, but there is no retained live Node capture test.
 
-Runtime tests cover bounded streaming analysis, digest-bound continuation,
-provider states, typed capture, progress, cancellation and descendant cleanup,
-partial/failed evidence, scratch ceilings, and absence of durable writes without
-preservation.
-
-Repository tests cover lazy creation, Git exclusion, input mutation, artifact
-reuse, concurrent identical/distinct publication, every publication boundary,
-corrupt or incomplete bundles, unsupported versions, abandoned staging cleanup,
-stable queries, resource errors, and restart semantics.
-
-Provider tests use explicit native fixture paths without a repository. Optional
-tests must state the actual provider/version and skip rather than claim evidence
-when the host capability is absent.
-
-Tests for Rich or Typer human-readable output must remove ANSI styling and normalize wrapping
-whitespace before asserting a multi-token message. Prefer structured JSON assertions when that is
-the supported contract. Recovery commands that must remain readable should also be exercised at a
-narrow terminal width matching CI.
-
-Assert semantic schema fields rather than generated definition names, display
-titles, or ordering of `required` and `enum` arrays. For compact output, prove
-which payloads are omitted and that the full evidence remains recoverable;
-an arbitrary serialized byte count does not establish either property.
-
-Process tests should signal readiness before cancellation and check cleanup at
-the return boundary. Use explicit events to coordinate blocked work, with a
-generous watchdog to catch hangs. A timeout may interrupt a stream before all
-intended bytes are collected: check its exact retained prefix, byte counts, and
-incomplete status after reopening the evidence.
-
-## Performance evidence
-
-The scale workload publishes 1,000 real immutable manifests, closes the runtime,
-and queries every page through a new runtime. It verifies complete identities and
-a stable inventory digest without replacing filesystem traversal or bundle
-validation. Performance claims must report the corpus, command, host-relevant
-limits, and result. Use `uv run pytest -o addopts='' -m performance --durations=0`
-to record timings; compare the same workload and environment before making a
-speed or complexity claim. There is no hardware-independent timing threshold.
-
-The XML workload compares Python allocation peaks for 50,000 and 200,000 sibling
-elements in real xctrace table-of-contents XML. It verifies that completed siblings
-do not accumulate in the parser tree; it does not establish an RSS cap for arbitrary
-deep nesting or individual large XML values.
-
-## Proof gaps
-
-A passing default suite does not prove every provider or platform. Report
-missing hardware, permissions, vendor tools, cross-platform execution, crash
-injection boundaries, or scale runs explicitly. Do not replace behavioral proof
-with source-text assertions about private helpers.
-
-The test audit removed fabricated vendor-tool capture and conversion cases.
-Real Nsight Systems, ROCprof, xctrace, Nsight Compute, Compute Sanitizer, NVBench,
-and Node profile capture/export still require the relevant tools, hardware, and
-permissions; native-format projection cases
-do not establish those lifecycles. Perfetto's golden integration requires a local
-Trace Processor on PATH or `FLAMEOX_TRACE_PROCESSOR`, as well as the trace extra.
-The AIPerf comparison and live Torch cases require their respective extras and,
-for CUDA measurements, a usable GPU.
-
-Projection-cache byte/entry ceilings and implementation-identity invalidation
-need public-workflow proof after their private mock/call-count tests were removed.
-Canonical manifest identities are checked for integrity and replay, but there is
-no fixed expected-digest golden. MCP managed preparation retains controlled
-installer fixtures; a real package-install/reconnect workflow remains unproved.
-Readiness derivation for incompatible installed dependency sets, exhaustive
-discovery-example validation, Torch profiler exit-failure precedence, and a
-successful npm-to-uvx handoff also need boundary proof after their mock-only checks
-were removed. The real experiment workflow checks classification against its
-observed estimate; it does not establish the exact zero-estimate/wide-interval
-case. Stalled subprocess acquisition, worker request-encoding failure cleanup,
-catalog responsiveness during blocked analysis, and detailed startup-limit
-lowering also lack retained workflow proof.
-
-Two source findings remain outside the local fixes made during the audit:
-
-- Repository metadata and manifests are schema-validated, but their JSON reads
-  currently have no independent size ceiling. A size policy needs a documented
-  compatibility contract before oversized documents can be rejected safely.
-- The Memray worker generates and validates measurement, call-edge, and stack
-  tables that the provider does not expose or preserve. The native attribution
-  tests establish the published frame projection; they do not justify that extra
-  normalization work. Simplifying the worker protocol requires a separate
-  capability and evidence contract decision.
+Provider tests should identify their actual artifact or host requirement. A
+skip because a provider or host capability is unavailable is not provider
+evidence. Keep observed, derived, and inferred claims distinct, including in
+tests and performance reports.

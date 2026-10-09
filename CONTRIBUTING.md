@@ -89,21 +89,24 @@ Use complete type annotations and Python 3.12 syntax. Ruff enforces formatting,
 import ordering, a 100-character line limit, and the configured lint rules; mypy
 runs in strict mode.
 
-Add tests near the behavior's semantic owner. Name test files `test_<area>.py`
-and tests `test_<observable_behavior>`. Prefer observable behavior or stable
-artifacts over assertions about private helper names or source text. Cover the
-meaningful failure path as well as the success path, and use Hypothesis when the
-contract is an invariant over a useful input range.
+When a change needs new proof, prefer a real end-to-end workflow, then an
+integration test across the affected boundary, then a focused golden example.
+Keep a narrower test only for a behavioral contract those workflows cannot
+establish. Name test files `test_<area>.py` and tests
+`test_<observable_behavior>`; assert outcomes rather than implementation details.
+See [docs/testing.md](docs/testing.md) for current evidence priorities and
+known gaps.
 
 Run the tests owned by the area you changed. For example:
 
 ```console
 uv run pytest -o addopts='' tests/test_runtime*.py tests/test_capture*.py -q
 uv run pytest -o addopts='' tests/mcp -q
-uv run pytest -o addopts='' tests/test_repository.py -q
+uv run pytest -o addopts='' tests/test_repository.py tests/test_evidence*.py -q
 ```
 
-The [testing guide](docs/testing.md) lists every owner and the matching CI marker command.
+The [testing guide](docs/testing.md) describes the suite's current selections
+and proof limits.
 
 Then run validation proportional to the change. The usual baseline is:
 
@@ -114,9 +117,9 @@ uv run mypy src tests tools
 uv run pytest -q
 ```
 
-`pytest -q` runs the fast deterministic default suite without hidden retries.
-Use paths and registered markers from [docs/testing.md](docs/testing.md) for
-process, optional-provider, and performance behavior. In particular:
+`pytest -q` runs the default suite, including process tests, while excluding
+optional-provider and performance tests. Use registered markers from
+[docs/testing.md](docs/testing.md) for explicit selections. In particular:
 
 - Run `uv run lint-imports` when changing package boundaries.
 - Run the matching optional-provider marker when changing an integration; a skip

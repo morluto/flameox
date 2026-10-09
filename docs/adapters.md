@@ -30,8 +30,7 @@ Adding or removing a format is complete only when these surfaces agree:
 6. the support table below.
 
 Tests exercise explicit-path analysis and, when applicable, capture through the public runtime.
-They also assert that the capture-contract and invocation-builder registries have identical provider
-IDs. A parser or worker that is not reachable through a declared capability is either intentionally
+A parser or worker that is not reachable through a declared capability is either intentionally
 internal and documented as such, or an incomplete registration—not latent support.
 
 Capability tools remain discoverable when a provider is absent. Capture validates the selected

@@ -15,10 +15,8 @@ from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     PathSource,
-    RequestLimits,
     RuntimeFailure,
 )
-from flameox.source_files import NativeSource, sha256_file
 
 
 def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) -> None:
@@ -418,39 +416,7 @@ def test_wrapped_capture_revalidates_workload_after_admission(
 
 
 @pytest.mark.process
-def test_perf_conversion_preserves_demangled_and_unknown_frames(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    executable = tmp_path / "bin" / "perf"
-    executable.parent.mkdir()
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "print('app 1 [000] 1.000: cycles:')\n"
-        "print('        7f01 void alpha<int>(int, int)+0x10/0x40 (/opt/app)')\n"
-        "print()\n"
-        "print('app 1 [000] 1.001: cycles:')\n"
-        "print('        7f02 [unknown] ([unknown])')\n"
-        "print('        7f03 parent function()+0x20 (/opt/app)')\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
-    native = tmp_path / "perf.data"
-    native.write_bytes(b"native")
-    digest, size = sha256_file(native)
-    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        collapsed, _ = runtime._perf_collapsed(source, RequestLimits())
-        lines = collapsed.read_text().splitlines()
-    finally:
-        runtime.close()
-
-    assert "void alpha<int>(int, int) 1" in lines
-    assert "parent function();[unknown] 1" in lines
-
-
-@pytest.mark.process
-def test_perf_conversion_rejects_and_does_not_cache_failed_decoder_prefix(
+def test_perf_analysis_rejects_failed_decoder_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "bin" / "perf"
@@ -467,19 +433,15 @@ def test_perf_conversion_rejects_and_does_not_cache_failed_decoder_prefix(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
     native = tmp_path / "perf.data"
     native.write_bytes(b"native")
-    digest, size = sha256_file(native)
-    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime._perf_collapsed(source, RequestLimits())
+            runtime.analyze("cpu.hotspots", [PathSource(path=str(native), format="perf-data")], {})
         assert failure.value.code == "DECODE_FAILURE"
         assert failure.value.details["decoder_exit_code"] == 7
         assert failure.value.details["decoder_stderr"] == "decoder failed\n"
         assert failure.value.details["decoder_stderr_retained_bytes"] == 15
         assert failure.value.details["decoder_stderr_omitted_bytes"] == 0
-        assert not list((runtime.scratch / "conversions").glob("*.folded"))
-        assert runtime.scratch_artifacts == {}
     finally:
         runtime.close()
 
@@ -497,12 +459,10 @@ def test_perf_conversion_reports_signalled_decoder_termination(
     monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
     native = tmp_path / "perf.data"
     native.write_bytes(b"native")
-    digest, size = sha256_file(native)
-    source = NativeSource(native, digest, size, "perf-data", "perf", "input")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime._perf_collapsed(source, RequestLimits())
+            runtime.analyze("cpu.hotspots", [PathSource(path=str(native), format="perf-data")], {})
         assert failure.value.details["decoder_exit_code"] is None
         assert failure.value.details["decoder_termination"] == {
             "kind": "signalled",

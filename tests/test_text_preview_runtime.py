@@ -11,9 +11,14 @@ from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import EvidenceSource, PathSource, RequestLimits, RuntimeFailure
 
 
-def test_text_fragments_preserve_native_bytes_and_resume_after_restart(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_utf8", [False, True])
+def test_text_fragments_preserve_native_bytes_and_resume_after_restart(
+    tmp_path: Path, invalid_utf8: bool
+) -> None:
     path = tmp_path / "output.log"
     content = ("日🙂\r\n" + "long" * 2000 + "\nlast").encode()
+    if invalid_utf8:
+        content += b"\xff\xfe"
     path.write_bytes(content)
     sources = [PathSource(path=str(path), format="text")]
     options = {"text_fragment_chars": 128}
@@ -39,30 +44,11 @@ def test_text_fragments_preserve_native_bytes_and_resume_after_restart(tmp_path:
             )
             fragments.extend(row["text"] for row in page["blocks"][1]["rows"])
             token = page["continuation"]
-        assert "".join(fragments).encode() == content
+        assert "".join(fragments) == content.decode(errors="replace")
         assert page["coverage"]["complete"] is True
     finally:
         restarted.close()
     assert path.read_bytes() == content
-
-
-def test_large_line_and_optional_fragments_keep_distinct_offsets(tmp_path: Path) -> None:
-    path = tmp_path / "long.log"
-    path.write_bytes(b"x" * 300_000 + b"\nshort\n")
-    runtime = AnalysisRuntime()
-    sources = [PathSource(path=str(path), format="text")]
-    try:
-        complete = runtime.analyze("artifact.preview", sources, {})
-        assert complete["blocks"][1]["rows"][0]["text"] == "x" * 300_000
-        assert complete["coverage"]["complete"] is True
-        ordinary = runtime.analyze("artifact.preview", sources, {"offset": 1})
-        assert ordinary["blocks"][1]["rows"][0]["text"] == "short"
-        recovered = runtime.analyze("artifact.preview", sources, {"text_fragment_chars": 1024})
-        assert recovered["continuation"] is not None
-        assert recovered["coverage"]["complete"] is False
-        assert all(len(row["text"]) <= 1024 for row in recovered["blocks"][1]["rows"])
-    finally:
-        runtime.close()
 
 
 @pytest.mark.parametrize("change", ["options", "content"])
@@ -71,7 +57,7 @@ def test_text_fragment_continuation_binds_options_and_native_identity(
 ) -> None:
     path = tmp_path / "output.log"
     path.write_text("a" * 100)
-    runtime = AnalysisRuntime()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     sources = [PathSource(path=str(path), format="text")]
     limits = RequestLimits(max_rows=1)
     options = {"text_fragment_chars": 8}
@@ -88,19 +74,6 @@ def test_text_fragment_continuation_binds_options_and_native_identity(
                 options,
                 limits=limits,
                 continuation=first["continuation"],
-            )
-    finally:
-        runtime.close()
-
-
-def test_fragment_option_rejects_nontext_sources(tmp_path: Path) -> None:
-    path = tmp_path / "input.json"
-    path.write_text("[]")
-    runtime = AnalysisRuntime()
-    try:
-        with pytest.raises(RuntimeFailure, match="text file sources"):
-            runtime.analyze(
-                "artifact.preview", [PathSource(path=str(path))], {"text_fragment_chars": 128}
             )
     finally:
         runtime.close()

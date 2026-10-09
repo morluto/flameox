@@ -12,8 +12,6 @@ from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
     EvidenceSource,
-    ExperimentCase,
-    ExperimentDesign,
     PathSource,
     RequestLimits,
     RuntimeFailure,
@@ -122,106 +120,6 @@ def test_live_capture_keeps_capacity_reserved_until_unwind(
             await asyncio.gather(first, return_exceptions=True)
             result = await runtime.capture_and_analyze(target, "artifact.preview", limits=limits)
             assert result["capture"]["outcome"]["status"] == "succeeded"
-        finally:
-            first.cancel()
-            await asyncio.gather(first, return_exceptions=True)
-            runtime.close()
-
-    anyio.run(exercise)
-
-
-@pytest.mark.integration
-def test_explicit_preview_offset_cannot_turn_exhaustion_into_complete_evidence(
-    tmp_path: Path,
-) -> None:
-    artifact = tmp_path / "input.txt"
-    artifact.write_text("one\ntwo\n")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {"offset": 2})
-        assert failure.value.code == "INVALID_INPUT"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.process
-def test_preserved_capture_keeps_ancestor_cached_by_final_progress(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-        handles: list[str] = []
-
-        async def cache_ancestor(current: int, total: int, message: str) -> None:
-            if current == total:
-                result = runtime.analyze(
-                    "artifact.preview", [PathSource(path=str(runtime.scratch))], {}
-                )
-                handles.append(result["analysis_id"])
-
-        try:
-            await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, "-c", "print(1)"],
-                    cwd=str(tmp_path),
-                    provider_id="direct",
-                ),
-                "artifact.preview",
-                preserve=True,
-                progress=cache_ancestor,
-            )
-            assert handles
-            assert runtime.preserve_evidence(handles[0])["evidence_id"]
-        finally:
-            runtime.close()
-
-    anyio.run(exercise)
-
-
-@pytest.mark.process
-def test_written_capture_output_consumes_its_existing_reservation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("flameox.runtime.MAX_SESSION_SCRATCH_BYTES", 3072)
-
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-        first_written = asyncio.Event()
-        release = asyncio.Event()
-        target = CaptureTarget(
-            argv=[sys.executable, "-c", "print('x' * 511)"],
-            cwd=str(tmp_path),
-            provider_id="direct",
-        )
-
-        async def hold_second(current: int, total: int, message: str) -> None:
-            if current == 1:
-                first_written.set()
-                await release.wait()
-
-        first = asyncio.create_task(
-            runtime.capture_and_analyze(
-                target,
-                "artifact.preview",
-                experiment=ExperimentDesign(
-                    cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
-                    blocks=1,
-                    seed=1,
-                    metric="wall_time_ns",
-                    estimand="median_difference",
-                    practical_threshold=0,
-                ),
-                limits=RequestLimits(max_output_bytes=1024),
-                progress=hold_second,
-            )
-        )
-        try:
-            await asyncio.wait_for(first_written.wait(), 5)
-            result = await runtime.capture_and_analyze(
-                target, "artifact.preview", limits=RequestLimits(max_output_bytes=1024)
-            )
-            assert result["capture"]["outcome"]["status"] == "succeeded"
-            release.set()
-            await first
         finally:
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)

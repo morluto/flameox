@@ -11,6 +11,7 @@ import pytest
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CaptureTarget,
+    EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
     RequestLimits,
@@ -91,6 +92,16 @@ def test_explicit_workload_timeout_is_attributed_and_reopened(tmp_path: Path) ->
     try:
         manifest = reopened.read_evidence(evidence_id)
         projection = reopened.read_evidence_agent_projection(evidence_id)
+        replayed = reopened.analyze(
+            "artifact.preview",
+            [
+                EvidenceSource(
+                    kind="evidence", evidence_id=evidence_id, artifact_role="capture-0001/stdout"
+                )
+            ],
+            {},
+        )
+        assert replayed["blocks"][1]["rows"][0]["text"] == "before-timeout"
     finally:
         reopened.close()
     assert manifest["body"]["capture_request"]["target"]["budget"] == {
@@ -186,7 +197,7 @@ def test_unbudgeted_memray_capture_keeps_native_artifact_when_worker_times_out(
                     provider_id="memray",
                 ),
                 "memory.hotspots",
-                limits=RequestLimits(timeout_seconds=0.01, max_memory_bytes=16 * 1024**2),
+                limits=RequestLimits(timeout_seconds=0.01),
                 preserve=True,
             )
             return result, runtime.read_evidence(result["preserved"]["evidence_id"])

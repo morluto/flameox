@@ -182,7 +182,6 @@ def test_capture_oracle_gets_full_workload_logs_but_keeps_its_own_diagnostics(
             )
             execution = result["capture"]["executions"][0]
             assert execution["status"] == "succeeded"
-            assert execution["semantic_oracle"]["status"] == "passed"
             oracle_result = execution["semantic_oracle"]
             assert oracle_result["status"] == "passed"
             oracle_diagnostics = oracle_result["console_diagnostics"]

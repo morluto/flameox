@@ -110,11 +110,12 @@ provider-specific behavior in `providers/`, with shared format parsing in
 ## Testing Guidelines
 
 Pytest is configured with strict markers and configuration. Name files
-`test_<area>.py` and tests `test_<observable_behavior>`. Add regression tests
-near the affected component and prefer public behavior over assertions about
-private implementation. Use Hypothesis where invariants or input ranges matter.
-Coverage tracks branches in `flameox`; no fixed percentage is declared, but new
-behavior should include meaningful success and failure-path coverage.
+`test_<area>.py` and tests `test_<observable_behavior>`. Prefer proof through
+real end-to-end workflows, then integration behavior, then focused golden
+examples. Keep narrower tests only for contracts those workflows cannot prove;
+avoid tests that mirror implementation details. See [docs/testing.md](docs/testing.md)
+for current selections and known proof gaps. CI reports combined coverage from both test jobs
+without a percentage gate.
 
 ## Commit & Pull Request Guidelines
 

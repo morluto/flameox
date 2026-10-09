@@ -50,7 +50,6 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
             assert result["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
             assert result["capture"]["outcome"]["status"] == "succeeded"
             assert (tmp_path / "workload-runs.txt").read_text().splitlines() == ["run"]
-            assert result["analysis_id"] in runtime.analyses
 
             preserved = result.get("preserved") or runtime.preserve_evidence(result["analysis_id"])
             resource = runtime.read_evidence_agent_projection(preserved["evidence_id"])
@@ -153,7 +152,6 @@ def test_rejected_sparse_native_artifact_keeps_capture_failure_recoverable(
                 limits=RequestLimits(max_output_bytes=1024),
                 preserve=preserve,
             )
-            assert result["analysis_id"] in runtime.analyses
             preserved = result.get("preserved") or runtime.preserve_evidence(result["analysis_id"])
             resource = runtime.read_evidence_agent_projection(preserved["evidence_id"])
             assert resource["body"]["artifacts"] == []

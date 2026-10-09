@@ -421,7 +421,7 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
-                    argv=[sys.executable, "-c", "pass"],
+                    argv=[sys.executable, "-c", "value = 1\nassert value == 1"],
                     cwd=str(tmp_path),
                     provider_id="pyperf",
                     capture_arguments={
@@ -438,6 +438,12 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
             assert result["provider"]["id"] == "pyperf"
             assert result["blocks"][0]["values"]["measurement_count"] == 1
             assert result["inputs"][0]["format"] == "pyperf"
+            assert result["capture"]["executions"][0]["argv"] == [
+                sys.executable,
+                "-c",
+                "value = 1\nassert value == 1",
+            ]
+            assert result["capture"]["executions"][0]["status"] == "succeeded"
             assert result["capture"]["executions"][0]["capture_argv"][1:4] == [
                 "-m",
                 "pyperf",
@@ -449,39 +455,6 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
             assert {item["role"] for item in manifest["body"]["artifacts"]} == {
                 "capture-0001/benchmark",
             }
-        finally:
-            runtime.close()
-
-    anyio.run(exercise)
-
-
-@pytest.mark.process
-def test_pyperf_capture_preserves_multiline_target_argv(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(
-            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
-        )
-        try:
-            code = "value = 1\nassert value == 1"
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, "-c", code],
-                    cwd=str(tmp_path),
-                    provider_id="pyperf",
-                    capture_arguments={
-                        "processes": 1,
-                        "values": 1,
-                        "warmups": 0,
-                        "loops": 1,
-                        "min_time": 0.001,
-                        "name": "multiline",
-                    },
-                ),
-                "benchmark.summary",
-            )
-            assert result["provider"]["id"] == "pyperf"
-            assert result["capture"]["executions"][0]["argv"] == [sys.executable, "-c", code]
-            assert result["capture"]["executions"][0]["status"] == "succeeded"
         finally:
             runtime.close()
 

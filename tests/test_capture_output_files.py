@@ -38,55 +38,6 @@ def _preserved_data_files(runtime: AnalysisRuntime, evidence_id: str) -> dict[st
 
 
 @pytest.mark.process
-def test_capture_streams_preserve_exact_large_native_bytes_across_restart(tmp_path: Path) -> None:
-    stdout = b"out-" * 40_000
-    stderr = b"err-" * 40_000
-
-    async def exercise() -> tuple[str, dict[str, object]]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
-        try:
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[
-                        sys.executable,
-                        "-c",
-                        "import os; os.write(1, b'out-' * 40000); os.write(2, b'err-' * 40000)",
-                    ],
-                    cwd=str(tmp_path),
-                    provider_id="direct",
-                ),
-                "artifact.preview",
-                limits=RequestLimits(max_output_bytes=len(stdout) + len(stderr) + 1),
-                preserve=True,
-            )
-            execution = result["capture"]["executions"][0]
-            assert execution["status"] == "succeeded"
-            assert execution["output_streams"] == {
-                "stdout_bytes": len(stdout),
-                "stderr_bytes": len(stderr),
-                "stdout_complete": True,
-                "stderr_complete": True,
-                "io_error": False,
-            }
-            return result["preserved"]["evidence_id"], execution
-        finally:
-            runtime.close()
-
-    evidence_id, _execution = anyio.run(exercise)
-    reopened = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
-    try:
-        manifest = reopened.read_evidence(evidence_id)
-        assert manifest["body"]["capture_request"]["executions"][0]["output_streams"][
-            "stdout_bytes"
-        ] == len(stdout)
-        files = _preserved_data_files(reopened, evidence_id)
-        assert stdout in [path.read_bytes() for path in files.values()]
-        assert stderr in [path.read_bytes() for path in files.values()]
-    finally:
-        reopened.close()
-
-
-@pytest.mark.process
 def test_semantic_oracle_reads_full_capture_and_preserves_its_large_logs(tmp_path: Path) -> None:
     oracle_stdout = b"oracle-out-" * 8_000
     oracle_stderr = b"oracle-err-" * 8_000

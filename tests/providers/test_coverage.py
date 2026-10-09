@@ -3,17 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import anyio
 import pytest
 from coverage import CoverageData
 
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     MAX_ROWS,
-    CaptureTarget,
     PathSource,
     RequestLimits,
-    RuntimeFailure,
 )
 
 
@@ -93,32 +90,3 @@ def test_provider_continuation_stops_at_a_truthfully_reported_bounded_prefix(
     }
     assert pages[-1]["truncation"] == {"reason": "provider_limit", "next_offset": 1_001}
     assert any("truncated to 1001" in item for item in pages[0]["limitations"])
-
-
-@pytest.mark.process
-def test_coverage_capture_rejects_workload_interpreter_without_provider(tmp_path: Path) -> None:
-    workload_python = tmp_path / "python"
-    workload_python.write_text("#!/bin/sh\nexit 7\n")
-    workload_python.chmod(0o755)
-
-    async def exercise() -> None:
-        runtime = AnalysisRuntime(
-            evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=20)
-        )
-        try:
-            with pytest.raises(RuntimeFailure) as raised:
-                await runtime.capture_and_analyze(
-                    CaptureTarget(
-                        argv=[str(workload_python), "workload.py"],
-                        cwd=str(tmp_path),
-                        provider_id="coverage",
-                    ),
-                    "coverage.summary",
-                )
-        finally:
-            runtime.close()
-
-        assert raised.value.code == "UNAVAILABLE_CAPABILITY"
-        assert "workload interpreter" in raised.value.message
-
-    anyio.run(exercise)

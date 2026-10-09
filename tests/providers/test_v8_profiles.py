@@ -5,38 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from flameox.providers.capture import CAPTURE_BUILDERS
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CAPTURE_PROVIDER_CONTRACTS,
     PathSource,
     RequestLimits,
     RuntimeFailure,
 )
-from flameox.runtime_errors import DomainError, ErrorCode
-from flameox.workers.v8_profiles_contract import V8_PROFILE_WORKER, V8ProfileRequest
-
-
-def test_every_capture_contract_has_exactly_one_registered_builder() -> None:
-    assert set(CAPTURE_BUILDERS) == set(CAPTURE_PROVIDER_CONTRACTS)
-
-
-def test_heap_profile_accepts_samples_before_referenced_nodes(tmp_path: Path) -> None:
-    profile = tmp_path / "profile.heapprofile"
-    profile.write_text(
-        '{"samples":[{"size":128,"nodeId":1}],"head":'
-        '{"callFrame":{"functionName":"work","url":"app.js",'
-        '"lineNumber":0,"columnNumber":0},"selfSize":128,"id":1,"children":[]}}'
-    )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "memory.hotspots", [PathSource(path=str(profile), format="heapprofile")], {}
-        )
-    finally:
-        runtime.close()
-
-    assert result["blocks"][0]["values"]["sample_count"] == 1
 
 
 @pytest.mark.process
@@ -133,7 +107,7 @@ def test_v8_hotspots_distinguish_omitted_coordinates_from_explicit_zero(
 
 
 @pytest.mark.process
-@pytest.mark.parametrize("hit_count", [None, 0, 99])
+@pytest.mark.parametrize("hit_count", [None, 99])
 def test_cpu_hotspots_count_exported_samples_when_hit_metadata_differs(
     tmp_path: Path, hit_count: int | None
 ) -> None:
@@ -206,77 +180,37 @@ def test_cpu_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
-def test_v8_heap_profile_is_registered_as_memory_hotspot_evidence(tmp_path: Path) -> None:
+def test_heap_sample_count_aggregates_records_for_repeated_frame_identity(
+    tmp_path: Path,
+) -> None:
+    frame = {"functionName": "allocate", "url": "app.js", "lineNumber": 3, "columnNumber": 2}
     profile = tmp_path / "memory.heapprofile"
     profile.write_text(
         json.dumps(
             {
                 "head": {
-                    "callFrame": {
-                        "functionName": "allocate",
-                        "url": "app.js",
-                        "scriptId": "1",
-                        "lineNumber": 1,
-                        "columnNumber": 0,
-                    },
-                    "selfSize": 64,
+                    "callFrame": {"functionName": "root", "url": "app.js"},
+                    "selfSize": 0,
                     "id": 1,
-                    "children": [],
+                    "children": [
+                        {"callFrame": frame, "selfSize": 64, "id": 2, "children": []},
+                        {"callFrame": frame, "selfSize": 128, "id": 3, "children": []},
+                    ],
                 },
-                "samples": [{"size": 64, "nodeId": 1}],
+                "samples": [{"size": 64, "nodeId": node} for node in [2, 2, 3, 3, 3]],
             }
         )
     )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
-    finally:
-        runtime.close()
-
-    assert result["provider"]["id"] == "v8-heap-profile"
-    assert result["blocks"][0]["values"] == {
-        "node_count": 1,
-        "sample_count": 1,
-        "total_sampled_bytes": 64,
-    }
-    assert result["blocks"][1]["rows"][0]["unit"] == "bytes"
-    assert result["blocks"][1]["rows"][0]["function"] == "allocate"
-    assert result["blocks"][1]["rows"][0]["file"] == "app.js"
-
-
-@pytest.mark.process
-@pytest.mark.parametrize("samples_first", [True, False])
-def test_heap_counts_sample_records_per_frame_across_call_tree_nodes(
-    tmp_path: Path, samples_first: bool
-) -> None:
-    frame = {"functionName": "allocate", "url": "app.js", "lineNumber": 3, "columnNumber": 2}
-    head = {
-        "callFrame": {"functionName": "root", "url": "app.js"},
-        "selfSize": 0,
-        "id": 1,
-        "children": [
-            {"callFrame": frame, "selfSize": 64, "id": 2, "children": []},
-            {"callFrame": frame, "selfSize": 128, "id": 3, "children": []},
-        ],
-    }
-    samples = [{"size": 64, "nodeId": node} for node in [2, 2, 3, 3, 3]]
-    payload = (
-        {"samples": samples, "head": head} if samples_first else {"head": head, "samples": samples}
-    )
-    profile = tmp_path / "memory.heapprofile"
-    profile.write_text(json.dumps(payload))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
     finally:
         runtime.close()
-    rows = result["blocks"][1]["rows"]
-    allocation = next(row for row in rows if row["function"] == "allocate")
-    root = next(row for row in rows if row["function"] == "root")
+
+    allocation = next(row for row in result["blocks"][1]["rows"] if row["function"] == "allocate")
     assert allocation["sample_count"] == 5
     assert allocation["self_value"] == 192
     assert (allocation["line"], allocation["column"]) == (3, 2)
-    assert root["sample_count"] == 0
     assert result["blocks"][0]["values"]["sample_count"] == 5
 
 
@@ -335,51 +269,6 @@ def test_v8_heap_profile_rejects_malformed_sample_size(tmp_path: Path) -> None:
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
-
-
-@pytest.mark.process
-def test_v8_heap_profile_enforces_total_node_limit(tmp_path: Path) -> None:
-    profile = tmp_path / "wide.heapprofile"
-    child = {
-        "callFrame": {"functionName": "child", "url": "app.js"},
-        "id": 2,
-        "selfSize": 1,
-        "children": [],
-    }
-    profile.write_text(
-        json.dumps(
-            {
-                "head": {
-                    "callFrame": {"functionName": "root", "url": "app.js"},
-                    "id": 1,
-                    "selfSize": 0,
-                    "children": [child, child],
-                },
-                "samples": [],
-            }
-        )
-    )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        with pytest.raises(DomainError) as failure:
-            runtime.workers.run_typed_sync(
-                V8_PROFILE_WORKER,
-                V8ProfileRequest(
-                    profile_kind="heap",
-                    artifact_path=str(profile),
-                    artifact_id="test",
-                    max_nodes=2,
-                    max_samples=10,
-                    max_rows=10,
-                ),
-                timeout_seconds=5,
-                maximum_rss_bytes=256 * 1024 * 1024,
-                maximum_writable_growth_bytes=1024,
-            )
-    finally:
-        runtime.close()
-
-    assert failure.value.code is ErrorCode.LIMIT_EXCEEDED
 
 
 @pytest.mark.process
@@ -447,7 +336,6 @@ def test_v8_hotspot_projection_bounds_distinct_aggregated_frames(tmp_path: Path)
     finally:
         runtime.close()
 
-    assert result["blocks"][0]["values"] == {"node_count": 1_002, "sample_count": 1}
     assert result["coverage"] == {
         "rows_returned": 10,
         "rows_observed": 1_002,

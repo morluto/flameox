@@ -464,31 +464,6 @@ def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
 
 
 @pytest.mark.golden
-def test_pytest_rerun_outcome_is_flaky_attempt(tmp_path: Path) -> None:
-    events = tmp_path / "pytest.jsonl"
-    payloads = [
-        {"event": "test_collected", "nodeid": "test_flaky"},
-        {"event": "test_phase", "nodeid": "test_flaky", "phase": "setup", "outcome": "passed"},
-        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "rerun"},
-        {"event": "test_phase", "nodeid": "test_flaky", "phase": "call", "outcome": "passed"},
-        {"event": "test_phase", "nodeid": "test_flaky", "phase": "teardown", "outcome": "passed"},
-        {"event": "run_finished", "exitstatus": 0},
-    ]
-    events.write_text("\n".join(json.dumps(event) for event in payloads) + "\n")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze(
-            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
-        )
-    finally:
-        runtime.close()
-
-    assert result["blocks"][0]["values"]["flaky"] == 1
-    assert result["blocks"][1]["rows"][0]["classification"] == "flaky"
-    assert result["blocks"][1]["rows"][0]["failing_phase"] == "call"
-
-
-@pytest.mark.golden
 def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_runs(
     tmp_path: Path,
 ) -> None:

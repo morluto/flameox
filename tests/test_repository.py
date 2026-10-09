@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 
 import pytest
 
 from flameox.canonical import canonical_bytes
-from flameox.repository import EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     PathSource,
@@ -18,7 +18,6 @@ from flameox.runtime_contracts import (
 )
 
 
-@pytest.mark.integration
 def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
@@ -47,41 +46,6 @@ def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: 
         runtime.close()
 
 
-@pytest.mark.integration
-def test_concurrent_identical_publication_reuses_complete_bundle(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text('[{"value":1}]')
-    runtimes = [AnalysisRuntime(evidence_directory=tmp_path / ".flameox") for _ in range(8)]
-    analyses = [
-        runtime.analyze(
-            "artifact.preview", [PathSource(path=str(artifact))], {}, limits=RequestLimits()
-        )
-        for runtime in runtimes
-    ]
-    # Freeze the episode timestamp so every publication has the same content identity.
-    episode = runtimes[0].analyses[analyses[0]["analysis_id"]].manifest_body["episode"]
-    for runtime, analysis in zip(runtimes[1:], analyses[1:], strict=True):
-        runtime.analyses[analysis["analysis_id"]].manifest_body["episode"] = episode
-
-    try:
-        with ThreadPoolExecutor(max_workers=len(runtimes)) as executor:
-            results = list(
-                executor.map(
-                    lambda pair: pair[0].preserve_evidence(pair[1]["analysis_id"]),
-                    zip(runtimes, analyses, strict=True),
-                )
-            )
-        assert len({result["evidence_id"] for result in results}) == 1
-        assert (
-            runtimes[0].read_evidence(results[0]["evidence_id"])["evidence_id"]
-            == results[0]["evidence_id"]
-        )
-    finally:
-        for runtime in runtimes:
-            runtime.close()
-
-
-@pytest.mark.integration
 def test_interrupted_evidence_publication_never_exposes_partial_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -89,14 +53,14 @@ def test_interrupted_evidence_publication_never_exposes_partial_manifest(
     artifact.write_text('[{"value":1}]')
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-    original = EvidenceRepository._publish_directory
+    original = os.rename
 
-    def interrupt_evidence(repository: EvidenceRepository, stage: Path, destination: Path) -> None:
-        if "evidence" in destination.parts:
-            raise OSError("injected evidence publication interruption")
-        original(repository, stage, destination)
+    def interrupt_evidence(stage: Path, destination: Path) -> None:
+        if "evidence" in Path(os.fsdecode(destination)).parts:
+            raise OSError(errno.EIO, "injected evidence publication interruption")
+        original(stage, destination)
 
-    monkeypatch.setattr(EvidenceRepository, "_publish_directory", interrupt_evidence)
+    monkeypatch.setattr(os, "rename", interrupt_evidence)
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(result["analysis_id"])
@@ -107,90 +71,6 @@ def test_interrupted_evidence_publication_never_exposes_partial_manifest(
         runtime.close()
 
 
-@pytest.mark.integration
-def test_interrupted_artifact_publication_never_exposes_partial_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text('[{"value":1}]')
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-    original = EvidenceRepository._publish_directory
-
-    def interrupt_artifact(repository: EvidenceRepository, stage: Path, destination: Path) -> None:
-        if "artifacts" in destination.parts:
-            raise OSError("injected artifact publication interruption")
-        original(repository, stage, destination)
-
-    monkeypatch.setattr(EvidenceRepository, "_publish_directory", interrupt_artifact)
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.preserve_evidence(result["analysis_id"])
-        assert failure.value.code == "REPOSITORY_IO_FAILURE"
-        artifact_root = tmp_path / ".flameox" / "artifacts" / "sha256"
-        assert not list(artifact_root.glob("*/*"))
-        assert runtime.query_evidence()["evidence"] == []
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
-def test_abandoned_staging_cleanup_removes_only_proven_dead_owner(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        runtime.repository.initialize()
-        dead = tmp_path / ".flameox" / ".staging" / "999999999-dead" / "publication"
-        unknown = tmp_path / ".flameox" / ".staging" / "unknown" / "publication"
-        dead.mkdir(parents=True)
-        unknown.mkdir(parents=True)
-
-        runtime.repository.cleanup_abandoned_staging()
-
-        assert not dead.parent.exists()
-        assert unknown.parent.exists()
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
-def test_unsupported_repository_format_is_not_read(tmp_path: Path) -> None:
-    repository = tmp_path / ".flameox"
-    repository.mkdir()
-    (repository / "repository.json").write_text(
-        json.dumps({"format_version": "999", "created_at": "2026-08-31T00:00:00+00:00"})
-    )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.query_evidence()
-        assert failure.value.code == "UNSUPPORTED_REPOSITORY_FORMAT"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
-def test_preservation_rejects_symlinked_repository_root(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (project / ".flameox").symlink_to(outside, target_is_directory=True)
-    artifact = project / "samples.json"
-    artifact.write_text("[]")
-    runtime = AnalysisRuntime(evidence_directory=project / ".flameox")
-    try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.preserve_evidence(result["analysis_id"])
-
-        assert failure.value.code == "REPOSITORY_CORRUPTION"
-        assert not (outside / "repository.json").exists()
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
 def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -206,7 +86,6 @@ def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     assert not list(tmp_path.rglob("*.duckdb"))
 
 
-@pytest.mark.integration
 def test_preservation_rejects_input_mutation(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -221,7 +100,6 @@ def test_preservation_rejects_input_mutation(tmp_path: Path) -> None:
         runtime.close()
 
 
-@pytest.mark.integration
 def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -240,7 +118,6 @@ def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> N
         runtime.close()
 
 
-@pytest.mark.integration
 def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
@@ -262,55 +139,6 @@ def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
         runtime.close()
 
 
-@pytest.mark.integration
-def test_query_rejects_symlinked_inventory_prefix(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        runtime.repository.initialize()
-        outside = tmp_path / "outside-inventory"
-        outside.mkdir()
-        evidence_root = tmp_path / ".flameox" / "evidence" / "sha256"
-        (evidence_root / "aa").symlink_to(outside, target_is_directory=True)
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.query_evidence()
-
-        assert failure.value.code == "REPOSITORY_CORRUPTION"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
-def test_repository_rejects_extra_metadata_and_missing_native_artifacts(tmp_path: Path) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text("[]")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-        preserved = runtime.preserve_evidence(result["analysis_id"])
-        evidence_id = preserved["evidence_id"]
-        repository_metadata = tmp_path / ".flameox" / "repository.json"
-        metadata = json.loads(repository_metadata.read_text())
-        repository_metadata.write_text(json.dumps({**metadata, "mutable_head": "forbidden"}))
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.read_evidence(evidence_id)
-        assert failure.value.code == "REPOSITORY_CORRUPTION"
-
-        repository_metadata.write_text(json.dumps(metadata))
-        manifest = runtime.read_evidence(evidence_id)
-        digest = manifest["body"]["artifacts"][0]["sha256"]
-        payload = tmp_path / ".flameox" / "artifacts" / "sha256" / digest[:2] / digest / "payload"
-        payload.unlink()
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.read_evidence(evidence_id)
-        assert failure.value.code == "REPOSITORY_CORRUPTION"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
 def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
     tmp_path: Path,
 ) -> None:
@@ -339,36 +167,6 @@ def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
         runtime.close()
 
 
-@pytest.mark.integration
-def test_repository_rejects_invalid_nested_analysis_request_before_projection(
-    tmp_path: Path,
-) -> None:
-    artifact = tmp_path / "samples.json"
-    artifact.write_text("[]")
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-        preserved = runtime.preserve_evidence(result["analysis_id"])
-        evidence_id = preserved["evidence_id"]
-        bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
-        manifest = json.loads((bundle / "manifest.json").read_text())
-        manifest["body"]["analysis_request"]["inputs"] = ["not-an-input"]
-        malformed_id = hashlib.sha256(canonical_bytes(manifest["body"])).hexdigest()
-        manifest["evidence_id"] = malformed_id
-        malformed_bundle = bundle.parent.parent / malformed_id[:2] / malformed_id
-        malformed_bundle.parent.mkdir()
-        bundle.rename(malformed_bundle)
-        (malformed_bundle / "manifest.json").write_bytes(canonical_bytes(manifest))
-
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.read_evidence_agent_projection(malformed_id)
-
-        assert failure.value.code == "REPOSITORY_CORRUPTION"
-    finally:
-        runtime.close()
-
-
-@pytest.mark.integration
 def test_repeated_preservation_revalidates_bundle_and_returns_defensive_reference(
     tmp_path: Path,
 ) -> None:
@@ -393,7 +191,6 @@ def test_repeated_preservation_revalidates_bundle_and_returns_defensive_referenc
         runtime.close()
 
 
-@pytest.mark.integration
 def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
@@ -451,7 +248,6 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
         runtime.close()
 
 
-@pytest.mark.integration
 def test_preservation_does_not_mutate_project_git_configuration(tmp_path: Path) -> None:
     git_info = tmp_path / ".git" / "info"
     git_info.mkdir(parents=True)

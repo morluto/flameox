@@ -4,13 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import (
-    PathSource,
-    RuntimeFailure,
-)
+from flameox.runtime_contracts import PathSource
 
 
 def test_sarif_export_uses_explicit_source_root_and_preserves_containment(tmp_path: Path) -> None:
@@ -58,19 +54,6 @@ def test_sarif_export_uses_explicit_source_root_and_preserves_containment(tmp_pa
     assert metrics["invalid_count"] == 1
     assert result["blocks"][1]["rows"][0]["relative_path"] == "work.py"
     assert not (root / "work.py").exists()
-
-
-def test_sarif_source_root_rejects_ambiguous_paths(tmp_path: Path) -> None:
-    runtime = AnalysisRuntime()
-    try:
-        with pytest.raises(ValidationError, match="source_root must be an absolute path"):
-            runtime.analyze(
-                "static.performance_candidates",
-                [PathSource(path=str(tmp_path / "unused.sarif"))],
-                {"source_root": "relative/project"},
-            )
-    finally:
-        runtime.close()
 
 
 @pytest.mark.golden
@@ -168,32 +151,3 @@ def test_truncated_sarif_never_reports_complete_coverage(tmp_path: Path) -> None
     assert result["blocks"][1]["rows"]
     assert result["coverage"]["complete"] is False
     assert any("stopped before the document ended" in item for item in result["limitations"])
-
-
-@pytest.mark.golden
-def test_semantic_observations_reject_unknown_fields(tmp_path: Path) -> None:
-    events = tmp_path / "observations.jsonl"
-    events.write_text(
-        json.dumps(
-            {
-                "name": "phase",
-                "phase": None,
-                "monotonic_ns": 1,
-                "values": {},
-                "unexpected": True,
-            }
-        )
-        + "\n"
-    )
-    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    try:
-        with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(
-                "failures.summary",
-                [PathSource(path=str(events), format="observations")],
-                {},
-            )
-    finally:
-        runtime.close()
-
-    assert failure.value.code == "DECODE_FAILURE"

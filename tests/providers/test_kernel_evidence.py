@@ -282,7 +282,10 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> No
     assert result["blocks"][0]["values"] == {"selection_count": 1, "cache_hit_count": 0}
     row = result["blocks"][1]["rows"][0]
     assert row["function_name"] == "workload.kernel"
-    assert row["winner_config_id"] in {item["config_id"] for item in row["candidates"]}
+    winner = next(
+        item for item in row["candidates"] if item["config_id"] == row["winner_config_id"]
+    )
+    assert winner["config"] == _triton_event()["winner"]
 
 
 def test_native_triton_cache_preserves_quantiles_and_derives_lexicographic_winner(
@@ -320,7 +323,7 @@ def test_native_triton_cache_rejects_invalid_timing(tmp_path: Path) -> None:
     artifact.write_text(
         json.dumps({"key": [1], "configs_timings": [[{"kwargs": {}}, float("nan")]]})
     )
-    runtime = AnalysisRuntime()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
@@ -345,7 +348,7 @@ def test_native_triton_cache_preserves_integer_selection_order(
             }
         )
     )
-    runtime = AnalysisRuntime()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
     finally:
@@ -371,7 +374,7 @@ def test_triton_cache_bundle_keeps_distinct_native_paths_and_global_counts(
             )
         )
     (bundle / "compiled.cubin").write_bytes(b"not an analysis record")
-    runtime = AnalysisRuntime()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
             "triton.autotune",
@@ -395,7 +398,7 @@ def test_triton_compilation_without_autotuning_is_not_complete_negative_evidence
     tmp_path: Path,
 ) -> None:
     (tmp_path / "compiled.cubin").write_bytes(b"compiled")
-    runtime = AnalysisRuntime()
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure, match="No native Triton autotune caches"):
             runtime.analyze(

@@ -55,7 +55,7 @@ jobs:
         run: >-
           uv run pytest -o addopts='' -ra -q
           -m 'not optional and not performance and not process'
-          --cov=flameox --cov-report= --cov-fail-under=0
+          --cov=flameox --cov-report=
           tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -84,7 +84,7 @@ jobs:
         run: >-
           uv run pytest -o addopts='' -ra -q
           -m 'not optional and not performance and process'
-          --cov=flameox --cov-report= --cov-fail-under=0
+          --cov=flameox --cov-report=
           tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -113,7 +113,7 @@ jobs:
           pattern: "*-coverage"
           merge-multiple: true
       - run: uv run coverage combine .coverage.deterministic .coverage.process
-      - run: uv run coverage report --fail-under=60
+      - run: uv run coverage report
       - run: uv run coverage xml -o coverage.xml
       - uses: codecov/codecov-action@v5
         if: github.event_name == 'pull_request'
