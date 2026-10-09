@@ -320,9 +320,6 @@ class FlameoxServer(Server[AnalysisRuntime]):
     async def list_tools(self) -> list[types.Tool]:
         return [contract.project() for contract in self._tool_contracts]
 
-    async def list_resources(self) -> list[types.Resource]:
-        return []
-
     async def list_resource_templates(self) -> list[types.ResourceTemplate]:
         return [
             types.ResourceTemplate(
