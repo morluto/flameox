@@ -26,18 +26,9 @@ Neither is interpreted relative to server startup.
 
 ## Process model
 
-Capture retains bounded, memory-backed console diagnostics by default.
-Native artifacts remain useful when an investigation needs their contents; full
-console output is retained only when it is the requested evidence, an oracle
-requires it, or the caller explicitly requests it. Only that full-output case
-needs a disk-backed console sink. Preservation controls durability, not an
-implicit expansion of what is collected.
-
-`DirectTarget.budget` owns optional workload time and sampled process-tree RSS
-controls. Absent values impose neither a workload deadline nor an RSS cap.
-Capture and semantic oracles use that budget; worker and conversion protection
-continues to use `RequestLimits`. Storage bounds and cancellation are independent
-of both. There is no hidden inheritance from decoder limits to trusted workloads.
+Console retention and workload budgets are defined in
+[storage and evidence](storage-and-evidence.md) and
+[runtime safety](runtime-safety.md); those documents own their limits and failure semantics.
 
 `AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch artifacts
 (conversions and materialized evidence), and least-recently-used session analysis cache.

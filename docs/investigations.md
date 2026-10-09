@@ -136,7 +136,7 @@ may expire earlier when the bounded session cache evicts it and must not appear 
 provider/input identity, data files, coverage, limitations, and episode time.
 
 Preservation is optional but required for conclusions another person or agent
-must reproduce later. The evidence resource exposes the canonical manifest;
+must reproduce later. The evidence resource exposes a redacted projection of the canonical manifest;
 native payloads remain local files addressed by digest.
 
 ## Comparisons

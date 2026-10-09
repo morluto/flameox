@@ -22,19 +22,13 @@ sandbox.
 
 Capture and analysis run inside the live MCP request. Progress uses the request
 context. Cancellation propagates to the broker, which terminates the process
-group and settles bounded output readers before unwinding. No operation can be
-polled, resumed, or recovered after restart.
+group and settles bounded output readers before unwinding. In-progress work cannot be polled or
+resumed after restart. Analysis continuations require available inputs with matching identities
+and analysis arguments; they do not resume execution.
 
-After exceptional execution, the broker also closes the asyncio subprocess
-transport while the loop remains active. On the tested CPython 3.12 runtime,
-`Process` retains that transport privately; leaving interrupted pipes for its
-destructor can attempt callbacks on a closed loop. This is an isolated
-implementation dependency, not a public `Process.close()` contract. The upstream
-[transport contract](https://docs.python.org/3.12/library/asyncio-protocol.html#asyncio.SubprocessTransport.close)
-closes pipes and kills a still-running subprocess. The broker already owns
-termination and reader settlement before this close. Calling `communicate()` to
-collect an unbounded remainder would conflict with bounded diagnostics and could
-wait for inherited pipe writers; it is not used as the recovery path.
+The broker settles output readers and closes subprocess transports while the event loop remains
+active. It does not collect an unbounded remainder during recovery: that could exceed diagnostic
+bounds or wait for inherited pipe writers.
 
 The broker shields asynchronous finalization from AnyIO cancellation scopes; callers do not
 detach or shield broker work themselves. Worker sessions retain their job directory until their
@@ -52,14 +46,9 @@ context rather than substituting a distant deadline. The observed-process backen
 likewise skips deadline comparisons when no budget was selected. Cleanup grace
 periods and reader-settlement bounds remain finite; they are not workload budgets.
 
-Writable-root and staging-size baselines are measured before subprocess launch,
-not when the asynchronous observer first runs. Otherwise an early workload write
-could be mistaken for pre-existing data. Growth enforcement remains sampled;
-the baseline is not an atomic filesystem snapshot or a strict disk quota.
-Process completion wakes the observer for a final persistent-output check, even
-if the process exited before the first periodic sample. Final disk checks do not
-invalidate an RSS peak already observed while the process was alive; a process
-that exited without any RSS sample still reports that metric as unavailable.
+Writable-root growth checks account for the pre-launch baseline and perform a final persistent-output
+check after process exit. Enforcement is sampled, not an atomic filesystem snapshot or strict disk
+quota. RSS remains unavailable when the process exits without a sample.
 
 Synchronous adapters running in an AnyIO worker thread return broker execution to the
 originating request's event loop and cancellation scope. They do not create a second event loop
@@ -108,14 +97,14 @@ checks are part of the capture request rather than a separate plan or preflight 
 
 ## Input and output bounds
 
-Capture console retention is independent of its response page. Default diagnostics
-drain both streams while retaining bounded in-memory prefixes and counting observed
-omissions; console verbosity alone does not terminate that mode. Full-output
-collection uses request-owned disk files and the existing combined output ceiling.
-Native artifact growth and decoder bounds still apply. Workload time/RSS budgets
-are optional fields on `target.budget`; absent values do not inherit decoder
-limits. The same explicit budget applies separately to each capture and oracle.
-Cancellation and cleanup remain mandatory.
+Console retention modes and omission accounting are defined in
+[storage and evidence](storage-and-evidence.md). Full-output collection uses request-owned disk
+files and the existing combined output ceiling. Native artifact growth and decoder bounds still
+apply. Workload time/RSS budgets are optional fields on `target.budget`; absent values do not inherit
+decoder limits. An explicit timeout and sampled process-tree RSS cap (including the collector) apply
+separately to each capture invocation and semantic oracle, not to the experiment as a whole. RSS is
+best-effort rather than an OS quota. Timeout and memory termination report the selected budget, and
+cancellation and cleanup remain mandatory even when no budget is set.
 
 - analysis accepts 1-32 sources and at most 1,000 rows per call;
 - pages retain complete selected rows and capture provenance without a response-byte ceiling;

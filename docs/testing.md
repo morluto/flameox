@@ -24,7 +24,7 @@ same boundary; avoid repeating summary fields across equivalent fixtures.
 There is no unit-test marker. The default pytest selection excludes optional
 provider and performance tests, while process tests remain included. CI divides
 the default suite into deterministic and process-boundary jobs and reports their
-combined coverage. The default local suite is:
+combined branch coverage without a percentage gate. The default local suite is:
 
 ```console
 uv run pytest -q
@@ -38,11 +38,9 @@ uv run pytest -o addopts='' -m golden -q
 uv run pytest -o addopts='' -m performance --durations=0
 ```
 
-The real MCP stdio test checks the complete current catalog of 50 direct tools
-(26 analysis, 20 capture, and 4 lifecycle), including schemas and examples. The
-older `inspect_capabilities`, `analyze`, and `capture_and_analyze` surface has
-been replaced. Keep transport tests aligned with the current catalog rather
-than encoding an old tool count or wrapper contract.
+The real MCP stdio workflow checks the catalog against the capability registry,
+including advertised schemas, examples, and result validation. Derive expected
+tools from that registry rather than hard-coding a count or a removed interface.
 
 A separate real stdio workflow starts with reduced server ceilings and verifies inherited defaults,
 pre-execution limit rejection, and exact preservation/replay of lower request limits. Schema
@@ -71,8 +69,7 @@ Known proof gaps include:
 - A managed dependency reconnect branch and live package installation remain
   unproved.
 - Vendor tools, optional hardware, permissions, and other platforms are not
-  exercised by the ordinary CI suite. Node CPU and heap stdio captures were
-  manually proved, but there is no retained live Node capture test.
+  exercised by the ordinary CI suite. There is no retained live Node capture test.
 
 Provider tests should identify their actual artifact or host requirement. A
 skip because a provider or host capability is unavailable is not provider

@@ -93,7 +93,8 @@ fields such as continuations and preservation handles are described at the MCP b
 
 Capture tools execute the target once by default. When present, `experiment` contains cases, blocks,
 seed, metric, estimand, threshold, and an optional oracle. Experiment-capable requests also accept
-null. There is no separate execution-mode field.
+null. There is no separate execution-mode field. Experiment behavior and interpretation are defined
+in [investigations and evidence quality](investigations.md).
 
 Successful calls keep the complete validated result in `structuredContent`. Their text block is a
 short compatibility summary with the capability, completion or truncation state, session handle,
@@ -246,21 +247,14 @@ A changed input cannot reuse a continuation. Tokens issued by older path-bound i
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
-For oversized text lines, the `artifact.preview` analyze request also accepts
-`options: {"text_fragment_chars": 1024}` (1–4,096 decoded characters per fragment).
-This opt-in mode requires text files and counts fragment rows instead of lines;
-start a fresh page when switching modes. Rows carry one-based `line`, zero-based
-`fragment` within that line, `text`, and `line_terminated` (true only for a fragment
-ending in LF). Text retains LF and CR characters. An unterminated final line stays
-`line_terminated=false` even when coverage is complete. UTF-8 decoding replaces
-invalid byte sequences; fragments and offsets are not byte-exact slices. Original
-native bytes remain unchanged and can be preserved with the analysis handle.
-Continuations bind fragment size as well as the native source identity. Fragment mode provides a
-smaller view of long lines; without it, each preview row contains one complete line.
-
-The fragment reader uses Python's bounded
-[text `readline(size)`](https://docs.python.org/3.12/library/io.html#io.TextIOBase.readline)
-and explicit LF newline handling; it does not accumulate a whole oversized line.
+For oversized text lines, `artifact.preview` accepts the top-level
+`text_fragment_chars` field (1–4,096 decoded characters per fragment). It requires text sources,
+counts fragments instead of lines, and is bound into continuation identity. Start a fresh page when
+switching modes. Fragment rows preserve line and fragment positions; decoding replaces invalid
+UTF-8, so fragments are not byte-exact slices. Each row has one-based `line`, zero-based `fragment`,
+`text`, and `line_terminated`, which is true only when that fragment ends in LF. LF and CR are
+retained; a final line without LF remains unterminated even at end-of-file. Original native bytes
+remain unchanged. The reader uses bounded line reads.
 
 JSON preview traverses the document once in document order. A root array yields its elements;
 a root scalar yields one value row. At the root object, arrays yield section rows, scalar fields
@@ -270,8 +264,7 @@ of the document; only a complete preview has validated JSON through end-of-file.
 
 Decoded offsets must be integers within the available bounded population. Negative offsets and
 offsets at or beyond the end fail with `INVALID_INPUT`; they never use Python slicing semantics or
-produce empty complete evidence. Continuation tests cover wrong-request, changed-input, negative,
-non-integer, and beyond-end cases.
+produce empty complete evidence.
 
 Projection providers may expose a bounded prefix when their native reader cannot
 resume safely. Such results keep `coverage.complete=false`, identify
@@ -298,17 +291,9 @@ numeric strings and booleans for integer fields; integral JSON numbers such as `
 
 ## Capture
 
-Capture retains bounded console diagnostics by default, with
-explicit omission counts. Full console retention is reserved for process-output
-evidence, semantic-oracle inputs, or an explicit caller request; only that mode
-requires disk backing. Requesting preservation makes selected evidence durable
-but does not silently request full logs. Set `target.console_output` to `full`
-(CLI: `--console-output full`) for explicit retention; the default is `diagnostics`.
-An oracle's own output remains diagnostic unless `full` is explicitly selected.
-Diagnostics retain at most 4,096 bytes per stream, lowered by the provenance
-budget, with UTF-8 replacement decoding. `console_diagnostics` reports observed,
-retained, and omitted byte counts and stream completeness; full-output metadata
-is reported under `output_streams`. Omitted bytes cannot be recovered later.
+Capture console retention and preservation semantics are defined in
+[storage and evidence](storage-and-evidence.md). MCP and CLI expose the same
+`target.console_output` choice (`diagnostics` by default or `full`).
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields appear directly beside
@@ -322,15 +307,8 @@ validates those projected typed fields before execution. Shell command strings a
 {"budget": {"timeout_seconds": 600, "max_memory_bytes": 8589934592}}
 ```
 
-Both fields default to null: no Flameox workload deadline or RSS cap. An explicit
-time budget applies separately to each capture invocation and each semantic
-oracle; it is not an experiment-wide deadline. RSS covers the sampled process
-tree, including a collector, and is best-effort rather than an OS quota. Timeout
-and memory termination report the configured workload budget, including oracle
-failures. Request cancellation and descendant cleanup remain active without a
-budget. Client timeouts, native-tool limits, and operating-system limits still
-apply. Decoder limits are not workload ceilings and cannot be raised through
-`target.budget`.
+Both fields default to null. The workload budget's scope, observations, and limits are described in
+[runtime safety](runtime-safety.md).
 
 Provider output formats are compared with the requested capability before scratch allocation or
 execution. Statically incompatible pairs fail with the declared formats and compatible capture
@@ -344,15 +322,11 @@ preservation publishes the native artifacts even if immediate analysis fails; th
 reports separate capture execution state and a typed `analysis_failure`. An analysis failure is
 never converted into empty successful evidence.
 
-Adding `experiment` runs 2-16 cases across 1-100 blocks with a seed, metric, estimand,
-practical threshold, and optional semantic-oracle argv. Flameox evaluates
-`wall_time_ns` with a paired `median_difference` or `mean_difference`, reports
-eligible blocks and a deterministic percentile interval when at least three
-blocks survive capture/oracle validation, and classifies the effect against the
-declared threshold. Work is not detached; the request receives progress and owns
-cancellation.
-The experiment's `point_estimate_classification` is descriptive; its `decision_basis` is explicit
-on the metrics block. It does not claim confidence-qualified improvement or equivalence.
+An `experiment` runs 2–16 cases across 1–100 blocks. Flameox evaluates
+`wall_time_ns` with a paired `median_difference` or `mean_difference`. The result's estimate and
+classification are descriptive; experiment limits and interpretation are defined in
+[investigations and evidence quality](investigations.md). Work remains owned by this request and
+supports progress and cancellation.
 
 Capture `outcome` is computed from every execution and retains exact success/failure counts.
 MCP error classification consumes that outcome, and every execution record remains available in
@@ -390,16 +364,21 @@ needed for a retry; an unavailable system provider returns external setup guidan
 
 ## CLI
 
-The retained surface is:
+The command surface is:
 
 ```text
 flameox setup
 flameox mcp serve [--limits JSON]
 flameox mcp inspect
-flameox analyze [--limits JSON] [--continuation TOKEN] [--preserve]
-flameox capture [--limits JSON] [--workload-budget JSON] [--experiment JSON] [--preserve] -- <argv...>
+flameox analyze CAPABILITY_ID [PATH...] [OPTIONS]
+flameox capture [OPTIONS] -- <argv...>
 flameox evidence query|show|location
 ```
+
+Analysis options include `--evidence`, `--arguments`, `--continuation`, `--limits`, and either
+`--preserve` or `--rescue-to`. Capture requires `--provider` and accepts `--capability`, `--cwd`,
+`--capture-arguments`, `--analysis-arguments`, `--console-output`, `--workload-budget`,
+`--experiment`, `--limits`, and either `--preserve` or `--rescue-to`.
 
 `--limits` validates the existing `RequestLimits` JSON contract and sets startup
 bounds for analysis and storage in that invocation. Its `timeout_seconds` and
