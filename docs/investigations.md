@@ -49,8 +49,10 @@ correctness through `kernel.validation` and `kernel.compare` analysis, checks ha
 it does not generate kernels, wrap compilers, or decide which optimization to implement.
 
 The runtime accepts `wall_time_ns` and paired `median_difference` or
-`mean_difference`. Each non-baseline case is compared with the first declared
-case within the same blocks. Failed or oracle-invalid pairs are excluded and
+`mean_difference`. This metric is the complete invoked capture process's wall time, including
+collector startup and overhead. Native per-sample benchmark measurements remain separate evidence.
+Each non-baseline case is compared with the first declared case within the same blocks.
+Failed or oracle-invalid pairs are excluded and
 reported as limitations; fewer than three eligible pairs produce a descriptive
 estimate without a confidence interval. `point_estimate_classification` describes only the
 observed estimate against the practical margin, with `decision_basis=descriptive_point_estimate`

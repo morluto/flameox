@@ -882,8 +882,14 @@ class EvidenceRepository:
             return False
         if capability_id is not None and body.capability_id != capability_id:
             return False
-        if provider_id is not None and body.provider.id != provider_id:
-            return False
+        if provider_id is not None:
+            analysis_provider_matches = body.provider.id == provider_id
+            capture_provider_matches = (
+                body.capture_request is not None
+                and body.capture_request.target.provider_id == provider_id
+            )
+            if not (analysis_provider_matches or capture_provider_matches):
+                return False
         if input_sha256 is not None and all(item.sha256 != input_sha256 for item in body.inputs):
             return False
         created_at = datetime.fromisoformat(body.episode.created_at)

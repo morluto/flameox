@@ -248,7 +248,13 @@ class QueryArguments(StrictModel):
         max_length=160,
         description="Current or historical capability ID stored in immutable evidence.",
     )
-    provider_id: str | None = None
+    provider_id: str | None = Field(
+        default=None,
+        description=(
+            "Current or historical analysis provider ID, or the capture collector ID "
+            "recorded in capture evidence."
+        ),
+    )
     input_sha256: str | None = Field(default=None, pattern=LOWERCASE_SHA256_PATTERN)
     created_after: AwareDatetime | None = Field(
         default=None, description="Inclusive lower creation bound as a timezone-aware RFC3339 date."

@@ -513,7 +513,13 @@ def capture(
 @evidence_app.command("query")
 def evidence_query(
     capability_id: Annotated[str | None, typer.Option("--capability")] = None,
-    provider_id: Annotated[str | None, typer.Option("--provider")] = None,
+    provider_id: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Match the analysis provider ID or the capture collector ID.",
+        ),
+    ] = None,
     input_sha256: Annotated[str | None, typer.Option("--input-sha256")] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200)] = 50,
     cursor: Annotated[str | None, typer.Option("--cursor")] = None,

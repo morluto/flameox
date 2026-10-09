@@ -15,10 +15,7 @@ from mcp_types import TextContent, TextResourceContents
 from flameox.mcp.server import FlameoxServer
 from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import (
-    MAX_ROWS,
-    PathSource,
-)
+from flameox.runtime_contracts import MAX_ROWS
 
 
 @pytest.mark.process
@@ -154,41 +151,86 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
     anyio.run(exercise)
 
 
-def test_mcp_query_returns_an_exact_next_page(tmp_path: Path) -> None:
+@pytest.mark.integration
+def test_mcp_query_filters_providers_and_returns_exact_next_pages(tmp_path: Path) -> None:
+    artifact = tmp_path / "provider-filter.json"
+    artifact.write_text('[{"value": 1}]')
     store = tmp_path / ".flameox"
-    runtime = AnalysisRuntime(evidence_directory=store)
-    try:
-        for index in range(2):
-            artifact = tmp_path / f"query-{index}.json"
-            artifact.write_text(json.dumps([{"value": index}]))
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
-            runtime.preserve_evidence(result["analysis_id"])
-    finally:
-        runtime.close()
 
     async def exercise() -> None:
         async with Client(FlameoxServer(evidence_directory=store), raise_exceptions=True) as client:
-            first = await client.call_tool(
-                "query_evidence", {"capability_id": "artifact.preview", "page_size": 1}
+            analyzed = await client.call_tool(
+                "preview_artifact",
+                {"sources": [{"kind": "path", "path": str(artifact)}]},
             )
-            next_page = first.structured_content["next_page"]
-            second = await client.call_tool(next_page["tool"], next_page["arguments"])
+            analyzed_evidence = await client.call_tool(
+                "preserve_evidence", {"analysis_id": analyzed.structured_content["analysis_id"]}
+            )
+            analysis_evidence_id = analyzed_evidence.structured_content["evidence_id"]
 
-            first_summary = first.content[0]
-            second_summary = second.content[0]
+            capture_ids: list[str] = []
+            for _ in range(2):
+                captured = await client.call_tool(
+                    "capture_artifact_preview",
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", "print('captured')"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "preserve": True,
+                    },
+                )
+                assert captured.is_error is False
+                capture_ids.append(captured.structured_content["preserved"]["evidence_id"])
+
+            all_evidence = await client.call_tool("query_evidence", {})
+            records = all_evidence.structured_content["evidence"]
+            by_id = {item["evidence_id"]: item for item in records}
+            analysis_provider_id = by_id[analysis_evidence_id]["provider"]["id"]
+
+            flameox_matches = await client.call_tool(
+                "query_evidence", {"provider_id": analysis_provider_id, "page_size": 10}
+            )
+            direct_first = await client.call_tool(
+                "query_evidence",
+                {"provider_id": "direct", "capability_id": "artifact.preview", "page_size": 1},
+            )
+            next_page = direct_first.structured_content["next_page"]
+            assert next_page is not None
+            direct_second = await client.call_tool(next_page["tool"], next_page["arguments"])
+            assert next_page["arguments"]["provider_id"] == "direct"
+            assert next_page["arguments"]["capability_id"] == "artifact.preview"
+            assert next_page["arguments"]["page_size"] == 1
+            first_summary = direct_first.content[0]
             assert isinstance(first_summary, TextContent)
-            assert isinstance(second_summary, TextContent)
-            assert "Evidence query partial" in first_summary.text
             assert "exact next_page arguments" in first_summary.text
-            assert "Evidence query complete" in second_summary.text
 
-        assert next_page["arguments"]["capability_id"] == "artifact.preview"
-        assert next_page["arguments"]["page_size"] == 1
-        assert second.structured_content.get("next_page") is None
-        assert (
-            first.structured_content["inventory_digest"]
-            == second.structured_content["inventory_digest"]
-        )
+            changed_filter = await client.call_tool(
+                "query_evidence",
+                {
+                    **next_page["arguments"],
+                    "provider_id": analysis_provider_id,
+                },
+            )
+            unknown = await client.call_tool(
+                "query_evidence", {"provider_id": "provider-that-does-not-exist"}
+            )
+
+        assert {item["evidence_id"] for item in flameox_matches.structured_content["evidence"]} == {
+            analysis_evidence_id,
+            *capture_ids,
+        }
+        assert {
+            item["evidence_id"]
+            for item in direct_first.structured_content["evidence"]
+            + direct_second.structured_content["evidence"]
+        } == set(capture_ids)
+        assert direct_second.structured_content["next_page"] is None
+        assert changed_filter.is_error is True
+        assert changed_filter.structured_content["code"] == "INVALID_INPUT"
+        assert unknown.structured_content["match_status"] == "no_matches"
+        assert unknown.structured_content["evidence"] == []
 
     anyio.run(exercise)
 
@@ -233,6 +275,12 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             expired = await restarted.call_tool("preserve_evidence", {"analysis_id": analysis_id})
             assert expired.is_error is True
             assert expired.structured_content["code"] == "EXPIRED_SESSION_ANALYSIS"
+            assert expired.structured_content["next_action"]["kind"] == "operator_action"
+            assert "query_evidence" in expired.structured_content["next_action"]["message"]
+            assert (
+                "analysis_id alone cannot recover"
+                in expired.structured_content["next_action"]["message"]
+            )
             resource = await restarted.read_resource(f"flameox://evidence/{evidence_id}")
             content = resource.contents[0]
             assert isinstance(content, TextResourceContents)

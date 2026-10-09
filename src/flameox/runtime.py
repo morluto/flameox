@@ -122,6 +122,11 @@ MAX_SESSION_PROJECTION_BYTES = 16 * 1024 * 1024
 MAX_SESSION_RESCUES = 64
 MAX_SESSION_SCRATCH_BYTES = 1024**3
 MAX_SESSION_SCRATCH_FILES = 8192
+_EXPIRED_ANALYSIS_REMEDIATION = (
+    "Use query_evidence to find preserved evidence and reanalyze it, or rerun the original "
+    "analysis or capture from its source artifacts. The analysis_id alone cannot recover "
+    "expired session data.",
+)
 
 
 @dataclass(slots=True)
@@ -1798,7 +1803,9 @@ class AnalysisRuntime:
         cached = self.analyses.get(analysis_id)
         if cached is None:
             raise RuntimeFailure(
-                "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
+                "EXPIRED_SESSION_ANALYSIS",
+                "The session analysis is missing or expired",
+                remediation=_EXPIRED_ANALYSIS_REMEDIATION,
             )
         if cached.preserved is not None:
             try:
@@ -1923,7 +1930,9 @@ class AnalysisRuntime:
         cached = self.analyses.get(analysis_id)
         if cached is None and previous is None:
             raise RuntimeFailure(
-                "EXPIRED_SESSION_ANALYSIS", "The session analysis is missing or expired"
+                "EXPIRED_SESSION_ANALYSIS",
+                "The session analysis is missing or expired",
+                remediation=_EXPIRED_ANALYSIS_REMEDIATION,
             )
         protected = self._protected_sources.copy()
         try:
@@ -2077,6 +2086,7 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "EXPIRED_SESSION_ANALYSIS",
                 "The session analysis is missing and the rescued evidence is unavailable",
+                remediation=_EXPIRED_ANALYSIS_REMEDIATION,
             )
         stage_name = f".flameox-rescue-{secrets.token_hex(12)}"
         stage = selected.parent / stage_name
@@ -3003,7 +3013,18 @@ class AnalysisRuntime:
         by_case_and_block = {(str(item["case"]), int(item["block"])): item for item in executions}
         baseline = experiment.cases[0].name
         rows: list[dict[str, Any]] = []
-        limitations: list[str] = []
+        limitations = [
+            "Experiment wall_time_ns measures the complete capture process, including collector "
+            "startup and overhead. Native benchmark sample metrics remain separate."
+        ]
+        if experiment.semantic_oracle is not None and any(
+            item["returncode_scope"] == "collector" for item in executions
+        ):
+            limitations.append(
+                "The semantic oracle receives capture-process console files. Wrapped collectors "
+                "may supply collector-only diagnostics; validate workload-owned results "
+                "when needed."
+            )
         for candidate_index, candidate in enumerate(experiment.cases[1:], 1):
             differences: list[float] = []
             eligible_blocks = 0
@@ -3069,6 +3090,10 @@ class AnalysisRuntime:
                     "values": {
                         "experiment_metric": experiment.metric,
                         "experiment_estimand": experiment.estimand,
+                        "experiment_timing_scope": "capture_process_wall_time",
+                        "semantic_oracle_input_scope": "capture_process_console"
+                        if experiment.semantic_oracle is not None
+                        else None,
                         "decision_basis": "descriptive_point_estimate",
                         "baseline_case": baseline,
                         "comparison_count": len(rows),

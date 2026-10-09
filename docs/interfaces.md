@@ -366,8 +366,11 @@ are individually selectable from the evidence resource.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
 its environment overrides the target environment. Each block randomizes case order from the
 declared seed. The semantic oracle runs after every successful capture in that case environment;
-`FLAMEOX_CAPTURE_STDOUT` and `FLAMEOX_CAPTURE_STDERR` identify its captured files, and a nonzero
-exit excludes the corresponding case-block observation from paired comparison.
+`FLAMEOX_CAPTURE_STDOUT` and `FLAMEOX_CAPTURE_STDERR` identify the invoked capture process's
+console files. Wrapping collectors such as pyperf may emit summary-only console output. Use
+workload-owned result files or another independent semantic check when that collector suppresses
+workload output. A nonzero exit excludes the corresponding case-block observation from paired
+comparison.
 
 Comparison capabilities consume explicit artifacts; they do not capture their inputs. A caller captures
 representative baseline and candidate summaries separately, preserves them when durable provenance

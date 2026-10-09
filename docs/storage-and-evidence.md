@@ -118,7 +118,9 @@ is provably dead.
 `query_evidence` sorts the manifest inventory deterministically and computes an
 inventory digest before filtering. A continuation is bound to that inventory;
 mutation makes it stale rather than silently changing the page. Filters cover
-evidence kind, capability, provider, input digest, and time bounds.
+evidence kind, capability, provider, input digest, and time bounds. The provider
+filter matches either the analysis provider recorded in the manifest or, for
+capture evidence, the capture collector ID recorded in its target provenance.
 
 Cursor offsets are strict non-negative integers and must identify an item inside the bound
 inventory. An offset at or beyond the inventory end is invalid rather than an empty successful

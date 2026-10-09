@@ -292,6 +292,12 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
             assert result["blocks"][-2]["values"]["decision_basis"] == (
                 "descriptive_point_estimate"
             )
+            assert result["blocks"][-2]["values"]["experiment_timing_scope"] == (
+                "capture_process_wall_time"
+            )
+            assert result["blocks"][-2]["values"]["semantic_oracle_input_scope"] == (
+                "capture_process_console"
+            )
             if estimate is None:
                 expected = "inconclusive"
             elif abs(estimate) <= 0:
