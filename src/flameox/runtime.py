@@ -3325,7 +3325,7 @@ class AnalysisRuntime:
         sizes: dict[Path, int] = {}
         for item in self.scratch.rglob("*"):
             try:
-                metadata = item.stat()
+                metadata = item.lstat()
             except FileNotFoundError:
                 continue  # Active workloads may remove temporary files during this snapshot.
             if stat.S_ISREG(metadata.st_mode):

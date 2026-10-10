@@ -190,7 +190,13 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
-def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "create_loop",
+    [False, pytest.param(True, marks=pytest.mark.skipif(os.name == "nt", reason="POSIX symlink"))],
+)
+def test_direct_capture_reports_progress_and_preserves_native_output(
+    tmp_path: Path, create_loop: bool
+) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(
             evidence_directory=tmp_path / ".flameox", limits=RequestLimits(timeout_seconds=10)
@@ -203,7 +209,17 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(
-                    argv=[sys.executable, "-c", "print('captured')"],
+                    argv=[
+                        sys.executable,
+                        "-c",
+                        (
+                            "from pathlib import Path; "
+                            f"Path({str(runtime.scratch / 'loop')!r}).symlink_to('loop'); "
+                            "print('captured')"
+                            if create_loop
+                            else "print('captured')"
+                        ),
+                    ],
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
