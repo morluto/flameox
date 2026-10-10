@@ -18,7 +18,9 @@ def _handle(request: PstatsWorkerRequest, _job_root: Path) -> PstatsWorkerResult
         _measurements(values[:4])
         if not isinstance(values[4], dict):
             raise ValueError("pstats callers must be an object")
-        for edge in values[4].values():
+        for caller, edge in values[4].items():
+            if caller not in stats:
+                raise ValueError("pstats caller does not reference a recorded function")
             _edge_values(edge)
     if request.projection == "call_graph":
         return _call_graph(request, stats)

@@ -93,7 +93,15 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
 @pytest.mark.process
 @pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
 @pytest.mark.parametrize(
-    "invalid", ["self_nan", "cumulative_inf", "negative_count", "fractional_count", "edge_nan"]
+    "invalid",
+    [
+        "self_nan",
+        "cumulative_inf",
+        "negative_count",
+        "fractional_count",
+        "edge_nan",
+        "unresolved_caller",
+    ],
 )
 def test_pstats_rejects_invalid_measurements_before_projection(
     tmp_path: Path, capability: str, invalid: str
@@ -108,8 +116,10 @@ def test_pstats_rejects_invalid_measurements_before_projection(
         values[0] = -1
     elif invalid == "fractional_count":
         values[1] = 1.5
+    elif invalid == "edge_nan":
+        values[4] = {("app.py", 1, "work"): (1, 1, float("nan"), 0.2)}
     else:
-        values[4] = {("caller.py", 1, "caller"): (1, 1, float("nan"), 0.2)}
+        values[4] = {("caller.py", 1, "caller"): (1, 1, 0.1, 0.2)}
     artifact.write_bytes(marshal.dumps({("app.py", 1, "work"): tuple(values)}))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
