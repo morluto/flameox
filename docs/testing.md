@@ -80,11 +80,11 @@ subprocesses that export XML or Parquet, then fail, omit required output, or tim
 out. They verify failed output cleanup, retry, and successful conversion reuse;
 they do not establish native xctrace or Nsight Systems exporter compatibility.
 
-Known proof gaps include:
+Public runtime workflows verify analysis-cache eviction and explicit input byte
+and file-count bounds. Known proof gaps include:
 
-- Cache bounds and eviction internals lack public-workflow proof.
-- Resource-baseline race handling, bounded file scanning, and unavailable-metric
-  branches lack retained direct proof.
+- Resource-baseline race handling and unavailable-metric branches lack retained
+  direct proof.
 - Cancellation during subprocess startup, V8 hard traversal ceiling overflow,
   and perf demangled/unknown-frame conversion lack retained direct proof.
 - A managed dependency reconnect branch and live package installation remain
@@ -96,3 +96,10 @@ Provider tests should identify their actual artifact or host requirement. A
 skip because a provider or host capability is unavailable is not provider
 evidence. Keep observed, derived, and inferred claims distinct, including in
 tests and performance reports.
+
+The subprocess broker uses one execution path. Its workflows cover sampled RSS,
+resource and output limits, cancellation with and without a deadline, and child
+cleanup after parent exit. The unused native `wait4` execution mode and its
+backend-specific assertions were removed; sampled RSS does not claim an exact
+native peak. POSIX boundary regressions replace native files and bound executables
+with FIFOs in a deadline-bounded subprocess and require typed rejection.
