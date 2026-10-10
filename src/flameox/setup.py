@@ -16,18 +16,14 @@ from tomlkit.items import InlineTable
 
 from flameox import __version__
 from flameox.atomic import atomic_write_text
-from flameox.providers.availability import (
-    MANAGED_PROVIDER_EXTRAS,
-    SYSTEM_PROVIDER_GUIDANCE,
-)
+from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS
 from flameox.providers.environment import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
-    ExternalRequirement,
     ProviderPreparation,
     SetupFailure,
-    _validate_providers,
     active_provider_status,
+    external_provider_requirements,
     mcp_launcher,
 )
 
@@ -529,13 +525,8 @@ def prepare_providers(
             f"timeout_seconds must be between 1 and {MAX_PREPARATION_TIMEOUT_SECONDS}"
         )
     requested = list(dict.fromkeys(providers))
-    _validate_providers(requested)
+    external = external_provider_requirements(requested)
     managed = [item for item in requested if item in MANAGED_PROVIDER_EXTRAS]
-    external = [
-        ExternalRequirement(item, SYSTEM_PROVIDER_GUIDANCE[item])
-        for item in requested
-        if item in SYSTEM_PROVIDER_GUIDANCE
-    ]
     launcher_command, launcher_args = mcp_launcher(managed)
     server_args = [*launcher_args, "mcp", "serve"]
     preparation_command: list[str] = []
