@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from collections.abc import MutableMapping
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any, Literal
 
 import json5
 import tomlkit
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import InlineTable
 
@@ -40,6 +43,12 @@ class SetupClient(StrEnum):
     CODEX = "codex"
     GEMINI = "gemini"
     ANTIGRAVITY = "antigravity"
+
+    @property
+    def server_section(self) -> str:
+        if self is SetupClient.CODEX:
+            return "mcp_servers"
+        return "mcp" if self is SetupClient.OPENCODE else "mcpServers"
 
     @property
     def display_name(self) -> str:
@@ -103,6 +112,67 @@ class ClientSetupResult:
     client: SetupClient
     path: Path
     action: Literal["created", "updated", "already_current"]
+
+
+@dataclass(frozen=True, slots=True)
+class ClientUpdatePlan:
+    setup: ClientSetupPlan
+    previous_version: str
+    requirement: str
+    environment: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ClientInstallation:
+    client: SetupClient
+    path: Path
+    original: str
+    document: MutableMapping[str, Any]
+    command_line: list[str]
+    requirement: Requirement
+    environment: dict[str, str]
+
+    @property
+    def version(self) -> str:
+        return str(Version(next(iter(self.requirement.specifier)).version))
+
+    def plan_update(self, version: str) -> ClientUpdatePlan:
+        document = deepcopy(self.document)
+        entry = document[self.client.server_section]["flameox"]
+        extras = f"[{','.join(sorted(self.requirement.extras))}]" if self.requirement.extras else ""
+        requirement = f"flameox{extras}=={Version(version)}"
+        legacy = self.command_line[1] == "--python"
+        pin_index = 4 if legacy else 6
+        updated = [*self.command_line]
+        updated[pin_index] = requirement
+        if legacy:
+            updated[1:1] = ["--no-config", "--no-sources"]
+        action: Literal["update", "already_current"] = (
+            "already_current" if updated == self.command_line else "update"
+        )
+        if action == "already_current":
+            content = self.original
+        elif self.client is SetupClient.CODEX:
+            args = entry["args"]
+            args[pin_index - 1] = requirement
+            if legacy:
+                args.insert(0, "--no-sources")
+                args.insert(0, "--no-config")
+            content = tomlkit.dumps(document)
+        elif self.path.suffix == ".jsonc":
+            content = _jsonc_update_launcher(self.original, requirement, pin_index)
+        else:
+            if self.client is SetupClient.OPENCODE:
+                entry["command"] = updated
+            else:
+                entry["args"] = updated[1:]
+            content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"
+        return ClientUpdatePlan(
+            ClientSetupPlan(self.client, self.path, action, True, self.original, content),
+            self.version,
+            requirement,
+            self.environment,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,32 +439,37 @@ def _read_configuration(path: Path) -> str:
         return stream.read()
 
 
+def _read_client_configuration(
+    client: SetupClient, path: Path
+) -> tuple[str | None, MutableMapping[str, Any]]:
+    if not path.exists():
+        return None, tomlkit.document() if client is SetupClient.CODEX else {}
+    try:
+        source = _read_configuration(path)
+        document = (
+            tomlkit.parse(source)
+            if client is SetupClient.CODEX
+            else json5.loads(source, allow_duplicate_keys=False)
+            if path.suffix == ".jsonc"
+            else json.loads(source, object_pairs_hook=_unique_json_object)
+        )
+    except (OSError, ValueError, RecursionError, TOMLKitError, DomainError) as error:
+        raise SetupFailure(f"Could not read {client.display_name} configuration: {path}") from error
+    if not isinstance(document, MutableMapping):
+        raise SetupFailure(
+            f"{client.display_name} configuration must contain a JSON object: {path}"
+        )
+    return source, document
+
+
 def _json_plan(
     client: SetupClient,
     path: Path,
     command: str,
     args: list[str],
 ) -> tuple[str | None, str, Literal["create", "update", "already_current"]]:
-    source: str | None = None
-    if path.exists():
-        try:
-            source = _read_configuration(path)
-            document = (
-                json5.loads(source, allow_duplicate_keys=False)
-                if path.suffix == ".jsonc"
-                else json.loads(source, object_pairs_hook=_unique_json_object)
-            )
-        except (OSError, ValueError, RecursionError, DomainError) as error:
-            raise SetupFailure(
-                f"Could not read {client.display_name} configuration: {path}"
-            ) from error
-        if not isinstance(document, dict):
-            raise SetupFailure(
-                f"{client.display_name} configuration must contain a JSON object: {path}"
-            )
-    else:
-        document = {}
-    section_name = "mcp" if client is SetupClient.OPENCODE else "mcpServers"
+    source, document = _read_client_configuration(client, path)
+    section_name = client.server_section
     section = document.setdefault(section_name, {})
     if not isinstance(section, dict):
         raise SetupFailure(
@@ -420,15 +495,7 @@ def _codex_plan(
     command: str,
     args: list[str],
 ) -> tuple[str | None, str, Literal["create", "update", "already_current"]]:
-    source: str | None = None
-    if path.exists():
-        try:
-            source = _read_configuration(path)
-            document = tomlkit.parse(source)
-        except (OSError, UnicodeError, TOMLKitError, DomainError) as error:
-            raise SetupFailure(f"Could not read Codex configuration: {path}") from error
-    else:
-        document = tomlkit.document()
+    source, document = _read_client_configuration(SetupClient.CODEX, path)
     servers = document.get("mcp_servers")
     if servers is None:
         servers = tomlkit.table()
@@ -485,27 +552,146 @@ def _client_config_path(client: SetupClient, home: Path) -> Path:
     return next((path for path in candidates if path.exists()), candidates[0])
 
 
+def read_client_installations(
+    clients: list[SetupClient], *, home: Path | None = None
+) -> list[ClientInstallation]:
+    """Read recognized launchers once; publication later checks the same snapshots."""
+    root = home or Path.home()
+    installations: list[ClientInstallation] = []
+    for client in clients:
+        path = _client_config_path(client, root)
+        if path.is_symlink():
+            raise SetupFailure(f"Refusing to replace symbolic-link client configuration: {path}")
+        original, document = _read_client_configuration(client, path)
+        section_name = client.server_section
+        section = document.get(section_name, {})
+        if not isinstance(section, MutableMapping):
+            raise SetupFailure(
+                f"{client.display_name} configuration {section_name!r} must be a table."
+            )
+        entry = section.get("flameox")
+        if entry is None:
+            continue
+        if not isinstance(entry, MutableMapping):
+            raise SetupFailure(f"Unrecognized Flameox launcher in {path}; rerun setup.")
+        if client is SetupClient.OPENCODE:
+            command_line = entry.get("command")
+        else:
+            args = entry.get("args")
+            command_line = [entry.get("command"), *args] if isinstance(args, list) else None
+        requirement = _installed_launcher_requirement(command_line, path)
+        environment = entry.get("env", {})
+        if not isinstance(environment, MutableMapping) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in environment.items()
+        ):
+            raise SetupFailure(f"Flameox launcher environment must contain string values: {path}")
+        assert isinstance(command_line, list) and original is not None
+        installations.append(
+            ClientInstallation(
+                client,
+                path,
+                original,
+                document,
+                command_line,
+                requirement,
+                dict(environment),
+            )
+        )
+    return installations
+
+
+def _installed_launcher_requirement(command_line: object, path: Path) -> Requirement:
+    message = f"Unrecognized Flameox launcher in {path}; update it manually or rerun setup."
+    if not isinstance(command_line, list) or not all(isinstance(arg, str) for arg in command_line):
+        raise SetupFailure(message)
+    isolated = command_line[1:3] == ["--no-config", "--no-sources"]
+    offset = 2 if isolated else 0
+    if (
+        len(command_line) < 8 + offset
+        or command_line[0] != "uvx"
+        or command_line[1 + offset : 4 + offset] != ["--python", "3.12", "--from"]
+        or command_line[5 + offset : 8 + offset] != ["flameox", "mcp", "serve"]
+    ):
+        raise SetupFailure(message)
+    try:
+        requirement = Requirement(command_line[4 + offset])
+        pins = list(requirement.specifier)
+        if (
+            requirement.name != "flameox"
+            or requirement.url
+            or requirement.marker
+            or len(pins) != 1
+            or pins[0].operator != "=="
+        ):
+            raise SetupFailure(message)
+        Version(pins[0].version)
+    except (InvalidRequirement, InvalidVersion) as error:
+        raise SetupFailure(message) from error
+    return requirement
+
+
+def _jsonc_update_launcher(source: str, requirement: str, pin_index: int) -> str:
+    # Replace the one string token, retaining comments inside the launcher and its array.
+    start = _jsonc_skip_trivia(source, 0)
+    for name in ("mcp", "flameox", "command"):
+        properties, _ = _jsonc_object_properties(source, start)
+        property_ = next(item for item in properties if item.key == name)
+        start = _jsonc_skip_trivia(source, property_.value_start)
+    index = _jsonc_skip_trivia(source, start + 1)
+    insertion = index
+    for position in range(pin_index + 1):
+        end = _jsonc_value_end(source, index)
+        if position == 1:
+            insertion = index
+        if position == pin_index:
+            result = source[:index] + json.dumps(requirement) + source[end:]
+            if pin_index == 4:
+                result = result[:insertion] + '"--no-config", "--no-sources", ' + result[insertion:]
+            return result
+        index = _jsonc_skip_trivia(source, end)
+        index = _jsonc_skip_trivia(source, index + 1)
+    raise SetupFailure("Could not locate the Flameox release pin in the JSONC launcher.")
+
+
+def _verify_client_original(plan: ClientSetupPlan) -> None:
+    try:
+        if plan.path.is_symlink():
+            raise SetupFailure(
+                f"Refusing to replace symbolic-link client configuration: {plan.path}"
+            )
+        current = _read_configuration(plan.path) if plan.path.exists() else None
+    except (OSError, UnicodeError, DomainError) as error:
+        raise SetupFailure(
+            f"Could not read {plan.client.display_name} configuration: {plan.path}"
+        ) from error
+    if current != plan.original:
+        raise SetupFailure(
+            f"{plan.client.display_name} configuration changed during setup: {plan.path}"
+        )
+
+
 def apply_client_setup(plans: list[ClientSetupPlan]) -> list[ClientSetupResult]:
+    # Detect edits made during preparation before publishing the first client.
+    for plan in plans:
+        _verify_client_original(plan)
     results: list[ClientSetupResult] = []
     for plan in plans:
         try:
-            if plan.path.is_symlink():
-                raise SetupFailure(
-                    f"Refusing to replace symbolic-link client configuration: {plan.path}"
-                )
-            current = _read_configuration(plan.path) if plan.path.exists() else None
-            if current != plan.original:
-                raise SetupFailure(
-                    f"{plan.client.display_name} configuration changed during setup: {plan.path}"
-                )
+            _verify_client_original(plan)
             if plan.action != "already_current":
                 atomic_write_text(plan.path, plan.content)
-        except SetupFailure:
+        except SetupFailure as error:
+            if any(result.action != "already_current" for result in results):
+                raise SetupFailure(
+                    f"{error}. Earlier selected clients may already have been updated; "
+                    "restart or reconnect changed clients and retry the remaining update."
+                ) from error
             raise
         except (OSError, UnicodeError, DomainError) as error:
             raise SetupFailure(
                 f"Could not update {plan.client.display_name} configuration: {plan.path}. "
-                "Earlier selected clients may already have been configured."
+                "Selected clients may already have been configured; restart or reconnect "
+                "changed clients and retry the remaining update."
             ) from error
         if plan.action == "already_current":
             action: Literal["created", "updated", "already_current"] = "already_current"

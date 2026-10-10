@@ -115,7 +115,7 @@ def mcp_launcher(providers: list[str]) -> tuple[str, list[str]]:
     requirement = f"flameox{extras_suffix}=={__version__}"
     return (
         "uvx",
-        ["--python", "3.12", "--from", requirement, "flameox"],
+        ["--no-config", "--no-sources", "--python", "3.12", "--from", requirement, "flameox"],
     )
 
 

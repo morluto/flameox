@@ -384,6 +384,7 @@ The command surface is:
 
 ```text
 flameox setup
+flameox update [--client CLIENT] [--version VERSION] [--check|--dry-run]
 flameox mcp serve [--limits JSON]
 flameox mcp inspect
 flameox analyze CAPABILITY_ID [PATH...] [OPTIONS]
@@ -426,3 +427,38 @@ tool, durable operation, project state, or MCP setup endpoint. Other CLI command
 explicit paths, capture working directories, and user-level evidence store as MCP.
 When another `flameox` executable on `PATH` reports a different version, setup emits a non-fatal
 advisory in human and JSON output. It never upgrades or removes that independently managed CLI.
+
+`update` changes existing setup-owned MCP registrations. Without `--client`, it targets every
+configured Flameox client; it does not add registrations for merely detected clients. It reads
+the selected configurations before checking PyPI for the latest stable release. `--version`
+selects an exact published version, including prereleases and intentional rollback. Automatic
+selection never downgrades a newer configured release. `--check` and `--dry-run` report paths,
+old versions, and planned requirements without preparing environments or writing configuration.
+No startup or MCP request performs a background update check.
+
+Before changing any pin, update prepares each selected release and provider-extra environment
+through `uvx`, verifies its distribution version and advertised extras, and checks that its CLI
+exposes a tool catalog. Preparation uses the subprocess broker's output, deadline, and descendant
+cleanup bounds, with one overall
+`--timeout-seconds` budget (1–3,600, default 1,800). Client-specific uv, proxy, certificate, home,
+and cache environment settings participate in preparation. The latest-version check uses a
+separate ten-second network timeout and a 1 MiB metadata bound; an explicit version skips it.
+Named-index uv password/token environment variables cannot pass the broker's credential policy;
+update rejects them explicitly with manual update guidance before changing pins.
+
+Setup and updated launchers disable implicit uv configuration and source overrides, so project
+`uv.toml` files cannot change their package resolution. Existing legacy setup launchers gain these
+flags on update. Custom launcher commands are rejected with manual setup guidance. Provider
+extras, client environment, disabled state, server limits, unrelated settings, and TOML/JSONC
+comments are retained. Preparation failure leaves all client configurations unchanged; publication
+checks for intervening configuration edits and replaces each file atomically. Multiple client
+files are not one transaction: a later write failure can leave earlier clients updated.
+Changed clients must restart or reconnect; running sessions continue on their current release.
+
+Updates do not mutate an independently installed PATH CLI or the evidence store. Manage a
+`uv tool` CLI with `uv tool upgrade flameox`; an exact install constraint must be replaced with
+`uv tool install 'flameox==VERSION'` when selecting a different version. Other package-manager
+installs remain managed by those package managers. Published uvx environments pin the Flameox
+release and requested extras, but do not use the repository's `uv.lock` to pin all transitive
+dependencies. Rollback resolves the selected release again and does not promise identical
+transitive dependency bytes.

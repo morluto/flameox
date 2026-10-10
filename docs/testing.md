@@ -42,6 +42,15 @@ The real MCP stdio workflow checks the catalog against the capability registry,
 including advertised schemas, examples, and result validation. Derive expected
 tools from that registry rather than hard-coding a count or a removed interface.
 
+The installed CLI update workflow uses a uvx shim to run the real release metadata and tool catalog
+commands. It verifies preserved provider sets, successful pin changes, repeat-update no-ops,
+and unchanged configurations after resolver, version, extra, catalog, timeout, and output-limit
+failures. Distinct client index and cache environments reach their preparation processes.
+Configuration workflows cover every supported client, explicit rollback, disabled state,
+TOML/JSONC comments, previews, newer-release protection, and invalid registrations. The shim does
+not prove dependency resolution against a live index; real uvx preparation is a separate manual
+check. CI does not establish update behavior on Windows or against private package indexes.
+
 A separate real stdio workflow starts with reduced server ceilings and verifies inherited defaults,
 pre-execution limit rejection, and exact preservation/replay of lower request limits. Schema
 regressions belong in the existing transport workflow, including numeric coercion and query bounds.

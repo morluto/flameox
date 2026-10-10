@@ -45,7 +45,9 @@ from flameox.setup import (
     path_cli_version_advisory,
     plan_client_setup,
     prepare_providers,
+    read_client_installations,
 )
+from flameox.updates import latest_release_version, prepare_updated_releases, release_version
 from flameox.validation import validation_failure
 
 app = typer.Typer(
@@ -223,6 +225,103 @@ def setup(
         typer.echo(f"\nRestart or reconnect {', '.join(restart_clients)} to load Flameox.")
     _write_external_guidance(value)
     _write_advisories(value)
+
+
+@app.command("update")
+def update(
+    client: Annotated[
+        list[str] | None,
+        typer.Option("--client", help="Update one configured MCP client; repeatable."),
+    ] = None,
+    version: Annotated[
+        str | None,
+        typer.Option("--version", help="Select an exact release, including for rollback."),
+    ] = None,
+    check: Annotated[
+        bool, typer.Option("--check", help="Check configured release pins without changing them.")
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show planned pin changes without preparing or writing."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit structured output.")] = False,
+    timeout_seconds: Annotated[
+        int, typer.Option("--timeout-seconds", min=1, max=MAX_PREPARATION_TIMEOUT_SECONDS)
+    ] = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+) -> None:
+    """Update existing MCP registrations, preserving their providers and settings."""
+    from packaging.version import Version
+
+    try:
+        clients = parse_setup_clients(client or []) or list(SETUP_CLIENTS)
+        installations = read_client_installations(clients)
+        if not installations:
+            raise SetupFailure("No configured Flameox MCP clients found. Run flameox setup first.")
+        target_version = (
+            release_version(version) if version is not None else latest_release_version()
+        )
+        plans = [
+            installation.plan_update(
+                installation.version
+                if version is None and Version(installation.version) > Version(target_version)
+                else target_version
+            )
+            for installation in installations
+        ]
+        changed = [plan for plan in plans if plan.setup.action != "already_current"]
+        preview = check or dry_run
+        if not preview and changed:
+            prepare_updated_releases(changed, timeout_seconds)
+            apply_client_setup([plan.setup for plan in plans])
+    except SetupFailure as error:
+        raise typer.BadParameter(str(error)) from error
+
+    restart_clients = [plan.setup.client.display_name for plan in changed] if not preview else []
+    value = {
+        "target_version": target_version,
+        "check": check,
+        "dry_run": dry_run,
+        "update_available": bool(changed),
+        "restart_required": bool(restart_clients),
+        "clients": [
+            {
+                "id": plan.setup.client.value,
+                "path": str(plan.setup.path),
+                "previous_version": plan.previous_version,
+                "requirement": plan.requirement,
+                "status": "already_current"
+                if plan.setup.action == "already_current"
+                else "update_available"
+                if preview
+                else "updated",
+            }
+            for plan in plans
+        ],
+        "next_action": {
+            "kind": "reconnect_mcp",
+            "clients": restart_clients,
+            "message": f"Restart or reconnect {', '.join(restart_clients)} to load Flameox.",
+        }
+        if restart_clients
+        else None,
+    }
+    if json_output:
+        _write(value)
+        return
+    for plan in plans:
+        status = (
+            "already current"
+            if plan.setup.action == "already_current"
+            else "update available"
+            if preview
+            else "updated"
+        )
+        typer.echo(
+            f"{plan.setup.client.display_name}: {status} "
+            f"({plan.previous_version} → {plan.requirement})"
+        )
+    if restart_clients:
+        typer.echo(f"Restart or reconnect {', '.join(restart_clients)} to load Flameox.")
 
 
 def _write_external_guidance(value: dict[str, object]) -> None:
