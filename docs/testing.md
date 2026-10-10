@@ -118,3 +118,10 @@ both summary and comparison, including null output and metric containers. Native
 benchmark comparisons retain reader-specific identities and zero-baseline ratios;
 benchmark-sample workflows cover aggregate and ratio overflow. NVBench float32
 sidecars cannot represent the float64 overflow fixtures used by those workflows.
+
+Native edge-case workflows cover empty NVBench series, overflow-safe Triton
+timing means, 64-bit kernel seeds and Triton identities, and distinctions between
+wide integers, strings, and literal reserved-tag objects. POSIX subprocess checks
+replace repository metadata with FIFOs and require typed corruption failures
+within a deadline. Setup rejects explicit null server sections consistently
+across JSON and JSONC while retaining the original configuration.
