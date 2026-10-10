@@ -39,12 +39,12 @@ Issues = "https://github.com/morluto/flameox/issues"
 [project.optional-dependencies]
 memory = ["memray>=1.17"]
 torch = ["torch>=2.7"]
-inference = ["aiperf>=0.12,<0.13"]
+inference = ["aiperf>=0.13,<0.14"]
 test = ["pytest>=8.3"]
 trace = ["opentelemetry-proto>=1.44,<1.45", "perfetto>=0.57,<0.58", "protobuf>=5,<7"]
 cpu = ["py-spy>=0.4.2,<0.5"]
 all = [
-    "aiperf>=0.12,<0.13",
+    "aiperf>=0.13,<0.14",
     "memray>=1.17",
     "opentelemetry-proto>=1.44,<1.45",
     "perfetto>=0.57,<0.58",
