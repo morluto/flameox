@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from click import unstyle
 
 from flameox import __version__
 
@@ -72,7 +73,9 @@ def test_setup_verifies_release_before_publishing_and_settles_installer_children
         )
         uvx.chmod(0o755)
     environment = {name: value for name, value in os.environ.items() if not name.startswith("UV_")}
-    environment.update({"HOME": str(tmp_path), "PATH": str(bin_dir)})
+    environment.update(
+        {"HOME": str(tmp_path), "PATH": str(bin_dir), "FORCE_COLOR": "1", "COLUMNS": "80"}
+    )
     command = [
         str(Path(sys.executable).with_name("flameox")),
         "setup",
@@ -92,7 +95,7 @@ def test_setup_verifies_release_before_publishing_and_settles_installer_children
     else:
         assert result.returncode != 0, result.stdout
         assert configuration.read_text() == original
-        assert len(result.stderr) < 1100 * 1024
+        assert len(unstyle(result.stderr)) < 1100 * 1024
         if failure == "resolver":
             assert "resolver diagnostic" in result.stderr
         if failure == "timeout":
