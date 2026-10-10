@@ -56,3 +56,30 @@ def test_compute_sanitizer_xml_projects_classification_and_addresses(tmp_path: P
             "frames": [],
         }
     ]
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("frame_count", [1001, 1002])
+def test_compute_sanitizer_nested_stack_omission_marks_coverage_incomplete(
+    tmp_path: Path, frame_count: int
+) -> None:
+    artifact = tmp_path / "sanitizer.xml"
+    frames = "".join(
+        f"<frame><func>frame_{index}</func><line>1</line></frame>" for index in range(frame_count)
+    )
+    artifact.write_text(
+        "<ComputeSanitizerOutput><record><kind>precise</kind><hostStack>"
+        + frames
+        + "</hostStack></record></ComputeSanitizerOutput>"
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            "sanitizer.failures", [PathSource(path=str(artifact), format="compute-sanitizer")], {}
+        )
+        assert len(result["blocks"][1]["rows"]) == 1
+        assert len(result["blocks"][1]["rows"][0]["frames"]) == 1001
+        assert result["coverage"]["rows_observed"] == 1
+        assert result["coverage"]["complete"] is (frame_count == 1001)
+    finally:
+        runtime.close()

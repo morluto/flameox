@@ -303,8 +303,10 @@ def test_speedscope_rejects_a_weight_that_cannot_be_represented(tmp_path: Path) 
     assert failure.value.code == "DECODE_FAILURE"
 
 
+@pytest.mark.parametrize("weight", [1, -999, "invalid", float("nan")])
 def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty(
     tmp_path: Path,
+    weight: int | str | float,
 ) -> None:
     profile = tmp_path / "profile.speedscope.json"
     profile.write_text(
@@ -315,7 +317,7 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
                     {
                         "type": "sampled",
                         "samples": [[], [0]],
-                        "weights": [1, 2],
+                        "weights": [weight, 2],
                     }
                 ],
             }
@@ -323,6 +325,13 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
+        if weight != 1:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "cpu.hotspots", [PathSource(path=str(profile), format="py-spy")], {}
+                )
+            assert failure.value.code == "DECODE_FAILURE"
+            return
         result = runtime.analyze(
             "cpu.hotspots",
             [PathSource(path=str(profile), format="py-spy", producer="py-spy")],

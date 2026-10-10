@@ -152,7 +152,7 @@ class StructuredWorkerProviders:
                     },
                 ],
                 rows_observed=len(sanitizer_result.records) + int(sanitizer_result.truncated),
-                complete=not sanitizer_result.truncated,
+                complete=not sanitizer_result.truncated and not sanitizer_result.frames_truncated,
                 limitations=[
                     *sanitizer_result.limitations,
                     "Counts cover saved XML records only. Producer print limits may omit "

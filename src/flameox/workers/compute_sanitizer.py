@@ -112,7 +112,7 @@ def _record(
     element: ET.Element,
     *,
     max_frames: int,
-) -> tuple[dict[str, object], tuple[str, ...]]:
+) -> tuple[dict[str, object], tuple[str, ...], bool]:
     kind = _text(element, "kind")
     level = _text(element, "level")
     what = element.find("what")
@@ -174,6 +174,7 @@ def _record(
             "frames": frames,
         },
         tuple(limitations),
+        len(frame_elements) > max_frames,
     )
 
 
@@ -187,6 +188,7 @@ def _extract(
     limitations: list[str] = []
     root_seen = False
     truncated = False
+    frames_truncated = False
     for event, element in iterparse(artifact_path, events=("start", "end")):
         if event == "start" and not root_seen:
             root_seen = True
@@ -198,10 +200,11 @@ def _extract(
             if len(records) >= max_records:
                 truncated = True
             else:
-                record, record_limitations = _record(
+                record, record_limitations, stack_truncated = _record(
                     element,
                     max_frames=max_frames,
                 )
+                frames_truncated |= stack_truncated
                 records.append(record)
                 limitations.extend(record_limitations)
             element.clear()
@@ -250,6 +253,7 @@ def _extract(
         "classifications": classifications,
         "limitations": list(dict.fromkeys(limitations)),
         "truncated": truncated,
+        "frames_truncated": frames_truncated,
     }
 
 
@@ -270,6 +274,7 @@ def _handle(
         classifications=cast(dict[str, int], result["classifications"]),
         limitations=tuple(cast(list[str], result["limitations"])),
         truncated=cast(bool, result["truncated"]),
+        frames_truncated=cast(bool, result["frames_truncated"]),
     )
 
 

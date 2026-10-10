@@ -82,10 +82,6 @@ class CpuProfileProvider:
             for sample_index, stack_value in enumerate(samples):
                 if not isinstance(stack_value, list):
                     raise ProviderFailure("DECODE_FAILURE", "Speedscope stack is invalid")
-                if not stack_value:
-                    unresolved_sample_count += 1
-                    continue
-                stack = [_frame_index(value, len(normalized_frames)) for value in stack_value]
                 try:
                     weight = (
                         1 if weights is None else _number(weights[sample_index], "sample weight")
@@ -96,6 +92,10 @@ class CpuProfileProvider:
                     ) from error
                 if isinstance(weight, float) and not math.isfinite(weight):
                     raise ProviderFailure("DECODE_FAILURE", "Speedscope weight is invalid")
+                if not stack_value:
+                    unresolved_sample_count += 1
+                    continue
+                stack = [_frame_index(value, len(normalized_frames)) for value in stack_value]
                 self_weights[stack[-1]] = _sum_weights(self_weights[stack[-1]], weight)
                 for frame_index in set(stack):
                     inclusive_weights[frame_index] = _sum_weights(

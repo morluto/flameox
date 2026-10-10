@@ -19,6 +19,7 @@ class ComputeSanitizerWorkerResult(ContractModel):
     classifications: dict[str, Annotated[int, Field(ge=0)]] = Field(max_length=128)
     limitations: tuple[str, ...] = Field(default=(), max_length=1_024)
     truncated: bool
+    frames_truncated: bool
 
     @model_validator(mode="after")
     def classifications_count_records(self) -> ComputeSanitizerWorkerResult:
