@@ -302,7 +302,7 @@ class AnalysisRuntime:
                 analysis_id
                 for analysis_id, cached in self.analyses.items()
                 if not any(
-                    self._paths_overlap(source.path, root)
+                    self._scratch_paths_overlap(source.path, root)
                     for source in cached.sources
                     for root in protected_roots
                 )
@@ -325,7 +325,7 @@ class AnalysisRuntime:
                     relative = source.path.resolve(strict=False).relative_to(
                         self.scratch.resolve(strict=False)
                     )
-                except ValueError:
+                except (OSError, ValueError, RuntimeError):
                     continue
             if relative.parts and relative.parts[0].startswith("capture-"):
                 capture_roots.add(self.scratch / relative.parts[0])
@@ -333,13 +333,13 @@ class AnalysisRuntime:
                 capture_roots.add(self.scratch / relative.parts[0] / relative.parts[1])
         for root in capture_roots:
             retained = any(
-                self._paths_overlap(source.path, root)
+                self._scratch_paths_overlap(source.path, root)
                 for analysis in self.analyses.values()
                 if analysis is not cached and analysis.preserved is None
                 for source in analysis.sources
             )
             if not retained and not any(
-                self._paths_overlap(path, root)
+                self._scratch_paths_overlap(path, root)
                 for path in self._protected_sources | self._capture_reservations.keys()
             ):
                 shutil.rmtree(root, ignore_errors=True)
@@ -388,7 +388,7 @@ class AnalysisRuntime:
                 (
                     key
                     for key, path in self.scratch_artifacts.items()
-                    if not any(self._paths_overlap(path, root) for root in protected)
+                    if not any(self._scratch_paths_overlap(path, root) for root in protected)
                 ),
                 None,
             )
@@ -527,8 +527,9 @@ class AnalysisRuntime:
         if cached := self.analyses.get(analysis_id):
             self.analyses.move_to_end(analysis_id)
             return self._copy_result(cached.result)
+        projection_key = hashlib.sha256(canonical_bytes(identity)).hexdigest()
         provider_analysis = self._provider_projection(
-            identity,
+            projection_key,
             capability_id=capability_id,
             sources=resolved,
             arguments=validated.model_dump(mode="python"),
@@ -644,6 +645,8 @@ class AnalysisRuntime:
         validated_result = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
+        if provider_analysis is not None and projection_key not in self.projections:
+            self._cache_projection(projection_key, provider_analysis)
         self._cache_analysis(
             analysis_id,
             CachedAnalysis(
@@ -658,14 +661,13 @@ class AnalysisRuntime:
 
     def _provider_projection(
         self,
-        identity: Mapping[str, Any],
+        projection_key: str,
         *,
         capability_id: str,
         sources: list[NativeSource],
         arguments: Mapping[str, Any],
         limits: RequestLimits,
     ) -> ProviderAnalysis | None:
-        projection_key = hashlib.sha256(canonical_bytes(identity)).hexdigest()
         cached = self._cached_projection(projection_key)
         if cached is not None:
             return cached
@@ -688,8 +690,6 @@ class AnalysisRuntime:
                 details=error.details,
                 remediation=error.remediation,
             ) from error
-        if projected is not None:
-            self._cache_projection(projection_key, projected)
         return projected
 
     def _projection_runtime_identity(
@@ -2058,6 +2058,14 @@ class AnalysisRuntime:
         return selected
 
     @staticmethod
+    def _scratch_paths_overlap(first: Path, second: Path) -> bool:
+        # Caller-owned paths may disappear or become unresolvable before cache cleanup.
+        try:
+            return AnalysisRuntime._paths_overlap(first, second)
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    @staticmethod
     def _paths_overlap(first: Path, second: Path) -> bool:
         if first == second or first.is_relative_to(second) or second.is_relative_to(first):
             return True
@@ -3272,11 +3280,11 @@ class AnalysisRuntime:
     def _release_capture_scope(self, root: Path, failed: bool) -> None:
         if failed:
             for analysis_id, cached in list(self.analyses.items()):
-                if any(self._paths_overlap(source.path, root) for source in cached.sources):
+                if any(self._scratch_paths_overlap(source.path, root) for source in cached.sources):
                     del self.analyses[analysis_id]
         self._capture_reservations.pop(root, None)
         if not any(
-            self._paths_overlap(source.path, root)
+            self._scratch_paths_overlap(source.path, root)
             for cached in self.analyses.values()
             if cached.preserved is None
             for source in cached.sources

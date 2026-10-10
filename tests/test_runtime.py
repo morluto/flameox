@@ -536,3 +536,23 @@ def test_capture_reports_storage_reserve_and_observed_free_space(
             runtime.close()
 
     anyio.run(exercise)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
+def test_stale_external_inputs_do_not_break_unrelated_analysis_eviction(tmp_path: Path) -> None:
+    stale = tmp_path / "stale.txt"
+    stale.write_text("old observation")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        runtime.analyze("artifact.preview", [PathSource(path=str(stale))], {})
+        stale.unlink()
+        stale.symlink_to(stale)
+        for index in range(65):
+            artifact = tmp_path / f"current-{index}.txt"
+            artifact.write_text(f"observation {index}")
+            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            assert result["blocks"][1]["rows"][0]["text"] == f"observation {index}"
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+        assert runtime.read_evidence(preserved["evidence_id"])
+    finally:
+        runtime.close()

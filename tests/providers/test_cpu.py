@@ -638,3 +638,44 @@ def test_speedscope_preserves_exact_counts_and_rejects_overflowed_totals(
             )
     finally:
         runtime.close()
+
+
+def test_rejected_input_mutation_cannot_poison_later_analysis_cache(tmp_path: Path) -> None:
+    from types import FrameType
+
+    from flameox.providers.cpu import CpuProfileProvider
+
+    artifact = tmp_path / "native.speedscope.json"
+    native: dict[str, Any] = {
+        "shared": {"frames": [{"name": "work"}]},
+        "profiles": [{"type": "sampled", "unit": "none", "samples": [[0]], "weights": [1]}],
+    }
+    original = json.dumps(native)
+    artifact.write_text(original)
+    native["profiles"][0]["weights"] = [9]
+    mutated = json.dumps(native)
+
+    def mutate_before_decode(frame: FrameType, event: str, _arg: object) -> None:
+        if event == "call" and frame.f_code is CpuProfileProvider._speedscope.__code__:
+            artifact.write_text(mutated)
+
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(mutate_before_decode)
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "cpu.hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
+                )
+        finally:
+            sys.setprofile(previous)
+        assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
+        artifact.write_text(original)
+        result = runtime.analyze(
+            "cpu.hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
+        )
+        assert result["blocks"][1]["rows"][0]["self_weight"] == 1
+    finally:
+        sys.setprofile(previous)
+        runtime.close()
