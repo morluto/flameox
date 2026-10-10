@@ -737,7 +737,7 @@ class EvidenceRepository:
                     "UNSUPPORTED_REPOSITORY_FORMAT", "The evidence format is unsupported."
                 )
             return model.model_validate(value)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Evidence metadata is unreadable or invalid."
             ) from exc

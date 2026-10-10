@@ -546,7 +546,7 @@ class AnalysisRuntime:
                     selected_limits.max_rows,
                     text_fragment_chars=text_fragment_chars,
                 )
-            except (ijson.JSONError, OSError, ValueError) as error:
+            except (ijson.JSONError, OSError, ValueError, RecursionError) as error:
                 raise RuntimeFailure(
                     "DECODE_FAILURE", "Artifact preview could not decode the input."
                 ) from error

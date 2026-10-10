@@ -118,6 +118,26 @@ def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> N
         runtime.close()
 
 
+@pytest.mark.parametrize("filename", ["repository.json", "manifest.json", "artifact.json"])
+def test_repository_rejects_recursively_nested_metadata(tmp_path: Path, filename: str) -> None:
+    artifact = tmp_path / "samples.json"
+    artifact.write_text("[]")
+    store = tmp_path / "store"
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+        metadata = next(store.rglob(filename))
+        native = b"[" * 10_000 + b"0" + b"]" * 10_000
+        metadata.write_bytes(native)
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.read_evidence(preserved["evidence_id"])
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+        assert metadata.read_bytes() == native
+    finally:
+        runtime.close()
+
+
 def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")

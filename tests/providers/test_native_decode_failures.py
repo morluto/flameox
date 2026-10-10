@@ -11,6 +11,7 @@ from flameox.runtime_contracts import PathSource, RuntimeFailure
 @pytest.mark.parametrize(
     ("capability", "format_name"),
     [
+        ("artifact.preview", "jsonl"),
         ("cpu.hotspots", "py-spy"),
         ("benchmark.summary", "nvbench"),
         ("inference.summary", "vllm-benchmark"),
