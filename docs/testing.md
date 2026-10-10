@@ -56,6 +56,8 @@ The retained scale check publishes 1,000 real immutable manifests, closes the
 runtime, and queries every page through a new runtime. Performance claims should
 report the corpus, command, host-relevant limits, and result; compare the same
 workload and environment. This check has no hardware-independent timing target.
+The [performance investigation](performance.md) records measured workloads,
+semantic oracles, optimization decisions, and the limits of those measurements.
 
 Golden projections establish behavior for their supplied artifact and expected
 fields. They do not establish compatibility with every upstream producer
@@ -103,3 +105,9 @@ cleanup after parent exit. The unused native `wait4` execution mode and its
 backend-specific assertions were removed; sampled RSS does not claim an exact
 native peak. POSIX boundary regressions replace native files and bound executables
 with FIFOs in a deadline-bounded subprocess and require typed rejection.
+
+The worker harness likewise has one session implementation. Its lifecycle
+workflow enters the synchronous session through `AnalysisRuntime.run_in_request`
+and checks cancellation receipts, child settlement, consumer failure, and staging
+cleanup. The removed async-only heartbeat path had no production callers;
+its backend-specific test was replaced by this production-path proof.
