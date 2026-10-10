@@ -160,7 +160,7 @@ def test_update_prepares_all_environments_before_writing_and_allows_explicit_rol
     assert not SetupClient.CLAUDE.config_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("kind", ["custom", "duplicate", "symlink", "missing"])
+@pytest.mark.parametrize("kind", ["custom", "duplicate", "symlink", "missing", "old_launcher"])
 def test_update_rejects_unrecognized_registration_before_release_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
@@ -169,6 +169,27 @@ def test_update_rejects_unrecognized_registration_before_release_lookup(
     config.parent.mkdir(parents=True)
     if kind == "custom":
         config.write_text('{"mcpServers":{"flameox":{"command":"custom","args":[]}}}')
+    elif kind == "old_launcher":
+        config.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "flameox": {
+                            "command": "uvx",
+                            "args": [
+                                "--python",
+                                "3.12",
+                                "--from",
+                                "flameox==0.1.0",
+                                "flameox",
+                                "mcp",
+                                "serve",
+                            ],
+                        }
+                    }
+                }
+            )
+        )
     elif kind == "duplicate":
         config.write_text('{"mcpServers":{},"mcpServers":{}}')
     elif kind == "symlink":
@@ -220,16 +241,14 @@ def test_release_check_reports_offline_failure_without_changing_configuration(
 
 
 @pytest.mark.parametrize("client", [SetupClient.CODEX, SetupClient.OPENCODE])
-def test_update_migrates_legacy_launchers_without_removing_internal_comments(
-    tmp_path: Path, client: SetupClient
-) -> None:
+def test_update_preserves_internal_launcher_comments(tmp_path: Path, client: SetupClient) -> None:
     config = client.config_path(tmp_path)
     config.parent.mkdir(parents=True)
     if client is SetupClient.CODEX:
         source = """[mcp_servers.flameox]
 command = "uvx"
 args = [
-  "--python", "3.12", "--from",
+  "--no-config", "--no-sources", "--python", "3.12", "--from",
   "flameox[cpu]==0.1.0", # provider rationale
   "flameox", "mcp", "serve",
 ]
@@ -242,7 +261,7 @@ args = [
       "enabled": false,
       "type": "local",
       "command": [
-        "uvx", "--python", "3.12", "--from",
+        "uvx", "--no-config", "--no-sources", "--python", "3.12", "--from",
         "flameox[cpu]==0.1.0", // provider rationale
         "flameox", "mcp", "serve"
       ]

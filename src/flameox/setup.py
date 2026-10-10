@@ -149,12 +149,8 @@ class ClientInstallation:
         entry = document[self.client.server_section]["flameox"]
         extras = f"[{','.join(sorted(self.requirement.extras))}]" if self.requirement.extras else ""
         requirement = f"flameox{extras}=={Version(version)}"
-        legacy = self.command_line[1] == "--python"
-        pin_index = 4 if legacy else 6
         updated = [*self.command_line]
-        updated[pin_index] = requirement
-        if legacy:
-            updated[1:1] = ["--no-config", "--no-sources"]
+        updated[6] = requirement
         action: Literal["update", "already_current"] = (
             "already_current" if updated == self.command_line else "update"
         )
@@ -162,13 +158,10 @@ class ClientInstallation:
             content = self.original
         elif self.client is SetupClient.CODEX:
             args = entry["args"]
-            args[pin_index - 1] = requirement
-            if legacy:
-                args.insert(0, "--no-sources")
-                args.insert(0, "--no-config")
+            args[5] = requirement
             content = tomlkit.dumps(document)
         elif self.path.suffix == ".jsonc":
-            content = _jsonc_update_launcher(self.original, requirement, pin_index)
+            content = _jsonc_update_launcher(self.original, requirement)
         else:
             if self.client is SetupClient.OPENCODE:
                 entry["command"] = updated
@@ -629,17 +622,15 @@ def _installed_launcher_requirement(command_line: object, path: Path) -> Require
     message = f"Unrecognized Flameox launcher in {path}; update it manually or rerun setup."
     if not isinstance(command_line, list) or not all(isinstance(arg, str) for arg in command_line):
         raise SetupFailure(message)
-    isolated = command_line[1:3] == ["--no-config", "--no-sources"]
-    offset = 2 if isolated else 0
     if (
-        len(command_line) < 8 + offset
+        len(command_line) < 10
         or command_line[0] != "uvx"
-        or command_line[1 + offset : 4 + offset] != ["--python", "3.12", "--from"]
-        or command_line[5 + offset : 8 + offset] != ["flameox", "mcp", "serve"]
+        or command_line[1:6] != ["--no-config", "--no-sources", "--python", "3.12", "--from"]
+        or command_line[7:10] != ["flameox", "mcp", "serve"]
     ):
         raise SetupFailure(message)
     try:
-        requirement = Requirement(command_line[4 + offset])
+        requirement = Requirement(command_line[6])
         pins = list(requirement.specifier)
         if (
             requirement.name != "flameox"
@@ -655,7 +646,7 @@ def _installed_launcher_requirement(command_line: object, path: Path) -> Require
     return requirement
 
 
-def _jsonc_update_launcher(source: str, requirement: str, pin_index: int) -> str:
+def _jsonc_update_launcher(source: str, requirement: str) -> str:
     # Replace the one string token, retaining comments inside the launcher and its array.
     start = _jsonc_skip_trivia(source, 0)
     for name in ("mcp", "flameox", "command"):
@@ -663,15 +654,10 @@ def _jsonc_update_launcher(source: str, requirement: str, pin_index: int) -> str
         property_ = next(item for item in properties if item.key == name)
         start = _jsonc_skip_trivia(source, property_.value_start)
     index = _jsonc_skip_trivia(source, start + 1)
-    insertion = index
-    for position in range(pin_index + 1):
+    for position in range(7):
         end = _jsonc_value_end(source, index)
-        if position == 1:
-            insertion = index
-        if position == pin_index:
+        if position == 6:
             result = source[:index] + json.dumps(requirement) + source[end:]
-            if pin_index == 4:
-                result = result[:insertion] + '"--no-config", "--no-sources", ' + result[insertion:]
             return result
         index = _jsonc_skip_trivia(source, end)
         index = _jsonc_skip_trivia(source, index + 1)
