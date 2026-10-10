@@ -218,3 +218,27 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
 
     assert unbound.value.code == "UNSUPPORTED_FORMAT"
     assert malformed.value.code == "DECODE_FAILURE"
+
+
+@pytest.mark.parametrize("count", ["9" * 5_000, "0" * 5_000 + "2"])
+def test_nvbench_checks_size_bounds_before_decimal_conversion(tmp_path: Path, count: str) -> None:
+    bundle = _bundle(tmp_path / "bundle", [1.0, 2.0])
+    primary = bundle / "results.json"
+    document = json.loads(primary.read_text())
+    document["benchmarks"][0]["states"][0]["summaries"][0]["data"][1]["value"] = count
+    primary.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        if count.startswith("9"):
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+                )
+            assert failure.value.code == "LIMIT_EXCEEDED"
+        else:
+            summary = runtime.analyze(
+                "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+            )
+            assert summary["blocks"][0]["values"]["measurement_count"] == 2
+    finally:
+        runtime.close()

@@ -316,10 +316,11 @@ def _sidecar_reference(summary: Mapping[str, Any]) -> tuple[str, int]:
         or not raw_count.isdigit()
     ):
         raise ProviderFailure("DECODE_FAILURE", "NVBench sidecar size is invalid")
-    count = int(raw_count)
-    if count > _MAX_SAMPLES:
+    digits = raw_count.lstrip("0") or "0"
+    maximum = str(_MAX_SAMPLES)
+    if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
         raise ProviderFailure("LIMIT_EXCEEDED", "NVBench sidecar sample count exceeds the limit")
-    return filename, count
+    return filename, int(digits)
 
 
 def _contained_sidecar(root: Path, relative: str) -> Path:
