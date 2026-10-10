@@ -66,6 +66,26 @@ def test_mcp_failures_classify_operations_without_exposing_private_diagnostics(
 
 
 @pytest.mark.integration
+def test_catalog_projections_are_independent_of_caller_mutation() -> None:
+    async def exercise() -> None:
+        server = FlameoxServer()
+        first = await server.list_tools()
+        baseline = [tool.model_dump(mode="json") for tool in first]
+        for tool in first:
+            tool.input_schema.clear()
+            assert tool.output_schema is not None
+            tool.output_schema.clear()
+            assert tool.annotations is not None
+            tool.annotations.read_only_hint = not tool.annotations.read_only_hint
+        assert [tool.model_dump(mode="json") for tool in await server.list_tools()] == baseline
+        assert [
+            tool.model_dump(mode="json") for tool in await FlameoxServer().list_tools()
+        ] == baseline
+
+    anyio.run(exercise)
+
+
+@pytest.mark.integration
 def test_mcp_rejects_invalid_runtime_results_before_serialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -12,8 +12,8 @@ import typer
 from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
-from flameox.mcp.server import FlameoxServer, run_server
-from flameox.mcp.tool_registry import capability_descriptor, capability_detail
+from flameox.mcp.server import run_server
+from flameox.mcp.tool_registry import capability_descriptor, capability_detail, tool_contracts
 from flameox.providers.environment import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
@@ -638,45 +638,38 @@ def mcp_inspect(
         _write({"capabilities": [capability_detail(capability)]})
         return
 
-    async def inspect_server() -> dict[str, Any]:
-        server = FlameoxServer()
-        return {
-            "tools": [item.model_dump(mode="json") for item in await server.list_tools()],
-        }
-
-    catalog = anyio.run(inspect_server)
-    tools = cast(list[dict[str, Any]], catalog["tools"])
+    contracts = tool_contracts()
+    selected = contracts
     if tool_name is not None:
-        tools = [tool for tool in tools if tool["name"] == tool_name]
-        if not tools:
+        selected = tuple(contract for contract in contracts if contract.name == tool_name)
+        if not selected:
             _cli_failure(
                 RuntimeFailure(
                     "UNKNOWN_CAPABILITY",
                     f"Unknown MCP tool: {tool_name}",
                     details={
                         "requested_tool": tool_name,
-                        "available_tools": sorted(tool["name"] for tool in catalog["tools"]),
+                        "available_tools": sorted(contract.name for contract in contracts),
                         "recovery": "Run `flameox mcp inspect` to select a tool.",
                     },
                 )
             )
     if tool_name is None and not full:
-        tools = [
-            {
-                "name": tool["name"],
-                "description": tool["description"],
-                "required_inputs": tool["input_schema"].get("required", []),
-                "annotations": tool["annotations"],
-            }
-            for tool in tools
-        ]
         catalog = {
-            "tool_count": len(tools),
-            "tools": tools,
+            "tool_count": len(contracts),
+            "tools": [
+                {
+                    "name": contract.name,
+                    "description": contract.description,
+                    "required_inputs": contract.input_schema.get("required", []),
+                    "annotations": contract.annotations.model_dump(mode="json"),
+                }
+                for contract in contracts
+            ],
             "capabilities": [capability_descriptor(capability) for capability in CAPABILITIES],
         }
     else:
-        catalog["tools"] = tools
+        catalog = {"tools": [contract.project().model_dump(mode="json") for contract in selected]}
     _write(catalog)
 
 

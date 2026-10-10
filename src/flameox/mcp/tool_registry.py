@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -46,6 +47,11 @@ PREPARE = ToolAnnotations(
 )
 
 
+@cache
+def _output_schema(model: type[RootModel[Any]]) -> dict[str, Any]:
+    return model.model_json_schema(mode="serialization")
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContract:
     name: str
@@ -67,8 +73,8 @@ class ToolContract:
             name=self.name,
             description=self.description,
             input_schema=deepcopy(self.input_schema),
-            output_schema=self.output_model.model_json_schema(mode="serialization"),
-            annotations=self.annotations,
+            output_schema=deepcopy(_output_schema(self.output_model)),
+            annotations=self.annotations.model_copy(deep=True),
         )
 
 
