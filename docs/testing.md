@@ -125,3 +125,12 @@ wide integers, strings, and literal reserved-tag objects. POSIX subprocess check
 replace repository metadata with FIFOs and require typed corruption failures
 within a deadline. Setup rejects explicit null server sections consistently
 across JSON and JSONC while retaining the original configuration.
+
+Continuation workflows mutate returned live and preserved handoffs, then verify
+replay and canonical provenance retain the admitted options and limits. Native
+pstats workflows reject nonfinite timings and invalid call counts before row
+filtering; real cProfile and Python profile captures retain their distinct
+caller-edge representations. Deadline-bound POSIX checks exercise admitted
+native-file copying and hashing after replacement with FIFOs. They cover the
+shared file boundary directly because a normal runtime request may reject the
+replacement during an earlier validation, before reaching the copy operation.
