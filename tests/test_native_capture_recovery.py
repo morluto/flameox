@@ -43,7 +43,7 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
         limits = RequestLimits(max_input_bytes=1024, max_input_files=1, timeout_seconds=20)
         try:
             result = await runtime.capture_and_analyze(
-                _coverage_target(tmp_path), "coverage.summary", limits=limits, preserve=preserve
+                _coverage_target(tmp_path), "summarize_coverage", limits=limits, preserve=preserve
             )
 
             assert result["analysis_failure"] is not None
@@ -60,15 +60,13 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
             native = resource["body"]["artifacts"]
             assert len(native) == 1
             assert native[0]["format"] == "coverage"
-            selection = runtime.repository.select_source(
-                preserved["evidence_id"], selector=None, role=None
-            )
+            selection = runtime.repository.select_source(preserved["evidence_id"], selector=None)
             payload = selection.members[0][1].path.read_bytes()
             assert len(payload) == native[0]["size_bytes"]
             assert hashlib.sha256(payload).hexdigest() == native[0]["sha256"]
 
             retried = runtime.analyze(
-                "coverage.summary",
+                "summarize_coverage",
                 [EvidenceSource.model_validate(sources[0])],
                 {},
             )
@@ -96,7 +94,7 @@ def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
             )
         ) as client:
             response = await client.call_tool(
-                "capture_coverage_summary",
+                "capture_and_summarize_coverage",
                 {
                     "target": {"argv": target.argv, "cwd": target.cwd},
                     "provider": {"kind": "coverage", **target.capture_arguments},
@@ -167,7 +165,7 @@ def test_rejected_sparse_native_artifact_keeps_capture_failure_recoverable(
     async def exercise() -> dict[str, object]:
         async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             response = await client.call_tool(
-                "capture_failures_summary",
+                "capture_and_summarize_failures",
                 {
                     "target": {"argv": [sys.executable, str(workload)], "cwd": str(tmp_path)},
                     "provider": {"kind": "observations"},
@@ -238,7 +236,7 @@ def test_rejected_native_symlink_does_not_delete_external_target(tmp_path: Path)
                     cwd=str(tmp_path),
                     provider_id="observations",
                 ),
-                "failures.summary",
+                "summarize_failures",
                 limits=RequestLimits(max_output_bytes=1024),
                 preserve=True,
             )

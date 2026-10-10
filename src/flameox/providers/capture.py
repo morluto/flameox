@@ -470,7 +470,7 @@ def build_capture_invocation(
         builder = CAPTURE_BUILDERS[provider_id]
     except KeyError as error:
         raise RuntimeFailure(
-            "UNKNOWN_CAPABILITY", f"Unknown capture provider: {provider_id}"
+            "UNKNOWN_OPERATION", f"Unknown capture provider: {provider_id}"
         ) from error
     return builder(
         CaptureBuildRequest(target_argv, environment, arguments, directory), managed_executable

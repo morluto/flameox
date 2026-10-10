@@ -80,7 +80,7 @@ markers = [
     "golden: fixed data examples with explicit expected projections",
     "integration: request, provider, worker, process, or filesystem boundary behavior",
     "process: tests that spawn, transport to, or cancel another process",
-    "optional: tests requiring a provider or host capability outside the core install",
+    "optional: tests requiring a provider or host operation outside the core install",
     "performance: representative local corpus performance acceptance checks",
     "serial: tests that must not share a process or host resource with another test",
     "requires_memray: requires the optional Memray provider",

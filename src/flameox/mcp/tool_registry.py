@@ -11,7 +11,6 @@ from jsonschema import Draft202012Validator
 from mcp_types import Tool, ToolAnnotations
 from pydantic import BaseModel, RootModel
 
-from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
 from flameox.mcp.descriptions import TOOL_DESCRIPTIONS, analysis_description, capture_description
 from flameox.mcp.request_contracts import (
     InspectEvidenceArguments,
@@ -33,7 +32,7 @@ from flameox.mcp.result_contracts import (
     QueryOutcome,
     RescueOutcome,
 )
-from flameox.runtime_contracts import CAPABILITIES, Capability, compatible_capture_providers
+from flameox.runtime_contracts import OPERATIONS, Operation, compatible_capture_providers
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 CAPTURE = ToolAnnotations(
@@ -100,66 +99,63 @@ def tool_contracts() -> tuple[ToolContract, ...]:
     )
     analysis = tuple(
         ToolContract(
-            name=ANALYSIS_TOOLS[capability.id],
-            description=analysis_description(capability),
-            input_model=analysis_arguments(capability),
+            name=spec.name,
+            description=analysis_description(spec),
+            input_model=analysis_arguments(spec),
             output_model=AnalysisOutcome,
             annotations=READ_ONLY,
         )
-        for capability in CAPABILITIES
+        for spec in OPERATIONS
     )
     capture = tuple(
         ToolContract(
-            name=CAPTURE_TOOLS[capability.id],
-            description=capture_description(capability),
-            input_model=capture_arguments(capability),
+            name=spec.capture_name,
+            description=capture_description(spec),
+            input_model=capture_arguments(spec),
             output_model=CaptureOutcome,
             annotations=CAPTURE,
         )
-        for capability in CAPABILITIES
-        if capability.id in CAPTURE_TOOLS
+        for spec in OPERATIONS
+        if compatible_capture_providers(spec)
     )
     return (*analysis, *capture, *lifecycle)
 
 
-def capability_descriptor(capability: Capability) -> dict[str, Any]:
+def operation_descriptor(spec: Operation) -> dict[str, Any]:
     """Project one shared registry entry into compact CLI/MCP discovery."""
 
-    providers = compatible_capture_providers(capability)
+    providers = compatible_capture_providers(spec)
     return {
-        "capability_id": capability.id,
-        "analysis_tool": ANALYSIS_TOOLS[capability.id],
-        "capture_tool": CAPTURE_TOOLS.get(capability.id),
-        "summary": capability.summary,
-        "accepted_formats": list(capability.formats),
-        "minimum_sources": capability.minimum_sources,
-        "maximum_sources": capability.maximum_sources,
+        "operation": spec.name,
+        "capture_tool": spec.capture_name if providers else None,
+        "summary": spec.summary,
+        "accepted_formats": list(spec.formats),
+        "minimum_sources": spec.minimum_sources,
+        "maximum_sources": spec.maximum_sources,
         "capture_supported": bool(providers),
-        "experiment_supported": bool(providers) and capability.maximum_sources > 1,
+        "experiment_supported": bool(providers) and spec.maximum_sources > 1,
         "capture_providers": [provider.id for provider in providers],
     }
 
 
-def capability_detail(capability: Capability) -> dict[str, Any]:
-    """Add selected capability schemas, examples, and routing constraints."""
+def operation_detail(spec: Operation) -> dict[str, Any]:
+    """Add selected operation schemas, examples, and routing constraints."""
 
-    providers = compatible_capture_providers(capability)
-    option_schema = capability.model.model_json_schema()
+    providers = compatible_capture_providers(spec)
+    option_schema = spec.model.model_json_schema()
     analysis_call = {
-        "tool": ANALYSIS_TOOLS[capability.id],
-        "arguments": analysis_example(capability),
+        "tool": spec.name,
+        "arguments": analysis_example(spec),
     }
     capture_call = (
-        {"tool": CAPTURE_TOOLS[capability.id], "arguments": capture_example(capability)}
-        if providers
-        else None
+        {"tool": spec.capture_name, "arguments": capture_example(spec)} if providers else None
     )
     exclusions = ["Analysis tools read existing artifacts and never execute a workload."]
-    if capability.id == "static.performance_candidates":
+    if spec.name == "inspect_performance_candidates":
         exclusions.append("Consumes SARIF and does not scan source files.")
     if not providers:
-        exclusions.append("No capture provider produces this capability's accepted artifacts.")
-    return capability_descriptor(capability) | {
+        exclusions.append("No capture provider produces this operation's accepted artifacts.")
+    return operation_descriptor(spec) | {
         "capture_providers": [
             {
                 "id": provider.id,
@@ -171,6 +167,6 @@ def capability_detail(capability: Capability) -> dict[str, Any]:
         "analysis_option_schema": option_schema,
         "analysis_example": analysis_call,
         "capture_example": capture_call,
-        "limitations": [capability.limitation],
+        "limitations": [spec.limitation],
         "routing_exclusions": exclusions,
     }

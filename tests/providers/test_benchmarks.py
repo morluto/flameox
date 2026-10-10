@@ -82,12 +82,12 @@ def test_benchmark_comparison_and_scaling_keep_semantic_axes_distinct(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         compared = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [PathSource(path=str(path), format="samples") for path in (baseline, candidate)],
             {},
         )
         scaled = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(scaling), format="samples")],
             {"input_dimension": "elements"},
         )
@@ -126,12 +126,12 @@ def test_benchmark_repeated_trials_and_blocks_pool_within_semantic_identity(tmp_
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         compared = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [PathSource(path=str(path), format="samples") for path in paths],
             {},
         )
         scaled = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(paths[0]), format="samples")],
             {"input_dimension": "elements"},
         )
@@ -176,7 +176,7 @@ def test_pyperf_summary_uses_native_isolated_reader(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.summary",
+            "summarize_benchmarks",
             [PathSource(path=str(artifact), format="pyperf")],
             {},
         )
@@ -205,7 +205,7 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="pyperf"),
                 PathSource(path=str(candidate), format="pyperf"),
@@ -215,24 +215,18 @@ def test_pyperf_compare_reads_explicit_artifacts_directly(tmp_path: Path) -> Non
         assert not (tmp_path / ".flameox").exists()
         preserved = runtime.preserve_evidence(result["analysis_id"])
         reanalyzed = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
-                EvidenceSource(
-                    kind="evidence",
-                    evidence_id=preserved["evidence_id"],
-                    artifact_role="input-0001",
-                ),
-                EvidenceSource(
-                    kind="evidence",
-                    evidence_id=preserved["evidence_id"],
-                    artifact_role="input-0002",
-                ),
+                EvidenceSource.model_validate(source)
+                for source in runtime.read_evidence_agent_projection(preserved["evidence_id"])[
+                    "analysis_sources"
+                ]
             ],
             {"metric": "workload", "baseline_index": 0},
         )
         with pytest.raises(RuntimeFailure) as overflow_failure:
             runtime.analyze(
-                "benchmark.compare",
+                "compare_benchmarks",
                 [
                     PathSource(path=str(overflowing_baseline), format="pyperf"),
                     PathSource(path=str(overflowing_candidate), format="pyperf"),
@@ -289,12 +283,12 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
-            "benchmark.summary",
+            "summarize_benchmarks",
             [PathSource(path=str(baseline), format="samples")],
             {},
         )
         comparison = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="samples"),
                 PathSource(path=str(candidate), format="samples"),
@@ -303,7 +297,7 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
         )
         with pytest.raises(RuntimeFailure) as sum_failure:
             runtime.analyze(
-                "benchmark.compare",
+                "compare_benchmarks",
                 [
                     PathSource(path=str(sum_overflow), format="samples"),
                     PathSource(path=str(sum_overflow), format="samples"),
@@ -312,7 +306,7 @@ def test_structured_benchmark_samples_are_isolated_and_comparable(tmp_path: Path
             )
         with pytest.raises(RuntimeFailure) as ratio_failure:
             runtime.analyze(
-                "benchmark.compare",
+                "compare_benchmarks",
                 [
                     PathSource(path=str(ratio_baseline), format="samples"),
                     PathSource(path=str(ratio_candidate), format="samples"),
@@ -363,7 +357,7 @@ def test_benchmark_compare_retains_series_dimensions_and_timing_protocol(tmp_pat
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         comparison = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="samples"),
                 PathSource(path=str(candidate), format="samples"),
@@ -372,7 +366,7 @@ def test_benchmark_compare_retains_series_dimensions_and_timing_protocol(tmp_pat
         )
         write(candidate, 2, 50, clock="cuda_event")
         incompatible = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="samples"),
                 PathSource(path=str(candidate), format="samples"),
@@ -401,7 +395,7 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(artifact), format="samples")],
             {"input_dimension": "elements", "metric": "operation"},
         )
@@ -435,7 +429,7 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
             )
             large_sources.append(PathSource(path=str(source_path), format="samples"))
         large_result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             large_sources,
             {"input_dimension": "elements", "metric": "operation"},
         )
@@ -452,7 +446,7 @@ def test_benchmark_scaling_estimates_power_law_from_declared_numeric_dimension(
             )
         )
         same_source_result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(same_source_path), format="samples")],
             {"input_dimension": "elements", "metric": "operation"},
         )
@@ -496,11 +490,13 @@ def test_benchmark_aggregates_report_inconclusive_or_limit_for_exact_large_integ
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     source = PathSource(path=str(artifact), format="samples")
     try:
-        scaling = runtime.analyze("benchmark.scaling", [source], {"input_dimension": "elements"})
+        scaling = runtime.analyze(
+            "analyze_benchmark_scaling", [source], {"input_dimension": "elements"}
+        )
         assert scaling["blocks"][1]["rows"][0]["status"] == "inconclusive"
         assert any("3 measurement(s)" in value for value in scaling["limitations"])
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("benchmark.compare", [source, source], {"metric": "operation"})
+            runtime.analyze("compare_benchmarks", [source, source], {"metric": "operation"})
         assert failure.value.code == "LIMIT_EXCEEDED"
         assert "finite numeric range" in failure.value.message
         assert not (tmp_path / ".flameox").exists()
@@ -517,7 +513,7 @@ def test_benchmark_compare_aggregates_beyond_the_sample_row_ceiling(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="samples"),
                 PathSource(path=str(candidate), format="samples"),
@@ -560,7 +556,7 @@ def test_benchmark_scaling_excludes_nonpositive_samples_from_series_aggregates(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(artifact), format="samples")],
             {"input_dimension": "elements", "metric": "operation"},
         )
@@ -581,7 +577,7 @@ def test_benchmark_scaling_reports_inconclusive_without_declared_dimension_value
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(artifact), format="pyperf")],
             {"input_dimension": "elements"},
         )
@@ -625,7 +621,7 @@ def test_benchmark_scaling_keeps_non_axis_dimensions_as_distinct_series(tmp_path
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(artifact), format="samples")],
             {"input_dimension": "elements"},
         )
@@ -658,7 +654,7 @@ def test_pyperf_capture_binds_native_output_before_analysis(tmp_path: Path) -> N
                         "name": "startup",
                     },
                 ),
-                "benchmark.summary",
+                "summarize_benchmarks",
             )
             assert result["provider"]["id"] == "pyperf"
             assert result["blocks"][0]["values"]["measurement_count"] == 1
@@ -696,11 +692,11 @@ def test_composed_evidence_namespaces_colliding_source_roles(tmp_path: Path) -> 
         evidence_ids = []
         for path in (first_path, second_path):
             analysis = runtime.analyze(
-                "benchmark.summary", [PathSource(path=str(path), format="pyperf")], {}
+                "summarize_benchmarks", [PathSource(path=str(path), format="pyperf")], {}
             )
             evidence_ids.append(runtime.preserve_evidence(analysis["analysis_id"])["evidence_id"])
         composed = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [EvidenceSource(kind="evidence", evidence_id=value) for value in evidence_ids],
             {"input_dimension": "elements"},
         )
@@ -740,11 +736,11 @@ def test_failed_provider_capture_returns_preservable_diagnostics(tmp_path: Path)
                         "min_time": 0.001,
                     },
                 ),
-                "benchmark.summary",
+                "summarize_benchmarks",
             )
-            assert result["capture"]["requested_capability_id"] == "benchmark.summary"
+            assert result["capture"]["requested_operation"] == "summarize_benchmarks"
             assert result["capture"]["executions"][0]["status"] == "failed"
-            assert result["capability_id"] == "benchmark.summary"
+            assert result["operation"] == "summarize_benchmarks"
             assert result["analysis_failure"] is not None
             assert result["blocks"][1]["rows"] == []
             diagnostics = result["capture"]["executions"][0]["console_diagnostics"]
@@ -773,7 +769,7 @@ def test_unpreserved_capture_analysis_failure_can_be_preserved_later(tmp_path: P
                     cwd=str(tmp_path),
                     provider_id="benchmark-samples",
                 ),
-                "benchmark.summary",
+                "summarize_benchmarks",
                 preserve=False,
             )
             assert result["analysis_failure"]["code"] == "DECODE_FAILURE"

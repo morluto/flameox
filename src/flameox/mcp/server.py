@@ -20,7 +20,6 @@ from pydantic import BaseModel, JsonValue, ValidationError
 
 import flameox.providers.environment as provider_setup
 from flameox import __version__
-from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPABILITY_BY_TOOL, CAPTURE_TOOLS
 from flameox.mcp.descriptions import SERVER_DESCRIPTION, SERVER_INSTRUCTIONS
 from flameox.mcp.request_contracts import (
     AnalysisArguments,
@@ -45,7 +44,8 @@ from flameox.mcp.validation import normalize_schema_error, normalize_validation_
 from flameox.repository import RepositoryError
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CAPABILITY_BY_ID,
+    OPERATION_BY_CAPTURE_TOOL,
+    OPERATION_BY_NAME,
     CaptureTarget,
     RequestLimits,
     RuntimeFailure,
@@ -87,7 +87,7 @@ def _runtime_failure(
     remediation = " ".join(error.remediation) or error.message
     if error.retryable:
         retry_action: CallToolAction | WaitAndRetryAction
-        if isinstance(provider_id, str) and tool in CAPTURE_TOOLS.values():
+        if isinstance(provider_id, str) and tool in OPERATION_BY_CAPTURE_TOOL:
             retry_action = CallToolAction(
                 kind="call_tool",
                 tool="prepare_providers",
@@ -131,7 +131,7 @@ def _runtime_failure(
         "accepted_values",
         "accepted_formats",
         "accepted_provider_ids",
-        "available_capabilities",
+        "available_operations",
     ):
         candidate = error.details.get(key)
         if isinstance(candidate, list) and all(isinstance(item, str) for item in candidate):
@@ -201,12 +201,12 @@ def _attach_next_page(value: dict[str, Any], request: dict[str, Any] | None) -> 
         "page_size": request["limits"]["max_rows"],
         "limits": request["limits"],
     }
-    if "analysis_id" in value and "capability_id" in value:
+    if "analysis_id" in value and "operation" in value:
         value["continuation"] = None
     else:
         value.pop("continuation", None)
     value["next_page"] = {
-        "tool": ANALYSIS_TOOLS[request["capability_id"]],
+        "tool": request["operation"],
         "arguments": arguments,
     }
 
@@ -309,10 +309,10 @@ class FlameoxServer(Server[AnalysisRuntime]):
         except RuntimeFailure as error:
             return _runtime_failure(error, tool=params.name, arguments=arguments)
         except OSError:
-            if params.name in ANALYSIS_TOOLS.values():
+            if params.name in OPERATION_BY_NAME:
                 code = "DECODE_FAILURE"
                 message = "Input could not be read during analysis."
-            elif params.name in CAPTURE_TOOLS.values():
+            elif params.name in OPERATION_BY_CAPTURE_TOOL:
                 code = "EXECUTION_FAILURE"
                 message = "Capture failed unexpectedly without trustworthy evidence."
             else:
@@ -324,12 +324,10 @@ class FlameoxServer(Server[AnalysisRuntime]):
         except asyncio.CancelledError:
             raise
         except Exception:
-            code = (
-                "ANALYSIS_FAILURE" if params.name in ANALYSIS_TOOLS.values() else "INTERNAL_FAILURE"
-            )
+            code = "ANALYSIS_FAILURE" if params.name in OPERATION_BY_NAME else "INTERNAL_FAILURE"
             message = (
                 "Analysis failed unexpectedly."
-                if params.name in ANALYSIS_TOOLS.values()
+                if params.name in OPERATION_BY_NAME
                 else "Flameox operation failed unexpectedly."
             )
             return _runtime_failure(RuntimeFailure(code, message))
@@ -383,15 +381,15 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 ],
             }
             return value
-        if name in ANALYSIS_TOOLS.values():
+        if name in OPERATION_BY_NAME:
             analysis_args = cast(AnalysisArguments, request)
-            capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
-            options = analysis_args.model_dump(include=set(capability.model.model_fields))
-            await ctx.session.report_progress(0.0, message=f"analyzing {capability.id}")
+            spec = OPERATION_BY_NAME[name]
+            options = analysis_args.model_dump(include=set(spec.model.model_fields))
+            await ctx.session.report_progress(0.0, message=f"analyzing {spec.name}")
             value, next_request = await runtime.run_in_request(
                 partial(
                     runtime.analyze_page,
-                    capability.id,
+                    spec.name,
                     analysis_args.sources,
                     options,
                     limits=analysis_args.request_limits(),
@@ -401,12 +399,12 @@ class FlameoxServer(Server[AnalysisRuntime]):
             value["status"] = "complete"
             _attach_next_page(value, next_request)
             return value
-        if name in CAPTURE_TOOLS.values():
+        if name in OPERATION_BY_CAPTURE_TOOL:
             capture_args = cast(CaptureArguments, request)
-            capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
+            spec = OPERATION_BY_CAPTURE_TOOL[name]
             provider_options = capture_args.provider.model_dump()
             provider_id = provider_options.pop("kind")
-            analysis_options = capture_args.model_dump(include=set(capability.model.model_fields))
+            analysis_options = capture_args.model_dump(include=set(spec.model.model_fields))
             target = CaptureTarget(
                 **capture_args.target.model_dump(),
                 provider_id=provider_id,
@@ -419,7 +417,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
 
             value, next_request = await runtime.capture_analysis_page(
                 target,
-                capability.id,
+                spec.name,
                 experiment=getattr(capture_args, "experiment", None),
                 limits=capture_args.request_limits(),
                 progress=progress,
@@ -474,7 +472,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                         dict[str, JsonValue],
                         {"evidence_id": value["preserved"]["evidence_id"]},
                     ),
-                    then_retry=ANALYSIS_TOOLS[capability.id] if can_reanalyze else None,
+                    then_retry=spec.name if can_reanalyze else None,
                     message=message,
                 ).model_dump(mode="json")
             elif can_reanalyze:
@@ -485,7 +483,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     ),
                     message=(
                         "Preserve this trustworthy capture, then retry "
-                        f"{ANALYSIS_TOOLS[capability.id]} over its "
+                        f"{spec.name} over its "
                         "analysis sources after addressing the observed failure."
                     ),
                 ).model_dump(mode="json")
@@ -547,7 +545,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 partial(
                     runtime.query_evidence,
                     evidence_kind=query_args.evidence_kind,
-                    capability_id=query_args.capability_id,
+                    operation=query_args.operation,
                     provider_id=query_args.provider_id,
                     input_sha256=query_args.input_sha256,
                     created_after=query_args.created_after,

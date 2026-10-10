@@ -86,20 +86,20 @@ from flameox.repository import (
     RepositoryError,
 )
 from flameox.runtime_contracts import (
-    CAPABILITY_BY_ID,
     CAPTURE_PROVIDER_CONTRACTS,
     MAX_INPUTS,
     MAX_ROWS,
+    OPERATION_BY_NAME,
     SEMANTIC_ORACLE_STDERR_ENV,
     SEMANTIC_ORACLE_STDOUT_ENV,
     AnalysisResult,
-    Capability,
     CaptureArguments,
     CaptureTarget,
     CpuHotspotArguments,
     EvidenceSource,
     ExperimentCase,
     ExperimentDesign,
+    Operation,
     PathSource,
     PreviewArguments,
     PySpyCaptureArguments,
@@ -147,7 +147,7 @@ class CachedAnalysis:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedCaptureRequest:
-    capability: Capability
+    spec: Operation
     capture_arguments: CaptureArguments
     analysis_arguments: StrictModel
     limits: RequestLimits
@@ -408,7 +408,7 @@ class AnalysisRuntime:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         sources: Sequence[Source],
         arguments: Mapping[str, Any],
         *,
@@ -419,7 +419,7 @@ class AnalysisRuntime:
         retained_artifacts = set(self.scratch_artifacts)
         try:
             return self._analyze(
-                capability_id, sources, arguments, limits=limits, continuation=continuation
+                operation, sources, arguments, limits=limits, continuation=continuation
             )
         except BaseException:
             for key in self.scratch_artifacts.keys() - retained_artifacts:
@@ -436,43 +436,43 @@ class AnalysisRuntime:
 
     def _analyze(  # noqa: C901 - validation and bounded projection remain one transaction
         self,
-        capability_id: str,
+        operation: str,
         sources: Sequence[Source],
         arguments: Mapping[str, Any],
         *,
         limits: RequestLimits | None = None,
         continuation: str | None = None,
     ) -> dict[str, Any]:
-        capability = CAPABILITY_BY_ID.get(capability_id)
-        if capability is None:
+        spec = OPERATION_BY_NAME.get(operation)
+        if spec is None:
             raise RuntimeFailure(
-                "UNKNOWN_CAPABILITY",
-                f"Unknown capability: {capability_id}",
+                "UNKNOWN_OPERATION",
+                f"Unknown operation: {operation}",
                 details={
-                    "requested_capability": capability_id,
-                    "available_capabilities": sorted(CAPABILITY_BY_ID),
-                    "recovery": "Run `flameox mcp inspect` to select a capability.",
+                    "requested_operation": operation,
+                    "available_operations": sorted(OPERATION_BY_NAME),
+                    "recovery": "Run `flameox mcp inspect` to select an operation.",
                 },
             )
-        capability.validate_source_count(len(sources))
+        spec.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
-        validated = capability.model.model_validate(arguments)
+        validated = spec.model.model_validate(arguments)
         for source_index, request_source in enumerate(sources):
             if isinstance(request_source, PathSource) and request_source.format not in (
                 None,
-                *capability.formats,
+                *spec.formats,
             ):
                 raise RuntimeFailure(
                     "UNSUPPORTED_FORMAT",
-                    f"{capability_id} does not accept artifact format {request_source.format!r}",
+                    f"{operation} does not accept artifact format {request_source.format!r}",
                     details={
-                        "capability_id": capability_id,
+                        "operation": operation,
                         "source_index": source_index,
                         "received_format": request_source.format,
-                        "accepted_formats": list(capability.formats),
+                        "accepted_formats": list(spec.formats),
                         "recovery": (
                             "Select one accepted format or inspect the exact options "
-                            f"with `flameox mcp inspect --capability {capability_id}`."
+                            f"with `flameox mcp inspect --tool {operation}`."
                         ),
                     },
                 )
@@ -486,21 +486,19 @@ class AnalysisRuntime:
             raise RuntimeFailure(
                 "INVALID_INPUT", "text_fragment_chars requires text file sources only."
             )
-        if capability.id != "artifact.preview" and (
-            bad := next(
-                (item.format for item in resolved if item.format not in capability.formats), None
-            )
+        if spec.name != "preview_artifact" and (
+            bad := next((item.format for item in resolved if item.format not in spec.formats), None)
         ):
             raise RuntimeFailure(
                 "UNSUPPORTED_FORMAT",
-                f"{capability_id} does not accept artifact format {bad!r}",
+                f"{operation} does not accept artifact format {bad!r}",
                 details={
-                    "capability_id": capability_id,
+                    "operation": operation,
                     "received_format": bad,
-                    "accepted_formats": list(capability.formats),
+                    "accepted_formats": list(spec.formats),
                     "recovery": (
                         "Select one accepted format or inspect the exact options "
-                        f"with `flameox mcp inspect --capability {capability_id}`."
+                        f"with `flameox mcp inspect --tool {operation}`."
                     ),
                 },
             )
@@ -509,7 +507,7 @@ class AnalysisRuntime:
         if isinstance(validated, CpuHotspotArguments):
             validated.validate_formats(item.format for item in resolved)
         identity = {
-            "capability_id": capability_id,
+            "operation": operation,
             "inputs": [
                 {
                     "path": str(item.path),
@@ -523,7 +521,7 @@ class AnalysisRuntime:
             ],
             "arguments": validated.model_dump(mode="json"),
             "limits": selected_limits.model_dump(mode="json"),
-            "projection_implementation": self._projection_runtime_identity(capability_id, resolved),
+            "projection_implementation": self._projection_runtime_identity(operation, resolved),
         }
         default_offset = validated.offset if isinstance(validated, PreviewArguments) else 0
         offset = self._decode_continuation(continuation, identity, default_offset)
@@ -537,15 +535,15 @@ class AnalysisRuntime:
         projection_key = hashlib.sha256(canonical_bytes(identity)).hexdigest()
         provider_analysis = self._provider_projection(
             projection_key,
-            capability_id=capability_id,
+            operation=operation,
             sources=resolved,
             arguments=validated.model_dump(mode="python"),
             limits=selected_limits,
         )
-        if provider_analysis is None and capability.id != "artifact.preview":
+        if provider_analysis is None and spec.name != "preview_artifact":
             raise RuntimeFailure(
                 "UNSUPPORTED_FORMAT",
-                f"No typed {capability_id} provider accepts the supplied inputs",
+                f"No typed {operation} provider accepts the supplied inputs",
             )
         if provider_analysis is None:
             try:
@@ -578,7 +576,7 @@ class AnalysisRuntime:
                 {"type": "table", "rows": rows},
             ]
             provider_identity = {"id": "flameox", "version": __version__}
-            limitations = [capability.limitation]
+            limitations = [spec.limitation]
             if text_fragment_chars is not None:
                 limitations.append(
                     "Text fragments use UTF-8 replacement decoding and LF-delimited lines; "
@@ -621,7 +619,7 @@ class AnalysisRuntime:
                 )
         result: dict[str, Any] = {
             "analysis_id": analysis_id,
-            "capability_id": capability_id,
+            "operation": operation,
             "provider": provider_identity,
             "inputs": [item.public() for item in resolved],
             "blocks": blocks,
@@ -643,7 +641,7 @@ class AnalysisRuntime:
             }
         body = {
             "evidence_kind": "analysis",
-            "capability_id": capability_id,
+            "operation": operation,
             "provider": result["provider"],
             "inputs": [
                 {
@@ -681,7 +679,7 @@ class AnalysisRuntime:
         self,
         projection_key: str,
         *,
-        capability_id: str,
+        operation: str,
         sources: list[NativeSource],
         arguments: Mapping[str, Any],
         limits: RequestLimits,
@@ -692,7 +690,7 @@ class AnalysisRuntime:
         try:
             projected = canonical_provider_projection(
                 self._provider_analysis(
-                    capability_id,
+                    operation,
                     sources,
                     arguments,
                     # Every page slices the same bounded provider population.
@@ -711,24 +709,24 @@ class AnalysisRuntime:
         return projected
 
     def _projection_runtime_identity(
-        self, capability_id: str, sources: Sequence[NativeSource]
+        self, operation: str, sources: Sequence[NativeSource]
     ) -> dict[str, str]:
         identity = {"flameox": __version__}
         required_tools: list[tuple[str, NativeSource]] = []
         for source in sources:
-            if source.format == "perf-data" and capability_id in {
-                "cpu.hotspots",
-                "cpu.callers",
+            if source.format == "perf-data" and operation in {
+                "rank_cpu_hotspots",
+                "inspect_cpu_callers",
             }:
                 required_tools.append(("perf", source))
-            elif source.format == "nsys-rep" and capability_id in {
-                "trace.summary",
-                "trace.operations",
-                "trace.lifecycle",
-                "gpu.launches",
+            elif source.format == "nsys-rep" and operation in {
+                "summarize_trace",
+                "summarize_trace_operations",
+                "summarize_trace_lifecycle",
+                "inspect_gpu_launches",
             }:
                 required_tools.append(("nsys", source))
-            elif source.format == "xctrace" and capability_id == "trace.summary":
+            elif source.format == "xctrace" and operation == "summarize_trace":
                 required_tools.append(("xcrun", source))
         for executable, source in required_tools:
             binding = self._require_host_tool(
@@ -741,16 +739,16 @@ class AnalysisRuntime:
             if any(
                 source.format in {"perfetto", "chrome-trace", "pytorch", "rocprof-pftrace"}
                 for source in sources
-            ) and capability_id in {
-                "trace.summary",
-                "trace.call_graph",
-                "trace.pytorch",
-                "trace.window",
+            ) and operation in {
+                "summarize_trace",
+                "inspect_trace_call_graph",
+                "summarize_pytorch_trace",
+                "inspect_trace_window",
             }:
                 identity["perfetto"] = self.perfetto.projection_identity()
-            if any(source.format == "nsight-compute" for source in sources) and capability_id in {
-                "gpu.kernel_metrics",
-                "kernel.compare",
+            if any(source.format == "nsight-compute" for source in sources) and operation in {
+                "inspect_gpu_kernel_metrics",
+                "compare_kernel_validation",
             }:
                 identity["nsight-compute"] = self.nsight_compute.projection_identity()
         except ProviderFailure as error:
@@ -770,43 +768,38 @@ class AnalysisRuntime:
     def _validate_capture_request(
         self,
         target: CaptureTarget,
-        capability_id: str,
+        operation: str,
         *,
         experiment: ExperimentDesign | None,
         limits: RequestLimits | None,
     ) -> ValidatedCaptureRequest:
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
-        capability = CAPABILITY_BY_ID.get(capability_id)
-        if capability is None:
+        spec = OPERATION_BY_NAME.get(operation)
+        if spec is None:
             raise RuntimeFailure(
-                "UNKNOWN_CAPABILITY",
-                f"Unknown capability: {capability_id}",
+                "UNKNOWN_OPERATION",
+                f"Unknown operation: {operation}",
                 details={
-                    "requested_capability": capability_id,
-                    "available_capabilities": sorted(CAPABILITY_BY_ID),
-                    "recovery": "Run `flameox mcp inspect` to select a capability.",
+                    "requested_operation": operation,
+                    "available_operations": sorted(OPERATION_BY_NAME),
+                    "recovery": "Run `flameox mcp inspect` to select an operation.",
                 },
             )
         capture_arguments = self._capture_arguments(
-            target.provider_id, target.capture_arguments, capability_id=capability_id
+            target.provider_id, target.capture_arguments, operation=operation
         )
-        analysis_arguments = capability.model.model_validate(target.analysis_arguments)
+        analysis_arguments = spec.model.model_validate(target.analysis_arguments)
         output_formats = set(self._capture_output_formats(target.provider_id))
-        compatible_provider_ids = [
-            contract.id for contract in compatible_capture_providers(capability)
-        ]
+        compatible_provider_ids = [contract.id for contract in compatible_capture_providers(spec)]
         if target.provider_id not in compatible_provider_ids:
             raise RuntimeFailure(
                 "UNSUPPORTED_FORMAT",
-                (
-                    f"Capture provider {target.provider_id!r} cannot feed capability "
-                    f"{capability_id!r}."
-                ),
+                (f"Capture provider {target.provider_id!r} cannot feed spec {operation!r}."),
                 details={
                     "provider_id": target.provider_id,
                     "output_formats": sorted(output_formats),
-                    "capability_id": capability_id,
-                    "accepted_formats": list(capability.formats),
+                    "operation": operation,
+                    "accepted_formats": list(spec.formats),
                     "compatible_capture_providers": compatible_provider_ids,
                 },
             )
@@ -826,9 +819,9 @@ class AnalysisRuntime:
                     f"the limit is {MAX_INPUTS}."
                 ),
             )
-        capability.validate_source_count(source_count)
+        spec.validate_source_count(source_count)
         return ValidatedCaptureRequest(
-            capability=capability,
+            spec=spec,
             capture_arguments=capture_arguments,
             analysis_arguments=analysis_arguments,
             limits=selected_limits,
@@ -844,7 +837,7 @@ class AnalysisRuntime:
     async def capture_and_analyze(
         self,
         target: CaptureTarget,
-        capability_id: str,
+        operation: str,
         *,
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
@@ -853,7 +846,7 @@ class AnalysisRuntime:
     ) -> dict[str, Any]:
         result, _ = await self._capture_analysis_page(
             target,
-            capability_id,
+            operation,
             experiment=experiment,
             limits=limits,
             progress=progress,
@@ -865,7 +858,7 @@ class AnalysisRuntime:
     async def capture_analysis_page(
         self,
         target: CaptureTarget,
-        capability_id: str,
+        operation: str,
         *,
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
@@ -876,7 +869,7 @@ class AnalysisRuntime:
 
         return await self._capture_analysis_page(
             target,
-            capability_id,
+            operation,
             experiment=experiment,
             limits=limits,
             progress=progress,
@@ -887,7 +880,7 @@ class AnalysisRuntime:
     async def _capture_analysis_page(  # noqa: C901 - capture lifecycle keeps failure artifacts together
         self,
         target: CaptureTarget,
-        capability_id: str,
+        operation: str,
         *,
         experiment: ExperimentDesign | None = None,
         limits: RequestLimits | None = None,
@@ -896,7 +889,7 @@ class AnalysisRuntime:
         include_next_request: bool,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         validated_capture = self._validate_capture_request(
-            target, capability_id, experiment=experiment, limits=limits
+            target, operation, experiment=experiment, limits=limits
         )
         target = target.model_copy(
             update={
@@ -995,9 +988,6 @@ class AnalysisRuntime:
                     pending_executions.append(
                         self._pending_capture_execution(case, block, argv, invocation.argv, cwd)
                         | {
-                            "executable_sha256": collector_binding.identity.sha256.removeprefix(
-                                "sha256:"
-                            ),
                             "collector_executable_sha256": (
                                 collector_binding.identity.sha256.removeprefix("sha256:")
                             ),
@@ -1279,7 +1269,6 @@ class AnalysisRuntime:
                         "capture_argv": list(invocation.argv),
                         "cwd": str(cwd),
                         "returncode": exit_code,
-                        "executable_sha256": binding.identity.sha256.removeprefix("sha256:"),
                         "collector_executable_sha256": (
                             binding.identity.sha256.removeprefix("sha256:")
                         ),
@@ -1322,7 +1311,7 @@ class AnalysisRuntime:
                             details={"provider_id": target.provider_id},
                         )
                     result = self.analyze(
-                        capability_id,
+                        operation,
                         [
                             PathSource(
                                 path=str(item.path),
@@ -1338,7 +1327,7 @@ class AnalysisRuntime:
                 except RuntimeFailure as error:
                     result = self._capture_failure_result(
                         target=target,
-                        capability_id=capability_id,
+                        operation=operation,
                         mode=mode,
                         experiment=experiment,
                         executions=executions,
@@ -1373,7 +1362,7 @@ class AnalysisRuntime:
                     result = self._finalize_capture_result(
                         result,
                         cached,
-                        capability_id=capability_id,
+                        operation=operation,
                         mode=mode,
                         experiment=experiment,
                         executions=executions,
@@ -1456,7 +1445,7 @@ class AnalysisRuntime:
         self,
         *,
         target: CaptureTarget,
-        capability_id: str,
+        operation: str,
         mode: str,
         experiment: ExperimentDesign | None,
         executions: list[dict[str, Any]],
@@ -1472,7 +1461,7 @@ class AnalysisRuntime:
             "details": {**failure.details, "analysis_source_count": len(analysis_sources)},
         }
         analysis_request = {
-            "capability_id": capability_id,
+            "operation": operation,
             "inputs": [
                 {
                     "path": str(item.path),
@@ -1496,7 +1485,7 @@ class AnalysisRuntime:
         ).hexdigest()
         result: dict[str, Any] = {
             "analysis_id": analysis_id,
-            "capability_id": capability_id,
+            "operation": operation,
             "provider": {"id": "flameox-capture", "version": __version__},
             "inputs": [item.public() for item in captured],
             "blocks": [
@@ -1518,7 +1507,7 @@ class AnalysisRuntime:
             "continuation": None,
             "capture": {
                 "mode": mode,
-                "requested_capability_id": capability_id,
+                "requested_operation": operation,
                 "executions": executions,
                 "outcome": self._capture_outcome(executions),
             },
@@ -1529,7 +1518,7 @@ class AnalysisRuntime:
         )
         manifest_body = {
             "evidence_kind": "capture",
-            "capability_id": capability_id,
+            "operation": operation,
             "provider": validated["provider"],
             "inputs": [
                 {
@@ -1564,14 +1553,14 @@ class AnalysisRuntime:
         result: dict[str, Any],
         cached: CachedAnalysis,
         *,
-        capability_id: str,
+        operation: str,
         mode: str,
         experiment: ExperimentDesign | None,
         executions: list[dict[str, Any]],
     ) -> dict[str, Any]:
         result["capture"] = {
             "mode": mode,
-            "requested_capability_id": capability_id,
+            "requested_operation": operation,
             "executions": executions,
             "outcome": self._capture_outcome(executions),
         }
@@ -1844,19 +1833,19 @@ class AnalysisRuntime:
 
     @staticmethod
     def _capture_arguments(
-        provider_id: str, arguments: Mapping[str, Any], *, capability_id: str
+        provider_id: str, arguments: Mapping[str, Any], *, operation: str
     ) -> CaptureArguments:
         contract = CAPTURE_PROVIDER_CONTRACTS.get(provider_id)
         if contract is None:
             raise RuntimeFailure(
-                "UNKNOWN_CAPABILITY",
+                "UNKNOWN_OPERATION",
                 f"Unknown capture provider: {provider_id}",
                 details={
                     "requested_provider": provider_id,
                     "available_capture_providers": sorted(CAPTURE_PROVIDER_CONTRACTS),
                     "recovery": (
                         "Inspect compatible provider variants with "
-                        "`flameox mcp inspect --capability CAPABILITY_ID`."
+                        "`flameox mcp inspect --tool TOOL_NAME`."
                     ),
                 },
             )
@@ -1931,7 +1920,7 @@ class AnalysisRuntime:
 
     def analyze_page(
         self,
-        capability_id: str,
+        operation: str,
         sources: Sequence[Source],
         arguments: Mapping[str, Any],
         *,
@@ -1941,7 +1930,7 @@ class AnalysisRuntime:
         """Analyze and derive any next-page request under the same runtime ownership."""
 
         result = self.analyze(
-            capability_id,
+            operation,
             sources,
             arguments,
             limits=limits,
@@ -1984,7 +1973,7 @@ class AnalysisRuntime:
         analysis_request = cached.manifest_body["analysis_request"]
         return self._copy_result(
             {
-                "capability_id": cached.manifest_body["capability_id"],
+                "operation": cached.manifest_body["operation"],
                 "sources": sources,
                 "options": analysis_request["arguments"],
                 "limits": analysis_request["limits"],
@@ -2300,7 +2289,7 @@ class AnalysisRuntime:
         self,
         *,
         evidence_kind: str | None = None,
-        capability_id: str | None = None,
+        operation: str | None = None,
         provider_id: str | None = None,
         input_sha256: str | None = None,
         created_after: datetime | None = None,
@@ -2311,7 +2300,7 @@ class AnalysisRuntime:
         try:
             return self.repository.query(
                 evidence_kind=evidence_kind,
-                capability_id=capability_id,
+                operation=operation,
                 provider_id=provider_id,
                 input_sha256=input_sha256,
                 created_after=created_after,
@@ -2395,7 +2384,6 @@ class AnalysisRuntime:
                     selection = self.repository.select_source(
                         source.evidence_id,
                         selector=source.artifact_selector,
-                        role=source.artifact_role,
                     )
                 except RepositoryError as error:
                     failure = self._repository_failure(error)
@@ -2590,7 +2578,7 @@ class AnalysisRuntime:
 
     def _provider_analysis(
         self,
-        capability_id: str,
+        operation: str,
         sources: list[NativeSource],
         arguments: Mapping[str, Any],
         *,
@@ -2599,11 +2587,11 @@ class AnalysisRuntime:
     ) -> ProviderAnalysis | None:
         try:
             if (
-                capability_id in {"cpu.hotspots", "cpu.callers"}
+                operation in {"rank_cpu_hotspots", "inspect_cpu_callers"}
                 and len(sources) == 1
                 and (
                     cpu_profile := self.cpu_profiles.analyze(
-                        capability_id,
+                        operation,
                         *(
                             self._perf_collapsed(sources[0], limits)
                             if sources[0].format == "perf-data"
@@ -2616,7 +2604,7 @@ class AnalysisRuntime:
             ):
                 return cpu_profile
             if kernel_evidence := self.kernel_evidence.analyze(
-                capability_id,
+                operation,
                 [source.path for source in sources],
                 [source.format for source in sources],
                 arguments,
@@ -2624,7 +2612,7 @@ class AnalysisRuntime:
             ):
                 return kernel_evidence
             if nvbench := self.nvbench.analyze(
-                capability_id,
+                operation,
                 [source.path for source in sources],
                 [source.format for source in sources],
                 arguments,
@@ -2632,7 +2620,7 @@ class AnalysisRuntime:
             ):
                 return nvbench
             if benchmark := self.benchmarks.analyze(
-                capability_id,
+                operation,
                 [source.path for source in sources],
                 [source.format for source in sources],
                 arguments,
@@ -2644,7 +2632,7 @@ class AnalysisRuntime:
                 return benchmark
             if len(sources) == 1 and (
                 source_evidence := self.source_evidence.analyze(
-                    capability_id,
+                    operation,
                     sources[0].path,
                     sources[0].format,
                     arguments,
@@ -2658,26 +2646,31 @@ class AnalysisRuntime:
             if (
                 len(sources) == 1
                 and sources[0].format in {"pytest", "observations"}
-                and capability_id
+                and operation
                 in {
-                    "failures.summary",
-                    "pytest.fixtures",
-                    "coverage.summary",
-                    "static.performance_candidates",
+                    "summarize_failures",
+                    "inspect_pytest_fixtures",
+                    "summarize_coverage",
+                    "inspect_performance_candidates",
                 }
             ):
                 return self.reliability.analyze(
-                    capability_id, sources[0].path, sources[0].format, max_rows=max_rows
+                    operation, sources[0].path, sources[0].format, max_rows=max_rows
                 )
             if (
                 len(sources) == 1
                 and sources[0].format == "otlp"
-                and capability_id
-                in {"trace.summary", "trace.operations", "trace.lifecycle", "trace.window"}
+                and operation
+                in {
+                    "summarize_trace",
+                    "summarize_trace_operations",
+                    "summarize_trace_lifecycle",
+                    "inspect_trace_window",
+                }
             ):
                 return self.otlp.analyze(
                     sources[0].path,
-                    capability_id,
+                    operation,
                     arguments,
                     max_rows=max_rows,
                     timeout_seconds=limits.timeout_seconds,
@@ -2687,7 +2680,7 @@ class AnalysisRuntime:
             if (
                 len(sources) == 1
                 and sources[0].format == "aiperf"
-                and capability_id == "inference.summary"
+                and operation == "summarize_inference"
             ):
                 return self.aiperf.analyze(
                     sources[0].path,
@@ -2696,7 +2689,7 @@ class AnalysisRuntime:
                     maximum_rss_bytes=limits.max_memory_bytes,
                     maximum_output_bytes=limits.max_output_bytes,
                 )
-            if capability_id == "inference.compare" and all(
+            if operation == "compare_inference" and all(
                 source.format == "aiperf" for source in sources
             ):
                 analyses = [
@@ -2711,7 +2704,7 @@ class AnalysisRuntime:
                 ]
                 return self.aiperf.compare(analyses, arguments, max_rows=max_rows)
             if inference_export := self.inference_exports.analyze(
-                capability_id,
+                operation,
                 [source.path for source in sources],
                 [source.format for source in sources],
                 arguments,
@@ -2721,10 +2714,10 @@ class AnalysisRuntime:
             if (
                 len(sources) == 1
                 and sources[0].format == "memray"
-                and capability_id in {"memory.hotspots", "memory.retained"}
+                and operation in {"rank_allocation_hotspots", "rank_retained_memory"}
             ):
                 return self.memray.analyze(
-                    capability_id,
+                    operation,
                     sources[0].path,
                     max_rows=max_rows,
                     max_input_bytes=limits.max_input_bytes,
@@ -2735,7 +2728,7 @@ class AnalysisRuntime:
             if (
                 len(sources) == 1
                 and sources[0].format == "nsight-compute"
-                and capability_id in {"gpu.kernel_metrics", "kernel.compare"}
+                and operation in {"inspect_gpu_kernel_metrics", "compare_kernel_validation"}
             ):
                 return self.nsight_compute.analyze(
                     sources[0].path,
@@ -2745,12 +2738,12 @@ class AnalysisRuntime:
                     maximum_output_bytes=limits.max_output_bytes,
                 )
             if platform_trace := self._platform_trace_analysis(
-                capability_id, sources, max_rows=max_rows, limits=limits
+                operation, sources, max_rows=max_rows, limits=limits
             ):
                 return platform_trace
             if len(sources) == 1 and (
                 structured := self.structured_workers.analyze(
-                    capability_id,
+                    operation,
                     sources[0].path,
                     sources[0].sha256,
                     sources[0].format,
@@ -2764,14 +2757,19 @@ class AnalysisRuntime:
                 return structured
             if (
                 len(sources) != 1
-                or capability_id
-                not in {"trace.summary", "trace.call_graph", "trace.pytorch", "trace.window"}
+                or operation
+                not in {
+                    "summarize_trace",
+                    "inspect_trace_call_graph",
+                    "summarize_pytorch_trace",
+                    "inspect_trace_window",
+                }
                 or sources[0].format
                 not in {"perfetto", "chrome-trace", "pytorch", "rocprof-pftrace"}
             ):
                 return None
             return self.perfetto.analyze(
-                capability_id,
+                operation,
                 sources[0].path,
                 arguments,
                 max_rows=max_rows,
@@ -2805,7 +2803,7 @@ class AnalysisRuntime:
 
     def _platform_trace_analysis(
         self,
-        capability_id: str,
+        operation: str,
         sources: list[NativeSource],
         *,
         max_rows: int,
@@ -2814,11 +2812,11 @@ class AnalysisRuntime:
         if len(sources) != 1:
             return None
         source = sources[0]
-        if source.format in {"nsys-rep", "nsys-parquet"} and capability_id in {
-            "trace.summary",
-            "trace.operations",
-            "trace.lifecycle",
-            "gpu.launches",
+        if source.format in {"nsys-rep", "nsys-parquet"} and operation in {
+            "summarize_trace",
+            "summarize_trace_operations",
+            "summarize_trace_lifecycle",
+            "inspect_gpu_launches",
         }:
             provider_version = "parquetdir-v1"
             path = source.path
@@ -2826,11 +2824,11 @@ class AnalysisRuntime:
                 path, provider_version = self._nsys_parquetdir(source, limits)
             return self.nsight_systems.analyze(
                 path,
-                capability_id=capability_id,
+                operation=operation,
                 max_rows=max_rows,
                 provider_version=provider_version,
             )
-        if source.format == "xctrace" and capability_id == "trace.summary":
+        if source.format == "xctrace" and operation == "summarize_trace":
             path, provider_version = self._xctrace_toc(source, limits)
             return self.xctrace.analyze(path, max_rows=max_rows, provider_version=provider_version)
         return None

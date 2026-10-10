@@ -44,8 +44,8 @@ from flameox.source_files import (
     sha256_file,
 )
 
-REPOSITORY_FORMAT = "3"
-EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=3"
+REPOSITORY_FORMAT = "4"
+EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=4"
 
 
 class RepositoryError(RuntimeError):
@@ -350,7 +350,7 @@ class EvidenceRepository:
                     "MISSING_OR_CHANGED_INPUT", "Analysis source mapping is out of range."
                 )
             source = sources[source_index]
-            if item.is_directory is not None and item.is_directory != source.is_directory:
+            if item.is_directory != source.is_directory:
                 raise RepositoryError(
                     "MISSING_OR_CHANGED_INPUT", "Analysis input kind changed before preservation."
                 )
@@ -380,9 +380,7 @@ class EvidenceRepository:
     def _read_manifest(self, evidence_id: str) -> EvidenceManifest:
         return self._validate_evidence(self._require_evidence_path(evidence_id))
 
-    def select_source(
-        self, evidence_id: str, *, selector: str | None, role: str | None
-    ) -> EvidenceSelection:
+    def select_source(self, evidence_id: str, *, selector: str | None) -> EvidenceSelection:
         """Resolve validated metadata without reading payloads before runtime admission."""
         manifest = self._parse_evidence(self._require_evidence_path(evidence_id))
         logical = manifest.body.source_layout.sources
@@ -410,8 +408,6 @@ class EvidenceRepository:
                 ),
                 None,
             )
-        elif role is not None:
-            selected = next((item for item in [*files, *logical] if item.role == role), None)
         else:
             candidates = [
                 item
@@ -511,7 +507,7 @@ class EvidenceRepository:
             "request_sha256": hashlib.sha256(
                 canonical_bytes(analysis.model_dump(mode="json", exclude_unset=True))
             ).hexdigest(),
-            "capability_id": analysis.capability_id,
+            "operation": analysis.operation,
             "inputs": [{"sha256": item.sha256, "format": item.format} for item in analysis.inputs],
             "offset": analysis.offset,
             "failure": {"code": analysis.failure.code} if analysis.failure is not None else None,
@@ -530,7 +526,7 @@ class EvidenceRepository:
             ],
             "body": {
                 "evidence_kind": body.evidence_kind,
-                "capability_id": body.capability_id,
+                "operation": body.operation,
                 "provider": body.provider.model_dump(mode="json"),
                 "inputs": [
                     item.model_dump(include={"sha256", "size_bytes", "format"})
@@ -574,7 +570,6 @@ class EvidenceRepository:
                 "block": True,
                 "returncode": True,
                 "returncode_scope": True,
-                "executable_sha256": True,
                 "collector_executable_sha256": True,
                 "workload_executable_sha256": True,
                 "workload_returncode": True,
@@ -601,7 +596,7 @@ class EvidenceRepository:
         self,
         *,
         evidence_kind: str | None = None,
-        capability_id: str | None = None,
+        operation: str | None = None,
         provider_id: str | None = None,
         input_sha256: str | None = None,
         created_after: datetime | None = None,
@@ -648,7 +643,7 @@ class EvidenceRepository:
         inventory_digest = hashlib.sha256("\n".join(inventory_ids).encode()).hexdigest()
         query_digest = self._query_digest(
             evidence_kind=evidence_kind,
-            capability_id=capability_id,
+            operation=operation,
             provider_id=provider_id,
             input_sha256=input_sha256,
             created_after=created_after,
@@ -667,7 +662,7 @@ class EvidenceRepository:
             if not self._matches(
                 body,
                 evidence_kind=evidence_kind,
-                capability_id=capability_id,
+                operation=operation,
                 provider_id=provider_id,
                 input_sha256=input_sha256,
                 created_after=created_after,
@@ -926,7 +921,7 @@ class EvidenceRepository:
         body: ManifestBody,
         *,
         evidence_kind: str | None,
-        capability_id: str | None,
+        operation: str | None,
         provider_id: str | None,
         input_sha256: str | None,
         created_after: datetime | None,
@@ -934,7 +929,7 @@ class EvidenceRepository:
     ) -> bool:
         if evidence_kind is not None and body.evidence_kind != evidence_kind:
             return False
-        if capability_id is not None and body.capability_id != capability_id:
+        if operation is not None and body.operation != operation:
             return False
         if provider_id is not None:
             analysis_provider_matches = body.provider.id == provider_id
@@ -958,7 +953,7 @@ class EvidenceRepository:
         return {
             "evidence_id": manifest.evidence_id,
             "evidence_kind": body.evidence_kind,
-            "capability_id": body.capability_id,
+            "operation": body.operation,
             "provider": body.provider.model_dump(mode="json"),
             "created_at": body.episode.created_at,
             "coverage": body.coverage.model_dump(mode="json"),
@@ -969,7 +964,7 @@ class EvidenceRepository:
     def _query_digest(
         *,
         evidence_kind: str | None,
-        capability_id: str | None,
+        operation: str | None,
         provider_id: str | None,
         input_sha256: str | None,
         created_after: datetime | None,
@@ -977,7 +972,7 @@ class EvidenceRepository:
     ) -> str:
         filters = {
             "evidence_kind": evidence_kind,
-            "capability_id": capability_id,
+            "operation": operation,
             "provider_id": provider_id,
             "input_sha256": input_sha256,
             "created_after": created_after.isoformat() if created_after is not None else None,

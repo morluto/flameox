@@ -13,7 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from flameox import __version__
 from flameox.mcp.server import run_server
-from flameox.mcp.tool_registry import capability_descriptor, capability_detail, tool_contracts
+from flameox.mcp.tool_registry import operation_descriptor, operation_detail, tool_contracts
 from flameox.providers.environment import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
     MAX_PREPARATION_TIMEOUT_SECONDS,
@@ -24,8 +24,9 @@ from flameox.providers.environment import (
 )
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CAPABILITIES,
-    CAPABILITY_BY_ID,
+    OPERATION_BY_CAPTURE_TOOL,
+    OPERATION_BY_NAME,
+    OPERATIONS,
     CaptureTarget,
     EvidenceSource,
     ExperimentDesign,
@@ -438,9 +439,9 @@ def _setup_value(
 
 @app.command("analyze")
 def analyze(
-    capability_id: Annotated[
+    operation: Annotated[
         str,
-        typer.Argument(help="Capability ID; discover IDs with `flameox mcp inspect`."),
+        typer.Argument(help="Operation name; discover names with `flameox mcp inspect`."),
     ],
     sources: Annotated[list[Path] | None, typer.Argument()] = None,
     arguments: Annotated[str, typer.Option("--arguments")] = "{}",
@@ -471,7 +472,7 @@ def analyze(
         rescue_destination = _evidence_destination(runtime, preserve, rescue_to)
         selected_sources = _cli_analysis_sources(runtime, sources, evidence_id, format_name)
         result = runtime.analyze(
-            capability_id,
+            operation,
             selected_sources,
             _json_object(arguments, option="--arguments"),
             continuation=continuation,
@@ -506,22 +507,22 @@ def capture(
         str,
         typer.Option(
             "--provider",
-            help="Provider ID; inspect with `flameox mcp inspect --capability CAPABILITY_ID`.",
+            help="Provider ID; inspect with `flameox mcp inspect --tool OPERATION`.",
         ),
     ],
-    capability_id: Annotated[
+    operation: Annotated[
         str,
         typer.Option(
-            "--capability",
-            help="Capability ID; discover IDs with `flameox mcp inspect`.",
+            "--operation",
+            help="Operation name; discover names with `flameox mcp inspect`.",
         ),
-    ] = "artifact.preview",
+    ] = "preview_artifact",
     cwd: Annotated[Path, typer.Option("--cwd")] = Path("."),
     capture_arguments: Annotated[
         str, typer.Option("--capture-arguments", help="Provider options as a JSON object.")
     ] = "{}",
     analysis_arguments: Annotated[
-        str, typer.Option("--analysis-arguments", help="Capability options as a JSON object.")
+        str, typer.Option("--analysis-arguments", help="Operation options as a JSON object.")
     ] = "{}",
     console_output: Annotated[
         str, typer.Option("--console-output", help="Console retention: diagnostics or full.")
@@ -586,7 +587,7 @@ def capture(
     async def execute() -> dict[str, Any]:
         return await runtime.capture_and_analyze(
             target,
-            capability_id,
+            operation,
             experiment=experiment,
             preserve=preserve and rescue_destination is None,
         )
@@ -617,7 +618,7 @@ def capture(
 
 @evidence_app.command("query")
 def evidence_query(
-    capability_id: Annotated[str | None, typer.Option("--capability")] = None,
+    operation: Annotated[str | None, typer.Option("--operation")] = None,
     provider_id: Annotated[
         str | None,
         typer.Option(
@@ -633,7 +634,7 @@ def evidence_query(
     runtime = _runtime()
     try:
         result = runtime.query_evidence(
-            capability_id=capability_id,
+            operation=operation,
             provider_id=provider_id,
             input_sha256=input_sha256,
             limit=limit,
@@ -642,7 +643,7 @@ def evidence_query(
         if continuation := result.get("continuation"):
             argv = ["evidence", "query"]
             for option, value in (
-                ("--capability", capability_id),
+                ("--operation", operation),
                 ("--provider", provider_id),
                 ("--input-sha256", input_sha256),
             ):
@@ -702,10 +703,6 @@ def mcp_inspect(
         str | None,
         typer.Option("--tool", help="Return the complete schema for one exact tool name."),
     ] = None,
-    capability_id: Annotated[
-        str | None,
-        typer.Option("--capability", help="Return exact options and examples for one capability."),
-    ] = None,
     full: Annotated[
         bool,
         typer.Option("--full", help="Return the complete catalog including every schema."),
@@ -713,30 +710,13 @@ def mcp_inspect(
 ) -> None:
     """Inspect the MCP catalog without starting a transport."""
 
-    if sum((tool_name is not None, capability_id is not None, full)) > 1:
+    if tool_name is not None and full:
         _cli_failure(
             RuntimeFailure(
                 "INVALID_INPUT",
-                "Use either --tool, --capability, or --full for one inspection mode.",
+                "Use either --tool or --full for one inspection mode.",
             )
         )
-    if capability_id is not None:
-        capability = CAPABILITY_BY_ID.get(capability_id)
-        if capability is None:
-            _cli_failure(
-                RuntimeFailure(
-                    "UNKNOWN_CAPABILITY",
-                    f"Unknown capability: {capability_id}",
-                    details={
-                        "requested_capability": capability_id,
-                        "available_capabilities": sorted(CAPABILITY_BY_ID),
-                        "recovery": "Run `flameox mcp inspect` to select a capability.",
-                    },
-                )
-            )
-        _write({"capabilities": [capability_detail(capability)]})
-        return
-
     contracts = tool_contracts()
     selected = contracts
     if tool_name is not None:
@@ -744,7 +724,7 @@ def mcp_inspect(
         if not selected:
             _cli_failure(
                 RuntimeFailure(
-                    "UNKNOWN_CAPABILITY",
+                    "UNKNOWN_OPERATION",
                     f"Unknown MCP tool: {tool_name}",
                     details={
                         "requested_tool": tool_name,
@@ -765,10 +745,14 @@ def mcp_inspect(
                 }
                 for contract in contracts
             ],
-            "capabilities": [capability_descriptor(capability) for capability in CAPABILITIES],
+            "operations": [operation_descriptor(spec) for spec in OPERATIONS],
         }
     else:
         catalog = {"tools": [contract.project().model_dump(mode="json") for contract in selected]}
+    if tool_name is not None:
+        spec = OPERATION_BY_NAME.get(tool_name) or OPERATION_BY_CAPTURE_TOOL.get(tool_name)
+        if spec is not None:
+            catalog["operation"] = operation_detail(spec)
     _write(catalog)
 
 
@@ -867,7 +851,7 @@ def _cli_next_page_argv(
     evidence_id: str | None,
     format_name: str | None = None,
 ) -> list[str]:
-    argv = ["analyze", str(request["capability_id"])]
+    argv = ["analyze", str(request["operation"])]
     if evidence_id is not None:
         argv.extend(["--evidence", evidence_id])
     else:

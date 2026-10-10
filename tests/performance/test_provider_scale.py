@@ -32,7 +32,7 @@ def test_v8_profile_aggregates_twenty_thousand_nodes_into_shared_frames(tmp_path
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         sources = [PathSource(path=str(profile), format="cpuprofile")]
-        result = runtime.analyze("cpu.hotspots", sources, {})
+        result = runtime.analyze("rank_cpu_hotspots", sources, {})
         assert result["blocks"][0]["values"]["sample_count"] == 20_000
         rows = result["blocks"][1]["rows"]
         assert len(rows) == 11
@@ -43,7 +43,7 @@ def test_v8_profile_aggregates_twenty_thousand_nodes_into_shared_frames(tmp_path
             else:
                 assert row["self_value"] == row["inclusive_value"] == 2_000
         rows.clear()
-        assert len(runtime.analyze("cpu.hotspots", sources, {})["blocks"][1]["rows"]) == 11
+        assert len(runtime.analyze("rank_cpu_hotspots", sources, {})["blocks"][1]["rows"]) == 11
     finally:
         runtime.close()
 
@@ -86,7 +86,7 @@ def test_fixture_analysis_keeps_other_workers_teardown_failures_separate(tmp_pat
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+            "inspect_pytest_fixtures", [PathSource(path=str(events), format="pytest")], {}
         )
         metrics = result["blocks"][0]["values"]
         assert metrics["fixture_count"] == metrics["invocation_count"] == 4_000

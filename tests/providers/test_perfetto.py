@@ -79,10 +79,12 @@ def test_chrome_trace_projects_native_perfetto_evidence(tmp_path: Path) -> None:
     )
     source = [PathSource(path=str(trace), format="chrome-trace")]
     try:
-        summary = runtime.analyze("trace.summary", source, {})
-        call_graph = runtime.analyze("trace.call_graph", source, {})
-        pytorch = runtime.analyze("trace.pytorch", source, {})
-        window = runtime.analyze("trace.window", source, {"start_ns": 240_000, "end_ns": 250_000})
+        summary = runtime.analyze("summarize_trace", source, {})
+        call_graph = runtime.analyze("inspect_trace_call_graph", source, {})
+        pytorch = runtime.analyze("summarize_pytorch_trace", source, {})
+        window = runtime.analyze(
+            "inspect_trace_window", source, {"start_ns": 240_000, "end_ns": 250_000}
+        )
         large_trace = tmp_path / "many-edges.json"
         large_trace.write_text(
             json.dumps(
@@ -105,7 +107,7 @@ def test_chrome_trace_projects_native_perfetto_evidence(tmp_path: Path) -> None:
             )
         )
         limited = runtime.analyze(
-            "trace.call_graph",
+            "inspect_trace_call_graph",
             [PathSource(path=str(large_trace), format="chrome-trace")],
             {},
             limits=RequestLimits(max_rows=1_000),

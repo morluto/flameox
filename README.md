@@ -49,7 +49,7 @@ the same `flameox update` command.
 For direct CLI use, pass exact artifact paths or an explicit command:
 
 ```console
-uvx flameox analyze artifact.preview /absolute/path/to/artifact.json
+uvx flameox analyze preview_artifact /absolute/path/to/artifact.json
 uvx flameox capture --provider direct --cwd "$PWD" -- python benchmark.py
 ```
 
@@ -85,9 +85,9 @@ semantic oracle.
 ## MCP
 
 The MCP server has no workspace binding. It exposes named analysis and capture tools through the
-same capability registry as the CLI. Analysis tools accept explicit sources; capture tools accept
-a typed target and provider. Tool schemas expose capability-specific fields directly. Inspect the
-catalog with `flameox mcp inspect`; use `--capability CAPABILITY_ID` or `--tool TOOL_NAME` for
+same operation registry as the CLI. Analysis tools accept explicit sources; capture tools accept
+a typed target and provider. Tool schemas expose operation-specific fields directly. Inspect the
+catalog with `flameox mcp inspect`; use `--tool TOOL_NAME` for
 focused schemas and examples. The complete contract and current tool catalog are in
 [the interface guide](docs/interfaces.md).
 

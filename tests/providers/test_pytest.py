@@ -12,7 +12,7 @@ import pytest
 from flameox.mcp.request_contracts import capture_example
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
-    CAPABILITY_BY_ID,
+    OPERATION_BY_NAME,
     CaptureTarget,
     PathSource,
     RequestLimits,
@@ -43,7 +43,7 @@ def test_pytest_capture_checks_the_exact_workload_interpreter_dependency(tmp_pat
                         cwd=str(tmp_path),
                         provider_id="pytest",
                     ),
-                    "failures.summary",
+                    "summarize_failures",
                 )
             assert failure.value.code == "UNAVAILABLE_CAPABILITY"
             assert "pytest >=8.3" in failure.value.message
@@ -78,7 +78,7 @@ def test_pytest_keeps_long_ids_and_worker_executions_distinct(
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "failures.summary",
+                "summarize_failures",
             )
             metrics = result["blocks"][0]["values"]
             replicas = 2 if distribution == "each" else 1
@@ -132,7 +132,7 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary",
+            "summarize_failures",
             [PathSource(path=str(events), format="pytest")],
             {},
             limits=RequestLimits(max_rows=2),
@@ -146,7 +146,7 @@ def test_pytest_stream_has_typed_summary_and_bounded_rows(tmp_path: Path) -> Non
         )
         with pytest.raises(RuntimeFailure) as invalid:
             runtime.analyze(
-                "failures.summary", [PathSource(path=str(invalid_events), format="pytest")], {}
+                "summarize_failures", [PathSource(path=str(invalid_events), format="pytest")], {}
             )
     finally:
         runtime.close()
@@ -186,13 +186,13 @@ def test_pytest_failure_identities_precede_large_successful_population(tmp_path:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary",
+            "summarize_failures",
             [PathSource(path=str(events), format="pytest")],
             {},
             limits=RequestLimits(max_rows=10),
         )
         second = runtime.analyze(
-            "failures.summary",
+            "summarize_failures",
             [PathSource(path=str(events), format="pytest")],
             {},
             limits=RequestLimits(max_rows=10),
@@ -221,7 +221,7 @@ def test_pytest_collection_failure_identity_is_reported(tmp_path: Path) -> None:
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "failures.summary",
+                "summarize_failures",
             )
         finally:
             runtime.close()
@@ -265,7 +265,7 @@ def test_pytest_capture_produces_analyzable_session_evidence(tmp_path: Path) -> 
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "failures.summary",
+                "summarize_failures",
             )
         finally:
             runtime.close()
@@ -316,7 +316,7 @@ def test_pytest_capture_uses_its_plugin_without_importing_workload_flameox(
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "pytest.fixtures",
+                "inspect_pytest_fixtures",
             )
         finally:
             runtime.close()
@@ -363,7 +363,7 @@ def test_pytest_fixture_capture_attributes_session_work_per_xdist_worker(
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "pytest.fixtures",
+                "inspect_pytest_fixtures",
             )
         finally:
             runtime.close()
@@ -411,7 +411,7 @@ def test_pytest_fixture_capture_retains_teardown_failure(tmp_path: Path) -> None
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "pytest.fixtures",
+                "inspect_pytest_fixtures",
             )
         finally:
             runtime.close()
@@ -450,7 +450,7 @@ def test_pytest_capture_does_not_instrument_nested_pytest_processes(tmp_path: Pa
                     cwd=str(tmp_path),
                     provider_id="pytest",
                 ),
-                "failures.summary",
+                "summarize_failures",
             )
         finally:
             runtime.close()
@@ -477,10 +477,10 @@ def test_pytest_interruption_is_not_overwritten_by_session_finish(tmp_path: Path
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+            "summarize_failures", [PathSource(path=str(events), format="pytest")], {}
         )
         fixtures = runtime.analyze(
-            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+            "inspect_pytest_fixtures", [PathSource(path=str(events), format="pytest")], {}
         )
     finally:
         runtime.close()
@@ -505,10 +505,10 @@ def test_pytest_nonzero_session_exit_remains_visible(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+            "summarize_failures", [PathSource(path=str(events), format="pytest")], {}
         )
         fixtures = runtime.analyze(
-            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+            "inspect_pytest_fixtures", [PathSource(path=str(events), format="pytest")], {}
         )
     finally:
         runtime.close()
@@ -537,7 +537,7 @@ def test_pytest_interrupted_retry_metrics_match_diagnostic_classification(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+            "summarize_failures", [PathSource(path=str(events), format="pytest")], {}
         )
     finally:
         runtime.close()
@@ -570,7 +570,7 @@ def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+            "summarize_failures", [PathSource(path=str(events), format="pytest")], {}
         )
     finally:
         runtime.close()
@@ -647,7 +647,7 @@ def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_r
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "pytest.fixtures", [PathSource(path=str(events), format="pytest")], {}
+            "inspect_pytest_fixtures", [PathSource(path=str(events), format="pytest")], {}
         )
     finally:
         runtime.close()
@@ -677,7 +677,7 @@ def test_advertised_pytest_capture_example_runs_the_named_fixture_workflow(tmp_p
         "import pytest\n@pytest.fixture\ndef answer():\n    return 42\n"
         "def test_work(answer):\n    assert answer == 42\n"
     )
-    example = capture_example(CAPABILITY_BY_ID["pytest.fixtures"])
+    example = capture_example(OPERATION_BY_NAME["inspect_pytest_fixtures"])
     example["target"]["argv"][0] = sys.executable
     example["target"]["cwd"] = str(tmp_path)
 
@@ -686,7 +686,7 @@ def test_advertised_pytest_capture_example_runs_the_named_fixture_workflow(tmp_p
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(**example["target"], provider_id=example["provider"]["kind"]),
-                "pytest.fixtures",
+                "inspect_pytest_fixtures",
             )
             assert result["capture"]["outcome"]["status"] == "succeeded"
             assert result["provider"]["id"] == "pytest"

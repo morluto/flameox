@@ -8,9 +8,9 @@ from pydantic import Field, GetJsonSchemaHandler, JsonValue, RootModel, field_va
 from pydantic.json_schema import JsonSchemaValue
 
 from flameox.evidence_models import CaptureExecution
-from flameox.mcp.catalog import ANALYSIS_TOOLS
 from flameox.runtime_contracts import (
     LOWERCASE_SHA256_PATTERN,
+    OPERATION_BY_NAME,
     AnalysisResult,
     Coverage,
     EvidenceSource,
@@ -93,14 +93,14 @@ class ToolCallEnvelope(StrictModel):
 
     tool: str = Field(
         description="Exact named read tool for this continuation.",
-        json_schema_extra={"enum": [*ANALYSIS_TOOLS.values(), "query_evidence"]},
+        json_schema_extra={"enum": [*OPERATION_BY_NAME, "query_evidence"]},
     )
     arguments: dict[str, JsonValue]
 
     @field_validator("tool")
     @classmethod
     def require_read_tool(cls, value: str) -> str:
-        if value not in ANALYSIS_TOOLS.values() and value != "query_evidence":
+        if value not in OPERATION_BY_NAME and value != "query_evidence":
             raise ValueError("Continuation must name an analysis tool or query_evidence.")
         return value
 
@@ -129,7 +129,7 @@ class CaptureDetailsEnvelope(StrictModel):
     status: Literal["complete"]
     workload_status: Literal["succeeded", "failed", "unknown"]
     mode: Literal["single", "experiment"]
-    requested_capability_id: str
+    requested_operation: str
     executions: list[CaptureExecution]
     outcome: CaptureOutcomeEnvelope
 
@@ -200,7 +200,7 @@ class EvidenceInspectionEnvelope(StrictModel):
 class EvidenceSummaryEnvelope(StrictModel):
     evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
     evidence_kind: str
-    capability_id: str
+    operation: str
     provider: ProviderIdentity
     created_at: str
     coverage: Coverage

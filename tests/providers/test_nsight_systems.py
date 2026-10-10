@@ -31,7 +31,7 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "gpu.launches",
+            "inspect_gpu_launches",
             [PathSource(path=str(parquetdir), format="nsys-parquet")],
             {},
         )
@@ -63,7 +63,7 @@ def test_nsight_systems_cuda_api_only_is_negative_accelerator_evidence(tmp_path:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "gpu.launches",
+            "inspect_gpu_launches",
             [PathSource(path=str(parquetdir), format="nsys-parquet")],
             {},
         )
@@ -102,10 +102,12 @@ def test_nsight_native_cuda_tables_separate_host_operations_from_device_activity
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     sources = [PathSource(path=str(parquetdir), format="nsys-parquet")]
     try:
-        summary = runtime.analyze("trace.summary", sources, {})
-        operations = runtime.analyze("trace.operations", sources, {})
-        launches = runtime.analyze("gpu.launches", sources, {})
-        bounded = runtime.analyze("gpu.launches", sources, {}, limits=RequestLimits(max_rows=1))
+        summary = runtime.analyze("summarize_trace", sources, {})
+        operations = runtime.analyze("summarize_trace_operations", sources, {})
+        launches = runtime.analyze("inspect_gpu_launches", sources, {})
+        bounded = runtime.analyze(
+            "inspect_gpu_launches", sources, {}, limits=RequestLimits(max_rows=1)
+        )
     finally:
         runtime.close()
 
@@ -157,9 +159,9 @@ def test_nsight_systems_trace_projections_select_semantic_table_families(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     source = [PathSource(path=str(parquetdir), format="nsys-parquet")]
     try:
-        summary = runtime.analyze("trace.summary", source, {})
-        operations = runtime.analyze("trace.operations", source, {})
-        lifecycle = runtime.analyze("trace.lifecycle", source, {})
+        summary = runtime.analyze("summarize_trace", source, {})
+        operations = runtime.analyze("summarize_trace_operations", source, {})
+        lifecycle = runtime.analyze("summarize_trace_lifecycle", source, {})
     finally:
         runtime.close()
 
@@ -187,7 +189,7 @@ def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "gpu.launches",
+            "inspect_gpu_launches",
             [PathSource(path=str(export), format="nsys-parquet")],
             {},
             limits=RequestLimits(max_rows=2),
@@ -202,16 +204,16 @@ def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "capability,table",
+    "operation,table",
     [
-        ("gpu.launches", "CUDA_GPU_KERN_SUM"),
-        ("trace.summary", "CUDA_GPU_KERN_SUM"),
-        ("trace.operations", "CUDA_API_TRACE"),
-        ("trace.lifecycle", "PROCESS"),
+        ("inspect_gpu_launches", "CUDA_GPU_KERN_SUM"),
+        ("summarize_trace", "CUDA_GPU_KERN_SUM"),
+        ("summarize_trace_operations", "CUDA_API_TRACE"),
+        ("summarize_trace_lifecycle", "PROCESS"),
     ],
 )
 def test_nsight_systems_rejects_malformed_selected_tables(
-    tmp_path: Path, capability: str, table: str
+    tmp_path: Path, operation: str, table: str
 ) -> None:
     report = tmp_path / "report.parquetdir"
     report.mkdir()
@@ -220,7 +222,7 @@ def test_nsight_systems_rejects_malformed_selected_tables(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as caught:
-            runtime.analyze(capability, [PathSource(path=str(report), format="nsys-parquet")], {})
+            runtime.analyze(operation, [PathSource(path=str(report), format="nsys-parquet")], {})
         assert caught.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()

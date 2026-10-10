@@ -151,11 +151,11 @@ class AIPerfProvider:
         max_rows: int,
     ) -> ProviderAnalysis:
         if len(analyses) < 2:
-            raise ProviderFailure("INVALID_INPUT", "inference.compare requires at least 2 inputs")
+            raise ProviderFailure("INVALID_INPUT", "compare_inference requires at least 2 inputs")
         if any(not item.complete for item in analyses):
             raise ProviderFailure(
                 "LIMIT_EXCEEDED",
-                "inference.compare requires complete request projections within the row limit",
+                "compare_inference requires complete request projections within the row limit",
             )
         baseline_index = int(arguments.get("baseline_index", 0))
         if baseline_index >= len(analyses):

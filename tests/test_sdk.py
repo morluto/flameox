@@ -27,8 +27,8 @@ def test_capture_analyzes_real_sdk_observations(tmp_path: Path) -> None:
             "capture",
             "--provider",
             "observations",
-            "--capability",
-            "failures.summary",
+            "--operation",
+            "summarize_failures",
             "--cwd",
             str(tmp_path),
             "--",
@@ -77,7 +77,14 @@ def test_capture_analyzes_real_sdk_observations(tmp_path: Path) -> None:
         artifact = tmp_path / f"invalid-{index}.jsonl"
         artifact.write_bytes(invalid_event)
         rejected = subprocess.run(
-            [executable, "analyze", "failures.summary", str(artifact), "--format", "observations"],
+            [
+                executable,
+                "analyze",
+                "summarize_failures",
+                str(artifact),
+                "--format",
+                "observations",
+            ],
             env=environment,
             capture_output=True,
             text=True,

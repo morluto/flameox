@@ -18,7 +18,7 @@ def test_query_pages_one_thousand_real_immutable_manifests(tmp_path: Path) -> No
     try:
         for index in range(1_000):
             artifact.write_text(f"measurement {index}\n")
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             expected.add(runtime.preserve_evidence(result["analysis_id"])["evidence_id"])
     finally:
         runtime.close()
@@ -36,6 +36,6 @@ def test_query_pages_one_thousand_real_immutable_manifests(tmp_path: Path) -> No
             actual.extend(item["evidence_id"] for item in page["evidence"])
         assert len(actual) == 1_000
         assert set(actual) == expected
-        assert reopened.query_evidence(capability_id="missing")["evidence"] == []
+        assert reopened.query_evidence(operation="missing")["evidence"] == []
     finally:
         reopened.close()

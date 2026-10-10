@@ -28,7 +28,7 @@ class BenchmarkProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         paths: Sequence[Path],
         formats: Sequence[str],
         arguments: Mapping[str, Any],
@@ -40,13 +40,17 @@ class BenchmarkProvider:
     ) -> ProviderAnalysis | None:
         if not paths:
             return None
-        if capability_id not in {"benchmark.summary", "benchmark.scaling", "benchmark.compare"}:
+        if operation not in {
+            "summarize_benchmarks",
+            "analyze_benchmark_scaling",
+            "compare_benchmarks",
+        }:
             return None
         if all(format_name == "samples" for format_name in formats):
             return self._structured_samples(
                 paths,
-                compare_arguments=arguments if capability_id == "benchmark.compare" else None,
-                scaling_arguments=arguments if capability_id == "benchmark.scaling" else None,
+                compare_arguments=arguments if operation == "compare_benchmarks" else None,
+                scaling_arguments=arguments if operation == "analyze_benchmark_scaling" else None,
                 max_rows=max_rows,
                 timeout_seconds=timeout_seconds,
                 maximum_rss_bytes=maximum_rss_bytes,
@@ -61,12 +65,12 @@ class BenchmarkProvider:
                     artifact_path=str(path),
                     max_rows=(
                         _MAX_AGGREGATE_SERIES
-                        if capability_id in {"benchmark.compare", "benchmark.scaling"}
+                        if operation in {"compare_benchmarks", "analyze_benchmark_scaling"}
                         else max_rows
                     ),
                     projection=(
                         "series"
-                        if capability_id in {"benchmark.compare", "benchmark.scaling"}
+                        if operation in {"compare_benchmarks", "analyze_benchmark_scaling"}
                         else "samples"
                     ),
                     metric=arguments.get("metric"),
@@ -77,13 +81,13 @@ class BenchmarkProvider:
             )
             for path in paths
         ]
-        if capability_id == "benchmark.compare":
+        if operation == "compare_benchmarks":
             return self._compare(parsed, arguments, max_rows=max_rows)
-        if capability_id == "benchmark.scaling":
+        if operation == "analyze_benchmark_scaling":
             if any(result.truncated for result in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.scaling exceeds the bounded semantic-series limit",
+                    "analyze_benchmark_scaling exceeds the bounded semantic-series limit",
                 )
             return scaling_projection(
                 [dict(row) for result in parsed for row in result.rows],
@@ -168,7 +172,7 @@ class BenchmarkProvider:
             if any(item.truncated for item in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.compare exceeds the bounded semantic-series limit",
+                    "compare_benchmarks exceeds the bounded semantic-series limit",
                 )
             return self._compare_row_sets(
                 [item.rows for item in parsed],
@@ -181,7 +185,7 @@ class BenchmarkProvider:
             if any(item.truncated for item in parsed):
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED",
-                    "benchmark.scaling exceeds the bounded semantic-series limit",
+                    "analyze_benchmark_scaling exceeds the bounded semantic-series limit",
                 )
             return scaling_projection(
                 [dict(row) for result in parsed for row in result.rows],
@@ -235,7 +239,7 @@ class BenchmarkProvider:
         provider_version: str,
     ) -> ProviderAnalysis:
         if len(row_sets) < 2:
-            raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
+            raise ProviderFailure("INVALID_INPUT", "compare_benchmarks requires at least 2 inputs")
         baseline_index = int(arguments.get("baseline_index", 0))
         if baseline_index >= len(row_sets):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
@@ -296,11 +300,11 @@ class BenchmarkProvider:
         parsed: Sequence[PyperfWorkerResult], arguments: Mapping[str, Any], *, max_rows: int
     ) -> ProviderAnalysis:
         if len(parsed) < 2:
-            raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
+            raise ProviderFailure("INVALID_INPUT", "compare_benchmarks requires at least 2 inputs")
         if any(result.truncated for result in parsed):
             raise ProviderFailure(
                 "LIMIT_EXCEEDED",
-                "benchmark.compare exceeds the bounded semantic-series limit",
+                "compare_benchmarks exceeds the bounded semantic-series limit",
             )
         return BenchmarkProvider._compare_row_sets(
             [result.rows for result in parsed],

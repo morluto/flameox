@@ -37,7 +37,7 @@ def test_capture_unwinds_scratch_when_progress_fails(tmp_path: Path, cancelled: 
                         cwd=str(tmp_path),
                         provider_id="direct",
                     ),
-                    "artifact.preview",
+                    "preview_artifact",
                     progress=fail_progress,
                 )
             assert not list(runtime.scratch.glob("capture-*"))
@@ -66,7 +66,7 @@ def test_cancelled_capture_settles_child_and_removes_scratch(tmp_path: Path) -> 
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
             )
         )
         try:
@@ -109,16 +109,16 @@ def test_live_capture_keeps_capacity_reserved_until_unwind(
             await release.wait()
 
         first = asyncio.create_task(
-            runtime.capture_and_analyze(target, "artifact.preview", limits=limits, progress=hold)
+            runtime.capture_and_analyze(target, "preview_artifact", limits=limits, progress=hold)
         )
         try:
             await asyncio.wait_for(started.wait(), 2)
             with pytest.raises(RuntimeFailure) as failure:
-                await runtime.capture_and_analyze(target, "artifact.preview", limits=limits)
+                await runtime.capture_and_analyze(target, "preview_artifact", limits=limits)
             assert failure.value.code == "LIMIT_EXCEEDED"
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)
-            result = await runtime.capture_and_analyze(target, "artifact.preview", limits=limits)
+            result = await runtime.capture_and_analyze(target, "preview_artifact", limits=limits)
             assert result["capture"]["outcome"]["status"] == "succeeded"
         finally:
             first.cancel()
@@ -137,7 +137,7 @@ def test_evidence_materialization_cannot_consume_live_capture_reservation(
     (bundle / "data.txt").write_text("x" * 2048)
     publisher = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        analysis = publisher.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        analysis = publisher.analyze("preview_artifact", [PathSource(path=str(bundle))], {})
         preserved = publisher.preserve_evidence(analysis["analysis_id"])
         projection = publisher.read_evidence_agent_projection(preserved["evidence_id"])
         source = EvidenceSource.model_validate(projection["analysis_sources"][0])
@@ -161,7 +161,7 @@ def test_evidence_materialization_cannot_consume_live_capture_reservation(
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(max_output_bytes=1024),
                 progress=hold,
             )
@@ -169,7 +169,7 @@ def test_evidence_materialization_cannot_consume_live_capture_reservation(
         try:
             await asyncio.wait_for(started.wait(), 5)
             with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze("artifact.preview", [source], {})
+                runtime.analyze("preview_artifact", [source], {})
             assert failure.value.code == "LIMIT_EXCEEDED"
             assert not [path for path in runtime.scratch.rglob("*") if path.is_file()]
         finally:

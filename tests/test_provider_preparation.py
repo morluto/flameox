@@ -82,7 +82,7 @@ def test_prepare_activates_verified_collector_for_the_live_session_and_reuses_it
             assert rejected.structured_content["code"] == "SETUP_FAILURE"
 
             unavailable = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {
                     "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
                     "provider": {"kind": "py-spy"},
@@ -113,7 +113,7 @@ def test_prepare_activates_verified_collector_for_the_live_session_and_reuses_it
 
             collector.write_text(collector.read_text() + "# changed\n")
             failed = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {
                     "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
                     "provider": {"kind": "py-spy"},

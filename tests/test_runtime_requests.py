@@ -124,7 +124,7 @@ async def test_request_cancellation_joins_worker_before_releasing_state(
                         cwd=str(tmp_path),
                         provider_id="direct",
                     ),
-                    "artifact.preview",
+                    "preview_artifact",
                 )
 
     active = asyncio.create_task(request())

@@ -37,7 +37,7 @@ When changing the product:
 - use DuckDB only as an ephemeral query engine; Flameox never creates or imports
   SQLite, though upstream packages may read their own native formats internally;
 - keep CLI and MCP as thin transports over the same `AnalysisRuntime` and
-  capability registry;
+  operation registry;
 - let agents pass validated argv, cwd, environment, provider arguments, and
   request-lowerable limits directly to capture;
 - expose coverage, limitations, compatibility, and containment truthfully;
@@ -51,9 +51,9 @@ a semantic oracle.
 ## Project Structure & Module Organization
 
 flameox is a Python 3.12+ package using a `src/` layout. `runtime.py` owns the
-process-lifespan capability runtime; `runtime_contracts.py` owns strict public
+process-lifespan operation runtime; `runtime_contracts.py` owns strict public
 contracts; `repository.py` owns optional immutable preservation; `execution.py`
-owns bounded subprocess work; capability integrations live in `providers/`;
+owns bounded subprocess work; operation integrations live in `providers/`;
 reusable format parsers live in `adapters/`; isolated protocols live in
 `workers/`; and `cli.py` plus `mcp/` are thin transports. Tests mirror these
 semantic owners under `tests/`.
@@ -73,7 +73,7 @@ Read the relevant contract before changing product behavior:
 
 ## Tool Changes
 
-- Expose named, task-shaped MCP tools from the capability registry. Do not add
+- Expose named, task-shaped MCP tools from the operation registry. Do not add
   search/execute gateways or compatibility aliases for removed tools.
 - Keep public fields, bounds, and descriptions in canonical runtime models;
   project transport schemas from them rather than maintaining parallel models.

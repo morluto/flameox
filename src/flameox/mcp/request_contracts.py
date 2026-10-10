@@ -23,10 +23,10 @@ from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS, SYSTEM_PROVI
 from flameox.runtime_contracts import (
     LOWERCASE_SHA256_PATTERN,
     MAX_ROWS,
-    Capability,
     DirectTarget,
     EvidenceSource,
     ExperimentDesign,
+    Operation,
     PathSource,
     RequestLimits,
     StrictModel,
@@ -117,13 +117,13 @@ class CaptureArguments(EvidenceArguments):
     )
 
 
-def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
-    """Expose capability options as fields while retaining their validators."""
+def analysis_arguments(spec: Operation) -> type[AnalysisArguments]:
+    """Expose operation options as fields while retaining their validators."""
     path_model = create_model(
-        _model_name(capability.id, "PathSource"),
+        _model_name(spec.name, "PathSource"),
         __base__=PathSource,
         format=(
-            literal_type(capability.formats) | None,
+            literal_type(spec.formats) | None,
             Field(default=None, description="Native format; omit for unambiguous detection."),
         ),
     )
@@ -133,15 +133,15 @@ def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
         BeforeValidator(normalize_source_kind),
     ]
     model = create_model(
-        _model_name(capability.id, "Analysis"),
-        __base__=cast(tuple[type[BaseModel], ...], (capability.model, AnalysisArguments)),
-        __config__=ConfigDict(json_schema_extra={"examples": [analysis_example(capability)]}),
+        _model_name(spec.name, "Analysis"),
+        __base__=cast(tuple[type[BaseModel], ...], (spec.model, AnalysisArguments)),
+        __config__=ConfigDict(json_schema_extra={"examples": [analysis_example(spec)]}),
         sources=(
             GenericAlias(list, source_type),
             Field(
-                description=f"Ordered artifacts in these formats: {', '.join(capability.formats)}.",
-                min_length=capability.minimum_sources,
-                max_length=capability.maximum_sources,
+                description=f"Ordered artifacts in these formats: {', '.join(spec.formats)}.",
+                min_length=spec.minimum_sources,
+                max_length=spec.maximum_sources,
             ),
         ),
     )
@@ -149,10 +149,10 @@ def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
     return cast(type[AnalysisArguments], model)
 
 
-def capture_arguments(capability: Capability) -> type[CaptureArguments]:
+def capture_arguments(spec: Operation) -> type[CaptureArguments]:
     """Advertise only compatible collectors, including their exact typed fields."""
     providers: Any = None
-    for contract in compatible_capture_providers(capability):
+    for contract in compatible_capture_providers(spec):
         provider_model = create_model(
             _model_name(contract.id, "Collector"),
             __base__=contract.argument_model,
@@ -162,7 +162,7 @@ def capture_arguments(capability: Capability) -> type[CaptureArguments]:
     fields: dict[str, Any] = {
         "provider": (providers, Field(discriminator="kind", description="Compatible collector.")),
     }
-    if capability.maximum_sources > 1:
+    if spec.maximum_sources > 1:
         fields["experiment"] = (
             ExperimentDesign | None,
             Field(
@@ -170,34 +170,34 @@ def capture_arguments(capability: Capability) -> type[CaptureArguments]:
             ),
         )
     model = create_model(
-        _model_name(capability.id, "Capture"),
-        __base__=cast(tuple[type[BaseModel], ...], (capability.model, CaptureArguments)),
-        __config__=ConfigDict(json_schema_extra={"examples": [capture_example(capability)]}),
+        _model_name(spec.name, "Capture"),
+        __base__=cast(tuple[type[BaseModel], ...], (spec.model, CaptureArguments)),
+        __config__=ConfigDict(json_schema_extra={"examples": [capture_example(spec)]}),
         **fields,
     )
 
     return cast(type[CaptureArguments], model)
 
 
-def option_example(capability: Capability) -> dict[str, Any]:
-    example = dict(capability.model.model_json_schema().get("examples", [{}])[0])
-    capability.model.model_validate(example)
+def option_example(spec: Operation) -> dict[str, Any]:
+    example = dict(spec.model.model_json_schema().get("examples", [{}])[0])
+    spec.model.model_validate(example)
     return example
 
 
-def analysis_example(capability: Capability) -> dict[str, Any]:
-    format_name = capability.formats[0]
+def analysis_example(spec: Operation) -> dict[str, Any]:
+    format_name = spec.formats[0]
     return {
-        **option_example(capability),
+        **option_example(spec),
         "sources": [
             {"path": f"/absolute/path/artifact-{index + 1}.{format_name}", "format": format_name}
-            for index in range(capability.minimum_sources)
+            for index in range(spec.minimum_sources)
         ],
     }
 
 
-def capture_example(capability: Capability) -> dict[str, Any]:
-    provider = compatible_capture_providers(capability)[0]
+def capture_example(spec: Operation) -> dict[str, Any]:
+    provider = compatible_capture_providers(spec)[0]
     executable = "node" if provider.id.startswith("node-") else "python"
     workload = "workload.js" if executable == "node" else "workload.py"
     argv = (
@@ -206,7 +206,7 @@ def capture_example(capability: Capability) -> dict[str, Any]:
         else [executable, workload]
     )
     return {
-        **option_example(capability),
+        **option_example(spec),
         "target": {"argv": argv, "cwd": "/absolute/workdir"},
         "provider": {"kind": provider.id},
     }
@@ -244,17 +244,16 @@ class RescueArguments(PreserveArguments):
 
 class QueryArguments(StrictModel):
     evidence_kind: str | None = None
-    capability_id: str | None = Field(
+    operation: str | None = Field(
         default=None,
         min_length=1,
         max_length=160,
-        description="Current or historical capability ID stored in immutable evidence.",
+        description="Task name that produced the preserved evidence.",
     )
     provider_id: str | None = Field(
         default=None,
         description=(
-            "Current or historical analysis provider ID, or the capture collector ID "
-            "recorded in capture evidence."
+            "Analysis provider ID, or the capture collector ID recorded in capture evidence."
         ),
     )
     input_sha256: str | None = Field(default=None, pattern=LOWERCASE_SHA256_PATTERN)

@@ -63,7 +63,7 @@ def test_stdio_inherits_startup_limits_and_preserves_request_limits_on_replay(
                 {"page_size": 1, "limits": {"max_rows": 2}},
             ):
                 rejected = await call(
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {"target": target, "provider": {"kind": "direct"}, **arguments},
                 )
                 assert rejected["code"] in {"LIMIT_EXCEEDED", "INVALID_REQUEST"}
@@ -100,12 +100,12 @@ def test_stdio_inherits_startup_limits_and_preserves_request_limits_on_replay(
             )
             assert rejected_input["code"] == "LIMIT_EXCEEDED"
             inherited = await call(
-                "capture_artifact_preview", {"target": target, "provider": {"kind": "direct"}}
+                "capture_and_preview_artifact", {"target": target, "provider": {"kind": "direct"}}
             )
             assert inherited["coverage"]["rows_returned"] == 2
 
             captured = await call(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "target": target,
                     "provider": {"kind": "direct"},

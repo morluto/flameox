@@ -27,7 +27,7 @@ def preserve_bundle(root: Path, name: str = "bundle") -> dict[str, Any]:
     (bundle / "foo").write_text("x" * 2048)
     runtime = AnalysisRuntime(evidence_directory=root / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(bundle))], {})
         ref = runtime.preserve_evidence(result["analysis_id"])
         return runtime.read_evidence_agent_projection(ref["evidence_id"])
     finally:
@@ -45,7 +45,7 @@ def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
     rescue = tmp_path / "rescue-store"
     runtime = AnalysisRuntime(evidence_directory=configured)
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(result["analysis_id"])
         assert failure.value.code == "REPOSITORY_CORRUPTION"
@@ -62,7 +62,7 @@ def test_live_session_evidence_can_be_rescued_before_corrupt_store_restart(
     reopened = AnalysisRuntime(evidence_directory=rescue)
     try:
         manifest = reopened.read_evidence(rescued["evidence_id"])
-        assert manifest["body"]["capability_id"] == "artifact.preview"
+        assert manifest["body"]["operation"] == "preview_artifact"
     finally:
         reopened.close()
 
@@ -74,7 +74,7 @@ def test_preserved_capture_can_be_rescued_after_scratch_is_released(
     tmp_path: Path, provider: str
 ) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-    capability_id = "artifact.preview" if provider == "direct" else "cpu.hotspots"
+    operation = "preview_artifact" if provider == "direct" else "rank_cpu_hotspots"
 
     async def capture() -> dict[str, Any]:
         return await runtime.capture_and_analyze(
@@ -83,7 +83,7 @@ def test_preserved_capture_can_be_rescued_after_scratch_is_released(
                 cwd=str(tmp_path),
                 provider_id=provider,
             ),
-            capability_id,
+            operation,
         )
 
     try:
@@ -101,7 +101,7 @@ def test_preserved_capture_can_be_rescued_after_scratch_is_released(
         projection = reopened.read_evidence_agent_projection(rescued["evidence_id"])
         if provider == "direct":
             reanalysis = reopened.analyze(
-                capability_id,
+                operation,
                 [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]],
                 {},
             )
@@ -122,11 +122,9 @@ def test_rescue_reports_damaged_preserved_evidence_before_creating_destination(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     destination = tmp_path / "rescue"
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         reference = runtime.preserve_evidence(result["analysis_id"])
-        source = runtime.repository.select_source(
-            reference["evidence_id"], selector=None, role=None
-        )
+        source = runtime.repository.select_source(reference["evidence_id"], selector=None)
         payload = source.members[0][1].path
         if damage == "missing":
             payload.unlink()
@@ -152,7 +150,7 @@ def test_rescue_rejects_configured_or_nonempty_destination_without_losing_handle
     (nonempty / "file").write_text("owned")
     runtime = AnalysisRuntime(evidence_directory=configured)
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         for destination in (configured, nonempty):
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.rescue_evidence(result["analysis_id"], str(destination))
@@ -205,7 +203,7 @@ def test_manifest_layout_is_contained_and_materializable(
         if valid:
             selected = runtime.read_evidence_agent_projection(changed_id)
             result = runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [EvidenceSource.model_validate(selected["analysis_sources"][0])],
                 {},
             )
@@ -231,7 +229,7 @@ def test_source_selection_checks_selected_payload_not_unrelated_analysis_data(
     runtime = AnalysisRuntime(evidence_directory=store)
     try:
         result = runtime.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [EvidenceSource.model_validate(projection["analysis_sources"][0])],
             {},
         )

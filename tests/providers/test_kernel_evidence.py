@@ -81,12 +81,12 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path,
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
-            "kernel.validation",
+            "inspect_kernel_validation",
             [PathSource(path=str(baseline), format="kernel-validation")],
             {},
         )
         comparison = runtime.analyze(
-            "kernel.compare",
+            "compare_kernel_validation",
             [
                 PathSource(path=str(baseline), format="kernel-validation"),
                 PathSource(path=str(candidate), format="kernel-validation"),
@@ -116,7 +116,7 @@ def test_kernel_comparison_rejects_unrepresentable_derived_values(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("kernel.compare", sources, {})
+            runtime.analyze("compare_kernel_validation", sources, {})
         assert failure.value.code == "LIMIT_EXCEEDED"
     finally:
         runtime.close()
@@ -149,7 +149,7 @@ def test_kernel_compare_requires_complete_semantic_identity(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "kernel.compare",
+            "compare_kernel_validation",
             [
                 PathSource(path=str(baseline), format="kernel-validation"),
                 PathSource(path=str(candidate), format="kernel-validation"),
@@ -179,7 +179,7 @@ def test_kernel_validation_rejects_an_unknown_native_schema(tmp_path: Path) -> N
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "kernel.validation",
+                "inspect_kernel_validation",
                 [PathSource(path=str(artifact), format="kernel-validation")],
                 {},
             )
@@ -224,12 +224,12 @@ def test_kernel_validation_rejects_coerced_coverage_and_duplicate_metrics(
             artifact = tmp_path / f"{name}.json"
             artifact.write_text(json.dumps(document))
             source = PathSource(path=str(artifact), format="kernel-validation")
-            for capability, sources in (
-                ("kernel.validation", [source]),
-                ("kernel.compare", [source, source]),
+            for operation, sources in (
+                ("inspect_kernel_validation", [source]),
+                ("compare_kernel_validation", [source, source]),
             ):
                 with pytest.raises(RuntimeFailure) as failure:
-                    runtime.analyze(capability, sources, {})
+                    runtime.analyze(operation, sources, {})
                 assert failure.value.code == code
     finally:
         runtime.close()
@@ -245,7 +245,7 @@ def test_kernel_validation_preserves_outputless_cases(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "kernel.validation",
+            "inspect_kernel_validation",
             [PathSource(path=str(artifact), format="kernel-validation")],
             {},
         )
@@ -273,7 +273,7 @@ def test_kernel_validation_defaults_omitted_coverage_to_incomplete(tmp_path: Pat
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "kernel.validation",
+            "inspect_kernel_validation",
             [PathSource(path=str(artifact), format="kernel-validation")],
             {},
         )
@@ -300,7 +300,7 @@ def test_kernel_validation_marks_producer_contradictions_inconclusive(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "kernel.validation",
+            "inspect_kernel_validation",
             [PathSource(path=str(artifact), format="kernel-validation")],
             {},
         )
@@ -318,7 +318,7 @@ def test_kernel_validation_marks_producer_contradictions_inconclusive(
     baseline.write_text(json.dumps(_kernel_document(0.0)))
     try:
         compared = comparison.analyze(
-            "kernel.compare",
+            "compare_kernel_validation",
             [
                 PathSource(path=str(baseline), format="kernel-validation"),
                 PathSource(path=str(artifact), format="kernel-validation"),
@@ -342,7 +342,7 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path, block
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "triton.autotune",
+            "inspect_triton_autotune",
             [PathSource(path=str(artifact), format="triton")],
             {},
         )
@@ -371,7 +371,7 @@ def test_triton_listener_means_remain_finite_when_timing_sums_overflow(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+            "inspect_triton_autotune", [PathSource(path=str(artifact), format="triton")], {}
         )
     finally:
         runtime.close()
@@ -386,13 +386,13 @@ def test_triton_listener_counts_cover_events_beyond_the_returned_population(tmp_
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         first = runtime.analyze(
-            "triton.autotune",
+            "inspect_triton_autotune",
             [PathSource(path=str(artifact), format="triton")],
             {},
             limits=RequestLimits(max_rows=1),
         )
         second = runtime.analyze(
-            "triton.autotune",
+            "inspect_triton_autotune",
             [PathSource(path=str(artifact), format="triton")],
             {},
             limits=RequestLimits(max_rows=1),
@@ -420,7 +420,7 @@ def test_triton_listener_retains_valid_selections_without_claiming_complete_cove
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+            "inspect_triton_autotune", [PathSource(path=str(artifact), format="triton")], {}
         )
     finally:
         runtime.close()
@@ -448,7 +448,7 @@ def test_triton_listener_without_usable_selections_reports_typed_failure(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+                "inspect_triton_autotune", [PathSource(path=str(artifact), format="triton")], {}
             )
         assert failure.value.code == expected_code
         assert "no usable autotune selections" in failure.value.message
@@ -471,7 +471,7 @@ def test_triton_listener_enforces_native_limits_before_semantic_filtering(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "triton.autotune",
+                "inspect_triton_autotune",
                 [PathSource(path=str(artifact), format="triton")],
                 {},
                 limits=RequestLimits(max_rows=1),
@@ -502,7 +502,7 @@ def test_native_triton_cache_preserves_quantiles_and_derives_lexicographic_winne
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
     try:
-        result = runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("inspect_triton_autotune", [PathSource(path=str(artifact))], {})
     finally:
         runtime.close()
     rows = result["blocks"][1]["rows"]
@@ -522,7 +522,7 @@ def test_native_triton_cache_rejects_invalid_timing(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+            runtime.analyze("inspect_triton_autotune", [PathSource(path=str(artifact))], {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
@@ -546,7 +546,7 @@ def test_native_triton_cache_preserves_integer_selection_order(
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("triton.autotune", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("inspect_triton_autotune", [PathSource(path=str(artifact))], {})
     finally:
         runtime.close()
     rows = result["blocks"][1]["rows"]
@@ -573,7 +573,7 @@ def test_triton_cache_bundle_keeps_distinct_native_paths_and_global_counts(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "triton.autotune",
+            "inspect_triton_autotune",
             [PathSource(path=str(bundle), format="triton-cache")],
             {},
             limits=RequestLimits(max_rows=max_rows),
@@ -598,7 +598,9 @@ def test_triton_compilation_without_autotuning_is_not_complete_negative_evidence
     try:
         with pytest.raises(RuntimeFailure, match="No native Triton autotune caches"):
             runtime.analyze(
-                "triton.autotune", [PathSource(path=str(tmp_path), format="triton-cache")], {}
+                "inspect_triton_autotune",
+                [PathSource(path=str(tmp_path), format="triton-cache")],
+                {},
             )
     finally:
         runtime.close()

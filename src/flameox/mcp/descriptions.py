@@ -1,7 +1,6 @@
 """Selection-oriented MCP instructions and tool descriptions."""
 
-from flameox.mcp.catalog import ANALYSIS_TOOLS
-from flameox.runtime_contracts import Capability
+from flameox.runtime_contracts import Operation
 
 SERVER_DESCRIPTION = "Bounded local runtime evidence over explicit artifacts and process targets."
 
@@ -48,18 +47,18 @@ TOOL_DESCRIPTIONS = {
 }
 
 
-def analysis_description(capability: Capability) -> str:
+def analysis_description(spec: Operation) -> str:
     return (
-        f"{capability.summary} Read existing {', '.join(capability.formats)} artifacts; "
+        f"{spec.summary} Read existing {', '.join(spec.formats)} artifacts; "
         "returns input identities, metrics/rows, coverage and limitations. "
         "Follow next_page for more evidence; preserve_evidence makes it durable."
     )
 
 
-def capture_description(capability: Capability) -> str:
+def capture_description(spec: Operation) -> str:
     return (
-        f"Execute an explicit argv target and collect native artifacts to: {capability.summary} "
+        f"Execute an explicit argv target and collect native artifacts to: {spec.summary} "
         "Returns immediate evidence and execution provenance, including failed attempts. "
-        f"For existing artifacts use {ANALYSIS_TOOLS[capability.id]}. "
+        f"For existing artifacts use {spec.name}. "
         "Pagination reads captured artifacts without executing again."
     )

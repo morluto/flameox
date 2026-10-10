@@ -64,7 +64,7 @@ def test_zero_exit_output_limit_is_preserved_as_failed_capture(
                     provider_id="direct",
                     console_output="full",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(max_output_bytes=1024),
                 preserve=True,
                 experiment=ExperimentDesign(

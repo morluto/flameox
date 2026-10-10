@@ -34,7 +34,7 @@ def test_v8_profiles_reject_malformed_required_fields(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                f"{'cpu' if profile_kind == 'cpu' else 'memory'}.hotspots",
+                "rank_cpu_hotspots" if profile_kind == "cpu" else "rank_allocation_hotspots",
                 [PathSource(path=str(profile), format=format_name)],
                 {},
             )
@@ -56,7 +56,7 @@ def test_v8_profiles_accept_empty_sample_arrays(tmp_path: Path, profile_kind: st
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            f"{'cpu' if profile_kind == 'cpu' else 'memory'}.hotspots",
+            "rank_cpu_hotspots" if profile_kind == "cpu" else "rank_allocation_hotspots",
             [PathSource(path=str(profile), format=format_name)],
             {},
         )
@@ -95,7 +95,7 @@ def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: 
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="cpuprofile")],
             {},
         )
@@ -137,20 +137,18 @@ def test_v8_hotspots_distinguish_omitted_coordinates_from_explicit_zero(
             "nodes": [{"id": 1, "callFrame": frame, "children": []}],
             "samples": [1],
         }
-        capability_id, format_name = "cpu.hotspots", "cpuprofile"
+        operation, format_name = "rank_cpu_hotspots", "cpuprofile"
     else:
         payload = {
             "head": {"id": 1, "callFrame": frame, "selfSize": 64, "children": []},
             "samples": [{"size": 64, "nodeId": 1}],
         }
-        capability_id, format_name = "memory.hotspots", "heapprofile"
+        operation, format_name = "rank_allocation_hotspots", "heapprofile"
     profile = tmp_path / f"profile.{format_name}"
     profile.write_text(json.dumps(payload))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze(
-            capability_id, [PathSource(path=str(profile), format=format_name)], {}
-        )
+        result = runtime.analyze(operation, [PathSource(path=str(profile), format=format_name)], {})
     finally:
         runtime.close()
     row = result["blocks"][1]["rows"][0]
@@ -182,7 +180,7 @@ def test_cpu_hotspots_count_exported_samples_when_hit_metadata_differs(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "cpu.hotspots", [PathSource(path=str(profile), format="cpuprofile")], {}
+            "rank_cpu_hotspots", [PathSource(path=str(profile), format="cpuprofile")], {}
         )
     finally:
         runtime.close()
@@ -222,7 +220,7 @@ def test_cpu_profile_rejects_samples_for_unknown_nodes(tmp_path: Path) -> None:
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "cpu.hotspots",
+                "rank_cpu_hotspots",
                 [PathSource(path=str(profile), format="cpuprofile")],
                 {},
             )
@@ -256,7 +254,7 @@ def test_heap_sample_count_aggregates_records_for_repeated_frame_identity(
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        result = runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
     finally:
         runtime.close()
 
@@ -285,7 +283,7 @@ def test_v8_heap_profile_reports_unresolved_samples_without_guessing_frames(tmp_
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        result = runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
     finally:
         runtime.close()
 
@@ -318,7 +316,7 @@ def test_v8_heap_profile_rejects_malformed_sample_size(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+            runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
@@ -346,7 +344,7 @@ def test_v8_raw_node_bound_is_independent_from_hotspot_row_limit(tmp_path: Path)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="cpuprofile")],
             {},
             limits=RequestLimits(max_rows=10),
@@ -381,7 +379,7 @@ def test_v8_hotspot_projection_bounds_distinct_aggregated_frames(tmp_path: Path)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="cpuprofile")],
             {},
             limits=RequestLimits(max_rows=10),
@@ -417,7 +415,7 @@ def test_v8_heap_rejects_malformed_child_nodes(tmp_path: Path, children: object)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+            runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
@@ -442,7 +440,7 @@ def test_v8_heap_ignores_unrelated_nested_measurement_fields(tmp_path: Path) -> 
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        result = runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
         assert result["blocks"][0]["values"]["total_sampled_bytes"] == 12
         row = result["blocks"][1]["rows"][0]
         assert row["sample_count"] == 1
@@ -462,7 +460,7 @@ def test_v8_validates_literal_native_object_fields(
             "nodes": [{"id": 1, "callFrame": {"functionName": "work"}}],
             "samples": [],
         }
-        capability, format_name = "cpu.hotspots", "cpuprofile"
+        operation, format_name = "rank_cpu_hotspots", "cpuprofile"
     else:
         payload = {
             "head": {
@@ -473,17 +471,17 @@ def test_v8_validates_literal_native_object_fields(
             },
             "samples": [],
         }
-        capability, format_name = "memory.hotspots", "heapprofile"
+        operation, format_name = "rank_allocation_hotspots", "heapprofile"
     artifact = tmp_path / f"native.{format_name}"
     artifact.write_text(json.dumps(payload)[:-1] + "," + extra + "}")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         if "samples.item" in extra:
-            result = runtime.analyze(capability, [PathSource(path=str(artifact))], {})
+            result = runtime.analyze(operation, [PathSource(path=str(artifact))], {})
             assert result["blocks"][0]["values"]["sample_count"] == 0
         else:
             with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze(capability, [PathSource(path=str(artifact))], {})
+                runtime.analyze(operation, [PathSource(path=str(artifact))], {})
             assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
@@ -509,7 +507,7 @@ def test_v8_heap_rejects_supplied_invalid_coordinates(tmp_path: Path, coordinate
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+            runtime.analyze("rank_allocation_hotspots", [PathSource(path=str(profile))], {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()

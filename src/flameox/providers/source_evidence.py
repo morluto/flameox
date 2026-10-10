@@ -19,7 +19,7 @@ class SourceEvidenceProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         path: Path,
         format_name: str,
         arguments: Mapping[str, Any],
@@ -29,7 +29,7 @@ class SourceEvidenceProvider:
         maximum_rss_bytes: int,
         maximum_output_bytes: int,
     ) -> ProviderAnalysis | None:
-        if capability_id == "coverage.summary" and format_name == "coverage":
+        if operation == "summarize_coverage" and format_name == "coverage":
             result = self.harness.run_typed_sync(
                 COVERAGE_WORKER,
                 CoverageWorkerRequest(
@@ -59,7 +59,7 @@ class SourceEvidenceProvider:
                 complete=not result.truncated,
                 limitations=list(result.limitations),
             )
-        if capability_id != "static.performance_candidates" or format_name != "sarif":
+        if operation != "inspect_performance_candidates" or format_name != "sarif":
             return None
         try:
             source_root = Path(arguments["source_root"]).resolve()

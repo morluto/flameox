@@ -39,21 +39,25 @@ class NvbenchProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         paths: Sequence[Path],
         formats: Sequence[str],
         arguments: Mapping[str, Any],
         *,
         max_rows: int,
     ) -> ProviderAnalysis | None:
-        if capability_id not in {"benchmark.summary", "benchmark.scaling", "benchmark.compare"}:
+        if operation not in {
+            "summarize_benchmarks",
+            "analyze_benchmark_scaling",
+            "compare_benchmarks",
+        }:
             return None
         if not paths or any(format_name != "nvbench" for format_name in formats):
             return None
         parsed = [self._read_bundle(path, max_rows=max_rows) for path in paths]
-        if capability_id == "benchmark.compare":
+        if operation == "compare_benchmarks":
             return self._compare(parsed, arguments, max_rows=max_rows)
-        if capability_id == "benchmark.scaling":
+        if operation == "analyze_benchmark_scaling":
             return scaling_projection(
                 [
                     {
@@ -111,7 +115,7 @@ class NvbenchProvider:
         max_rows: int,
     ) -> ProviderAnalysis:
         if len(bundles) < 2:
-            raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
+            raise ProviderFailure("INVALID_INPUT", "compare_benchmarks requires at least 2 inputs")
         return compare_series(
             [bundle.series for bundle in bundles],
             arguments,

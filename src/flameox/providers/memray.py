@@ -31,7 +31,7 @@ class MemrayProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         path: Path,
         *,
         max_rows: int,
@@ -41,7 +41,9 @@ class MemrayProvider:
         maximum_rss_bytes: int,
     ) -> ProviderAnalysis:
         metric: Literal["memory.high_watermark", "memory.retained_end"] = (
-            "memory.high_watermark" if capability_id == "memory.hotspots" else "memory.retained_end"
+            "memory.high_watermark"
+            if operation == "rank_allocation_hotspots"
+            else "memory.retained_end"
         )
         aggregate_limit = min(20_000_000, max(4, max_rows * 4))
         limits = MemrayExtractionLimits(

@@ -40,7 +40,7 @@ def test_memray_native_profile_attributes_and_bounds_nested_allocations(tmp_path
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "memory.hotspots",
+            "rank_allocation_hotspots",
             [PathSource(path=str(capture), format="memray", producer="memray")],
             {},
             limits=RequestLimits(max_rows=1),
@@ -78,7 +78,7 @@ def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(
                     provider_id="memray",
                     capture_arguments={"native": False},
                 ),
-                "memory.hotspots",
+                "rank_allocation_hotspots",
                 limits=RequestLimits(max_rows=10),
             )
             preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -160,8 +160,12 @@ def test_memray_retained_projection_uses_its_own_bounds_and_preserves_totals(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         source = PathSource(path=str(capture), format="memray")
-        peak = runtime.analyze("memory.hotspots", [source], {}, limits=RequestLimits(max_rows=1))
-        end = runtime.analyze("memory.retained", [source], {}, limits=RequestLimits(max_rows=1))
+        peak = runtime.analyze(
+            "rank_allocation_hotspots", [source], {}, limits=RequestLimits(max_rows=1)
+        )
+        end = runtime.analyze(
+            "rank_retained_memory", [source], {}, limits=RequestLimits(max_rows=1)
+        )
         assert end["blocks"][1]["rows"][0]["function"] == "retained_leaf"
         for name in (
             "total_allocated_bytes",

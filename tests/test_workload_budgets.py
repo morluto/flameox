@@ -49,7 +49,7 @@ def test_decoder_limits_do_not_bound_an_unbudgeted_workload(tmp_path: Path) -> N
                     "import time; data = bytearray(64 * 1024 * 1024); print('ready'); "
                     "time.sleep(0.1)",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(timeout_seconds=0.01, max_memory_bytes=16 * 1024**2),
             )
             return result["capture"]["executions"][0]
@@ -72,7 +72,7 @@ def test_explicit_workload_timeout_is_attributed_and_reopened(tmp_path: Path) ->
                     "import time; print('before-timeout', flush=True); time.sleep(2)",
                     budget=WorkloadBudget(timeout_seconds=0.1),
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(timeout_seconds=10, max_memory_bytes=16 * 1024**2),
                 preserve=True,
             )
@@ -92,12 +92,17 @@ def test_explicit_workload_timeout_is_attributed_and_reopened(tmp_path: Path) ->
     try:
         manifest = reopened.read_evidence(evidence_id)
         projection = reopened.read_evidence_agent_projection(evidence_id)
+        stdout_sha256 = next(
+            item["sha256"]
+            for item in manifest["body"]["artifacts"]
+            if item["role"] == "capture-0001/stdout"
+        )
         replayed = reopened.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [
-                EvidenceSource(
-                    kind="evidence", evidence_id=evidence_id, artifact_role="capture-0001/stdout"
-                )
+                EvidenceSource.model_validate(artifact["source"])
+                for artifact in projection["body"]["artifacts"]
+                if artifact["sha256"] == stdout_sha256
             ],
             {},
         )
@@ -128,7 +133,7 @@ def test_explicit_workload_memory_budget_is_attributed(tmp_path: Path) -> None:
                     "import time; time.sleep(2)",
                     budget=WorkloadBudget(max_memory_bytes=32 * 1024**2),
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(timeout_seconds=10, max_memory_bytes=16 * 1024**2),
             )
             return result["capture"]["executions"][0]
@@ -150,7 +155,7 @@ def test_workload_budget_also_bounds_semantic_oracle(tmp_path: Path) -> None:
         try:
             result = await runtime.capture_and_analyze(
                 _target(tmp_path, "print('workload')", budget=WorkloadBudget(timeout_seconds=2)),
-                "artifact.preview",
+                "preview_artifact",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
                     blocks=1,
@@ -196,7 +201,7 @@ def test_unbudgeted_memray_capture_keeps_native_artifact_when_worker_times_out(
                     "retained = [bytearray(1024) for _ in range(64)]; print('captured')",
                     provider_id="memray",
                 ),
-                "memory.hotspots",
+                "rank_allocation_hotspots",
                 limits=RequestLimits(timeout_seconds=0.01),
                 preserve=True,
             )
@@ -231,7 +236,7 @@ def test_unbudgeted_capture_cancellation_cleans_child_and_scratch(tmp_path: Path
                     f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
                     "time.sleep(30)",
                 ),
-                "artifact.preview",
+                "preview_artifact",
             )
         )
         try:

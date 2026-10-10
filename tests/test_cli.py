@@ -23,11 +23,13 @@ def isolated_data_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_mcp_inspect_exposes_flat_named_tool_discovery() -> None:
     runner = CliRunner()
     summary = runner.invoke(app, ["mcp", "inspect"])
-    exact = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_cpu_hotspots"])
+    exact = runner.invoke(app, ["mcp", "inspect", "--tool", "capture_and_rank_cpu_hotspots"])
 
     assert summary.exit_code == 0, summary.output
     catalog = json.loads(summary.output)
-    tool = next(item for item in catalog["tools"] if item["name"] == "capture_cpu_hotspots")
+    tool = next(
+        item for item in catalog["tools"] if item["name"] == "capture_and_rank_cpu_hotspots"
+    )
     assert tool["required_inputs"] == ["target", "provider"]
     assert "input_schema" not in tool
 
@@ -49,7 +51,7 @@ def test_analyze_resumes_pagination_from_its_emitted_command(tmp_path: Path) -> 
 
     first = runner.invoke(
         app,
-        ["analyze", "artifact.preview", str(artifact), "--limits", '{"max_rows":100}'],
+        ["analyze", "preview_artifact", str(artifact), "--limits", '{"max_rows":100}'],
     )
     assert first.exit_code == 0, first.output
     first_payload = json.loads(first.output)
@@ -78,7 +80,7 @@ def test_analyze_can_rescue_a_page_and_continue_from_the_alternate_store(tmp_pat
         app,
         [
             "analyze",
-            "artifact.preview",
+            "preview_artifact",
             str(artifact),
             "--limits",
             '{"max_rows":1}',
@@ -94,7 +96,7 @@ def test_analyze_can_rescue_a_page_and_continue_from_the_alternate_store(tmp_pat
     assert payload["rescued"]["evidence_id"] in payload["next_page"]["argv"]
     assert (configured / "unexpected").read_text() == "keep"
     manifest = EvidenceRepository(rescue, "cli-test").read(payload["rescued"]["evidence_id"])
-    assert manifest["body"]["capability_id"] == "artifact.preview"
+    assert manifest["body"]["operation"] == "preview_artifact"
 
 
 def test_capture_rejects_two_evidence_destinations_before_running_target(tmp_path: Path) -> None:

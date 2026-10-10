@@ -19,7 +19,7 @@ def compare_series(
 ) -> ProviderAnalysis:
     """Compare pooled means while preserving each native reader's series identities."""
     if len(series) < 2:
-        raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
+        raise ProviderFailure("INVALID_INPUT", "compare_benchmarks requires at least 2 inputs")
     baseline_index = int(arguments.get("baseline_index", 0))
     if baseline_index >= len(series):
         raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")

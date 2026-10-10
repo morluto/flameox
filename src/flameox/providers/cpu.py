@@ -28,7 +28,7 @@ class CpuProfileProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         path: Path,
         format_name: str,
         arguments: Mapping[str, Any],
@@ -36,19 +36,19 @@ class CpuProfileProvider:
         max_rows: int,
     ) -> ProviderAnalysis | None:
         if format_name == "py-spy":
-            return self._speedscope(capability_id, path, arguments, max_rows=max_rows)
-        if format_name == "perf" and capability_id == "cpu.hotspots":
+            return self._speedscope(operation, path, arguments, max_rows=max_rows)
+        if format_name == "perf" and operation == "rank_cpu_hotspots":
             return self._collapsed(path, max_rows=max_rows)
         return None
 
     @staticmethod
     def _speedscope(
-        capability_id: str, path: Path, arguments: Mapping[str, Any], *, max_rows: int
+        operation: str, path: Path, arguments: Mapping[str, Any], *, max_rows: int
     ) -> ProviderAnalysis:
         normalized_frames, profiles = _read_speedscope(path)
         callers = (
             _SampledCallers(normalized_frames, arguments)
-            if capability_id == "cpu.callers"
+            if operation == "inspect_cpu_callers"
             else None
         )
         self_weights: defaultdict[int, int | float] = defaultdict(int)

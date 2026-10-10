@@ -26,7 +26,7 @@ def test_compute_sanitizer_xml_projects_classification_and_addresses(tmp_path: P
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "sanitizer.failures",
+            "inspect_sanitizer_failures",
             [PathSource(path=str(artifact), format="compute-sanitizer")],
             {},
         )
@@ -75,7 +75,9 @@ def test_compute_sanitizer_nested_stack_omission_marks_coverage_incomplete(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "sanitizer.failures", [PathSource(path=str(artifact), format="compute-sanitizer")], {}
+            "inspect_sanitizer_failures",
+            [PathSource(path=str(artifact), format="compute-sanitizer")],
+            {},
         )
         assert len(result["blocks"][1]["rows"]) == 1
         assert len(result["blocks"][1]["rows"][0]["frames"]) == 1001

@@ -50,14 +50,14 @@ def test_sarif_export_uses_explicit_source_root_and_preserves_containment(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
     try:
         result = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(report), format="sarif")],
             {"source_root": str(root)},
         )
         if loop:
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "static.performance_candidates",
+                    "inspect_performance_candidates",
                     [PathSource(path=str(report))],
                     {"source_root": str(bad_path)},
                 )
@@ -124,7 +124,7 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(artifact))],
             {"include_paths": ["src/*"]},
         )
@@ -165,7 +165,7 @@ def test_truncated_sarif_never_reports_complete_coverage(tmp_path: Path) -> None
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(artifact), format="sarif")],
             {},
         )
@@ -193,7 +193,7 @@ def test_sarif_keeps_literal_keys_distinct_from_candidate_locations(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(artifact))],
             {"source_root": str(tmp_path)},
         )
@@ -217,7 +217,7 @@ def test_sarif_malformed_collections_never_claim_complete_empty_evidence(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(artifact))],
             {"source_root": str(tmp_path)},
         )
@@ -260,7 +260,7 @@ def test_sarif_preserved_next_page_retains_the_original_implicit_source_root(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         first = runtime.analyze(
-            "static.performance_candidates",
+            "inspect_performance_candidates",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=1),
@@ -274,7 +274,7 @@ def test_sarif_preserved_next_page_retains_the_original_implicit_source_root(
     reopened = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         second = reopened.analyze(
-            handoff["capability_id"],
+            handoff["operation"],
             [EvidenceSource.model_validate(item) for item in handoff["sources"]],
             handoff["options"],
             limits=RequestLimits.model_validate(handoff["limits"]),
@@ -310,7 +310,7 @@ def test_sarif_candidate_coordinates_resolve_within_each_native_run(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         analysis = runtime.analyze(
-            "static.performance_candidates", [PathSource(path=str(artifact))], {}
+            "inspect_performance_candidates", [PathSource(path=str(artifact))], {}
         )
         rows = analysis["blocks"][1]["rows"]
         assert [(row["run_index"], row["result_index"]) for row in rows] == [
@@ -358,7 +358,7 @@ def test_sarif_decimal_coordinates_respect_integer_conversion_bounds(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "static.performance_candidates", [PathSource(path=str(artifact))], {}
+            "inspect_performance_candidates", [PathSource(path=str(artifact))], {}
         )
         if number == "1e3":
             assert result["blocks"][1]["rows"][0]["start_line"] == 1000

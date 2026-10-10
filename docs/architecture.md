@@ -1,6 +1,6 @@
 # Architecture
 
-Flameox is a process-lifespan capability runtime with an optional immutable
+Flameox is a process-lifespan operation runtime with an optional immutable
 evidence repository. It is not a workspace application and has no mutable
 control plane.
 
@@ -10,7 +10,7 @@ control plane.
 | --- | --- |
 | Artifact location | Exact paths supplied by each analysis request |
 | Target location | Exact absolute `cwd` supplied by each capture request |
-| Available operations | Process-lifespan capability registry |
+| Available operations | Process-lifespan operation registry |
 | In-progress work | Current MCP request and cancellation scope |
 | Unpreserved output | Bounded session scratch |
 | Completed preserved evidence | Immutable manifest in the user Flameox data directory |
@@ -30,7 +30,7 @@ Console retention and workload budgets are defined in
 [storage and evidence](storage-and-evidence.md) and
 [runtime safety](runtime-safety.md); those documents own their limits and failure semantics.
 
-`AnalysisRuntime` owns the capability registry, subprocess broker, bounded scratch artifacts
+`AnalysisRuntime` owns the operation registry, subprocess broker, bounded scratch artifacts
 (conversions and materialized evidence), and least-recently-used session analysis cache.
 The MCP lifespan creates one runtime, exposes it through the SDK request context, and destroys its
 scratch on shutdown. Evicting
@@ -52,7 +52,7 @@ durable SHA-256 identity derived from the canonical manifest body.
 
 ## Package boundaries
 
-- `runtime_contracts.py` owns public models and the capability/capture-provider registries.
+- `runtime_contracts.py` owns public models and the operation/capture-provider registries.
 - `runtime.py` owns bounded analysis, capture orchestration, scratch, and the session cache.
 - `providers/capture.py` owns provider-specific command construction and expected native outputs;
   `providers/availability.py` owns installation and workload requirements.
@@ -76,19 +76,19 @@ durable SHA-256 identity derived from the canonical manifest body.
 DuckDB may be used in memory for bounded aggregation. It is never a durable
 catalog. Flameox production code must not create or depend on SQLite state.
 
-## Capability boundary
+## Operation boundary
 
-One registry entry owns a capability descriptor, strict argument model, accepted formats,
+One registry entry owns an operation descriptor, strict argument model, accepted formats,
 capture/analysis semantics, and model-visible selection guidance. MCP projects a named analysis
-tool for each capability and a named capture tool for each capturable capability. Their typed
-schemas flatten capability fields into top-level arguments; capture tools nest only the typed
+tool for each operation and a named capture tool for each capturable operation. Their typed
+schemas flatten operation fields into top-level arguments; capture tools nest only the typed
 provider choice and its provider-specific fields under `provider`. This makes the question being
-asked explicit in the tool name while keeping runtime capability IDs and evidence contracts stable.
-`flameox mcp inspect` lists these names, and `--capability CAPABILITY_ID` shows the corresponding
+asked explicit in the tool name while keeping one task name throughout runtime, CLI, MCP, and evidence.
+`flameox mcp inspect` lists these names, and `--tool TOOL_NAME` shows the corresponding
 direct schemas and examples.
 
 Capture-provider contracts supply typed fields for each compatible capture tool; the tool schema
-advertises them and CLI capability inspection can show examples. Admission checks them before
+advertises them and CLI operation inspection can show examples. Admission checks them before
 execution. Missing packages, executables, permissions, versions, or platforms do not
 change the catalog; the attempted tool returns typed remediation. The CLI setup command or MCP
 `prepare_providers` tool resolves dependencies according to where they execute. CLI setup prepares
@@ -100,7 +100,7 @@ operation or provider inventory. Host profilers, drivers, and permissions remain
 transports do not infer readiness from installation receipts.
 
 Request validation is also a normalization boundary. Runtime admission constructs the typed
-capability and provider models once; execution, provenance, limitations, and result descriptions
+operation and provider models once; execution, provenance, limitations, and result descriptions
 must consume those validated models. They must not reinterpret truthiness or coercible values from
 the caller's original mapping after admission.
 

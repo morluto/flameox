@@ -119,7 +119,7 @@ repository_boundary = sys.argv[2] in {'repository', 'manifest', 'artifact_metada
 if repository_boundary:
     path.write_text('native evidence')
     runtime = AnalysisRuntime(evidence_directory=root / 'store')
-    result = runtime.analyze('artifact.preview', [PathSource(path=str(path))], {})
+    result = runtime.analyze('preview_artifact', [PathSource(path=str(path))], {})
     evidence_id = runtime.preserve_evidence(result['analysis_id'])['evidence_id']
     if sys.argv[2] == 'repository':
         path = root / 'store' / 'repository.json'
@@ -194,7 +194,7 @@ async def test_executable_symlink_loops_return_typed_failures_before_launch(tmp_
         with pytest.raises(RuntimeFailure) as admission:
             await runtime.capture_and_analyze(
                 CaptureTarget(argv=[str(executable)], cwd=str(tmp_path), provider_id="direct"),
-                "artifact.preview",
+                "preview_artifact",
             )
         assert admission.value.code == "EXECUTION_FAILURE"
         assert str(tmp_path) not in admission.value.message
@@ -257,7 +257,7 @@ else:
         return original(*args, **kwargs)
     runtime._read_rows = changed
     try:
-        runtime.analyze("artifact.preview", [PathSource(path=str(path), format=sys.argv[2])], {})
+        runtime.analyze("preview_artifact", [PathSource(path=str(path), format=sys.argv[2])], {})
     except RuntimeFailure as error:
         assert error.code == "DECODE_FAILURE", error.code
     else:

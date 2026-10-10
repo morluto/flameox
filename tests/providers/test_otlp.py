@@ -53,13 +53,13 @@ def test_otlp_partial_rows_continue_without_repository_state(tmp_path: Path) -> 
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
-            "trace.summary",
+            "summarize_trace",
             [PathSource(path=str(trace), format="otlp")],
             {},
             limits=RequestLimits(max_rows=3),
         )
         second = runtime.analyze(
-            "trace.summary",
+            "summarize_trace",
             [PathSource(path=str(trace), format="otlp")],
             {},
             limits=RequestLimits(max_rows=3),
@@ -95,7 +95,7 @@ def test_otlp_window_filters_inside_isolated_parser(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "trace.window",
+            "inspect_trace_window",
             [PathSource(path=str(trace), format="otlp")],
             bounds,
         )
@@ -116,7 +116,7 @@ def test_otlp_window_filters_inside_isolated_parser(
         )
         projection = reopened.read_evidence_agent_projection(preserved["evidence_id"])
         replayed = reopened.analyze(
-            "trace.window",
+            "inspect_trace_window",
             [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]],
             saved_bounds,
         )
@@ -147,7 +147,7 @@ def test_otlp_window_filters_before_applying_the_normalization_row_limit(tmp_pat
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "trace.window",
+            "inspect_trace_window",
             [PathSource(path=str(trace), format="otlp")],
             {"start_ns": 150, "end_ns": 250},
         )
@@ -169,9 +169,9 @@ def test_otlp_operation_and_lifecycle_projections_are_semantically_distinct(
     source = [PathSource(path=str(trace), format="otlp")]
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        summary = runtime.analyze("trace.summary", source, {})
-        operations = runtime.analyze("trace.operations", source, {})
-        lifecycle = runtime.analyze("trace.lifecycle", source, {})
+        summary = runtime.analyze("summarize_trace", source, {})
+        operations = runtime.analyze("summarize_trace_operations", source, {})
+        lifecycle = runtime.analyze("summarize_trace_lifecycle", source, {})
     finally:
         runtime.close()
 
@@ -207,7 +207,7 @@ def test_otlp_protobuf_that_resembles_json_keeps_its_native_encoding(tmp_path: P
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "trace.summary", [PathSource(path=str(artifact), format="otlp")], {}
+            "summarize_trace", [PathSource(path=str(artifact), format="otlp")], {}
         )
         assert result["blocks"][0]["values"]["resources_count"] == 1
         assert result["blocks"][0]["values"]["scopes_count"] == 1
@@ -244,7 +244,7 @@ def test_otlp_nonfinite_attributes_preserve_native_types(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         sources = [PathSource(path=str(artifact), format="otlp")]
-        summary = runtime.analyze("trace.summary", sources, {})
+        summary = runtime.analyze("summarize_trace", sources, {})
         attributes = json.loads(
             next(row for row in summary["blocks"][1]["rows"] if row["table"] == "spans")[
                 "attributes_json"
@@ -257,11 +257,11 @@ def test_otlp_nonfinite_attributes_preserve_native_types(
             "integer": 2**63 - 1,
             "array": [tagged],
         }
-        operations = runtime.analyze("trace.operations", sources, {})
+        operations = runtime.analyze("summarize_trace_operations", sources, {})
         assert operations["blocks"][1]["rows"][0]["operation"] == span.name
         preserved = runtime.preserve_evidence(summary["analysis_id"])
         replay = runtime.analyze(
-            "trace.summary",
+            "summarize_trace",
             [EvidenceSource(kind="evidence", evidence_id=preserved["evidence_id"])],
             {},
         )

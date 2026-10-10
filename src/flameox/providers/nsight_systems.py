@@ -49,7 +49,7 @@ class NsightSystemsParquetProvider:
         self,
         path: Path,
         *,
-        capability_id: str,
+        operation: str,
         max_rows: int,
         provider_version: str = "parquetdir-v1",
     ) -> ProviderAnalysis:
@@ -62,15 +62,15 @@ class NsightSystemsParquetProvider:
             raise ProviderFailure(
                 "UNSUPPORTED_FORMAT", "Nsight Systems Parquet directory contains no tables"
             )
-        if capability_id == "gpu.launches":
+        if operation == "inspect_gpu_launches":
             files = [
                 file for file in files if file.stem.upper().startswith(_ACCELERATOR_TABLE_PREFIXES)
             ]
-        elif capability_id == "trace.operations":
+        elif operation == "summarize_trace_operations":
             files = [
                 file for file in files if file.stem.upper().startswith(_OPERATION_TABLE_PREFIXES)
             ]
-        elif capability_id == "trace.lifecycle":
+        elif operation == "summarize_trace_lifecycle":
             files = [
                 file for file in files if file.stem.upper().startswith(_LIFECYCLE_TABLE_PREFIXES)
             ]
@@ -100,21 +100,21 @@ class NsightSystemsParquetProvider:
             raise ProviderFailure(
                 "DECODE_FAILURE", "Nsight Systems Parquet table is invalid"
             ) from error
-        no_accelerator_activity = capability_id == "gpu.launches" and observed == 0
+        no_accelerator_activity = operation == "inspect_gpu_launches" and observed == 0
         limitations = [
             "Table schemas vary by Nsight Systems version.",
             "Cross-table temporal relationships require provider-qualified columns.",
         ]
         if no_accelerator_activity:
             limitations.append("no_accelerator_activity_observed")
-        if capability_id in {"trace.operations", "trace.lifecycle"} and not files:
-            limitations.append(f"no_{capability_id.removeprefix('trace.')}_activity_observed")
+        if operation in {"summarize_trace_operations", "summarize_trace_lifecycle"} and not files:
+            limitations.append(f"no_{operation.removeprefix('summarize_trace_')}_activity_observed")
         metrics: dict[str, Any] = {"table_count": len(tables), "row_count": observed}
-        if capability_id == "gpu.launches":
+        if operation == "inspect_gpu_launches":
             metrics["accelerator_activity_observed"] = not no_accelerator_activity
-        elif capability_id == "trace.operations":
+        elif operation == "summarize_trace_operations":
             metrics["operation_row_count"] = observed
-        elif capability_id == "trace.lifecycle":
+        elif operation == "summarize_trace_lifecycle":
             metrics["lifecycle_row_count"] = observed
         return ProviderAnalysis(
             provider_id="nsight-systems-parquetdir",

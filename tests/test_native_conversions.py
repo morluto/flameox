@@ -52,7 +52,9 @@ def test_native_export_failure_discards_partial_files_and_retry_reuses_success(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("trace.summary", [source], {}, limits=RequestLimits(timeout_seconds=1))
+            runtime.analyze(
+                "summarize_trace", [source], {}, limits=RequestLimits(timeout_seconds=1)
+            )
         assert failure.value.code == (
             "DECODE_FAILURE" if failure_mode == "nonzero" else "EXECUTION_FAILURE"
         )
@@ -65,8 +67,8 @@ def test_native_export_failure_discards_partial_files_and_retry_reuses_success(
         assert not list((runtime.scratch / "conversions").iterdir())
 
         mode.write_text("success")
-        first = runtime.analyze("trace.summary", [source], {}, limits=RequestLimits(max_rows=1))
-        second = runtime.analyze("trace.summary", [source], {}, limits=RequestLimits(max_rows=2))
+        first = runtime.analyze("summarize_trace", [source], {}, limits=RequestLimits(max_rows=1))
+        second = runtime.analyze("summarize_trace", [source], {}, limits=RequestLimits(max_rows=2))
         assert first["coverage"]["rows_returned"] >= 1
         assert second["coverage"]["complete"]
         assert calls.read_text().splitlines() == ["run", "run"]

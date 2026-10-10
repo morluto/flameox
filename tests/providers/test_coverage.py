@@ -25,13 +25,13 @@ def test_coverage_data_uses_isolated_reader_and_continuation(tmp_path: Path) -> 
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
-            "coverage.summary",
+            "summarize_coverage",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=2),
         )
         second = runtime.analyze(
-            "coverage.summary",
+            "summarize_coverage",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=2),
@@ -67,7 +67,7 @@ def test_provider_continuation_stops_at_a_truthfully_reported_bounded_prefix(
     try:
         while True:
             page = runtime.analyze(
-                "coverage.summary",
+                "summarize_coverage",
                 [PathSource(path=str(artifact))],
                 {},
                 limits=RequestLimits(max_rows=100),

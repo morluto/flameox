@@ -29,7 +29,7 @@ def test_rocprof_capture_requires_at_least_one_trace_domain(tmp_path: Path) -> N
                         "marker_trace": False,
                     },
                 ),
-                "trace.summary",
+                "summarize_trace",
             )
         finally:
             runtime.close()

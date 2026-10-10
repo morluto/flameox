@@ -30,10 +30,10 @@ class ReliabilityProvider:
     """Bounded projections for explicit pytest and semantic-observation streams."""
 
     def analyze(
-        self, capability_id: str, path: Path, format_name: str, *, max_rows: int
+        self, operation: str, path: Path, format_name: str, *, max_rows: int
     ) -> ProviderAnalysis:
         if format_name == "pytest":
-            if capability_id == "pytest.fixtures":
+            if operation == "inspect_pytest_fixtures":
                 return self._pytest_fixtures(path, max_rows=max_rows)
             return self._pytest(path, max_rows=max_rows)
         if format_name == "observations":

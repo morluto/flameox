@@ -120,7 +120,7 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path, mode: str) 
     async def exercise() -> None:
         async with Client(FlameoxServer(evidence_directory=store), raise_exceptions=True) as client:
             captured = await client.call_tool(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "print('one'); print('two')"],
@@ -200,7 +200,7 @@ def test_mcp_query_filters_providers_and_returns_exact_next_pages(tmp_path: Path
             capture_ids: list[str] = []
             for _ in range(2):
                 captured = await client.call_tool(
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", "print('captured')"],
@@ -223,13 +223,13 @@ def test_mcp_query_filters_providers_and_returns_exact_next_pages(tmp_path: Path
             )
             direct_first = await client.call_tool(
                 "query_evidence",
-                {"provider_id": "direct", "capability_id": "artifact.preview", "page_size": 1},
+                {"provider_id": "direct", "operation": "preview_artifact", "page_size": 1},
             )
             next_page = direct_first.structured_content["next_page"]
             assert next_page is not None
             direct_second = await client.call_tool(next_page["tool"], next_page["arguments"])
             assert next_page["arguments"]["provider_id"] == "direct"
-            assert next_page["arguments"]["capability_id"] == "artifact.preview"
+            assert next_page["arguments"]["operation"] == "preview_artifact"
             assert next_page["arguments"]["page_size"] == 1
             inline = direct_first.content[0]
             assert isinstance(inline, TextContent)
@@ -295,11 +295,7 @@ def test_analysis_preservation_query_inspection_and_restart(tmp_path: Path) -> N
         ) as restarted:
             reanalyzed = await restarted.call_tool(
                 "preview_artifact",
-                {
-                    "sources": [
-                        {"kind": "evidence", "evidence_id": evidence_id, "artifact_role": "input"}
-                    ]
-                },
+                {"sources": inspected.structured_content["analysis_sources"]},
             )
             assert reanalyzed.is_error is False
             assert reanalyzed.structured_content["blocks"][1]["rows"][0]["value"] == 1
@@ -351,7 +347,7 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(
                 analysis_id = analyzed.structured_content["analysis_id"]
             else:
                 analyzed = await client.call_tool(
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [
@@ -411,7 +407,7 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(
             else:
                 inspected = reopened.read_evidence_agent_projection(evidence_id)
                 replay = reopened.analyze(
-                    "artifact.preview",
+                    "preview_artifact",
                     [
                         EvidenceSource.model_validate(source)
                         for source in inspected["analysis_sources"]
@@ -435,7 +431,7 @@ def test_mcp_evidence_inspection_redacts_capture_provenance(tmp_path: Path) -> N
             FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
         ) as client:
             captured = await client.call_tool(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "print('ok')", secret_argument],
@@ -501,9 +497,7 @@ def test_query_distinguishes_unavailable_empty_and_no_matches(tmp_path: Path) ->
                 "preserve_evidence",
                 {"analysis_id": analyzed.structured_content["analysis_id"]},
             )
-            result = await client.call_tool(
-                "query_evidence", {"capability_id": "retired.capability"}
-            )
+            result = await client.call_tool("query_evidence", {"operation": "retired.operation"})
             return cast(dict[str, object], result.structured_content)
 
     unavailable = anyio.run(query, unavailable_store)

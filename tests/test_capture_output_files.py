@@ -68,7 +68,7 @@ def test_semantic_oracle_reads_full_capture_and_preserves_its_large_logs(tmp_pat
                     provider_id="direct",
                     console_output="full",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 experiment=_experiment(oracle),
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,
@@ -119,7 +119,7 @@ def test_capture_failure_preserves_stream_prefix_and_marks_sink_incomplete(
                     provider_id="direct",
                     budget=WorkloadBudget(timeout_seconds=0.2 if failure == "timeout" else 10),
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=RequestLimits(
                     max_output_bytes=len(prefix) if failure == "output_limit" else 1_000_000,
                 ),

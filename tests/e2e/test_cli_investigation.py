@@ -47,7 +47,7 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
         [
             executable,
             "analyze",
-            "artifact.preview",
+            "preview_artifact",
             str(artifact),
             "--arguments",
             '{"secret_field":"PRIVATE-CLI-INPUT"}',
@@ -68,6 +68,17 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
     assert "PRIVATE-CLI-INPUT" not in invalid.stderr
     assert "input_value" not in invalid.stderr
     assert "errors.pydantic.dev" not in invalid.stderr
+
+    obsolete = subprocess.run(
+        [executable, "analyze", "artifact.preview", str(artifact)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert obsolete.returncode == 1
+    assert json.loads(obsolete.stderr)["code"] == "UNKNOWN_OPERATION"
 
     marker = tmp_path / "started"
     experiment = (
@@ -105,7 +116,7 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
         '{"unused":' + "9" * 5_000 + "}",
     ):
         malformed = subprocess.run(
-            [executable, "analyze", "artifact.preview", str(artifact), "--arguments", invalid_json],
+            [executable, "analyze", "preview_artifact", str(artifact), "--arguments", invalid_json],
             env=environment,
             capture_output=True,
             text=True,
@@ -121,7 +132,7 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
 
     continuation = base64.urlsafe_b64encode(b"[" * 10_000 + b"0" + b"]" * 10_000).decode()
     malformed_token = subprocess.run(
-        [executable, "analyze", "artifact.preview", str(artifact), "--continuation", continuation],
+        [executable, "analyze", "preview_artifact", str(artifact), "--continuation", continuation],
         env=environment,
         capture_output=True,
         text=True,
@@ -252,14 +263,14 @@ def test_capture_preserve_restart_and_replay_native_evidence(tmp_path: Path) -> 
     assert resumed["blocks"][1]["rows"][0]["text"] == "second"
     manifest = run_cli(store, "evidence", "show", evidence_id)
     assert manifest["evidence_id"] == evidence_id
-    assert manifest["body"]["capability_id"] == "artifact.preview"
+    assert manifest["body"]["operation"] == "preview_artifact"
     native = b"first\nsecond\n"
     digest = hashlib.sha256(native).hexdigest()
     assert (store / "artifacts" / "sha256" / digest[:2] / digest / "payload").read_bytes() == native
 
-    inventory = run_cli(store, "evidence", "query", "--capability", "artifact.preview")
+    inventory = run_cli(store, "evidence", "query", "--operation", "preview_artifact")
     assert [item["evidence_id"] for item in inventory["evidence"]] == [evidence_id]
-    replay = run_cli(store, "analyze", "artifact.preview", "--evidence", evidence_id)
+    replay = run_cli(store, "analyze", "preview_artifact", "--evidence", evidence_id)
     assert [row["text"] for row in replay["blocks"][1]["rows"]] == ["first", "second"]
 
 
@@ -286,7 +297,7 @@ def test_failed_capture_preserves_native_output_across_restart(tmp_path: Path) -
     assert execution["status"] == "failed"
     assert execution["returncode"] == execution["workload_returncode"] == 7
     assert execution["returncode_scope"] == "workload"
-    replay = run_cli(store, "analyze", "artifact.preview", "--evidence", evidence_id)
+    replay = run_cli(store, "analyze", "preview_artifact", "--evidence", evidence_id)
     assert replay["blocks"][1]["rows"][0]["text"] == "partial result"
 
 
@@ -304,8 +315,8 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
         "capture",
         "--provider",
         "coverage",
-        "--capability",
-        "coverage.summary",
+        "--operation",
+        "summarize_coverage",
         "--cwd",
         str(tmp_path),
         "--capture-arguments",
@@ -378,7 +389,7 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
             ]
             for invalid in requests:
                 rejected = await session.call_tool(
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {"provider": {"kind": "direct"}, **invalid},
                 )
                 assert rejected.is_error is True
@@ -445,7 +456,7 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
                 "preserve": True,
             }
             rejected_capture = await session.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {**capture_arguments, "metric": "self_time_seconds"},
             )
             assert rejected_capture.is_error is True
@@ -453,8 +464,8 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
             assert rejected_capture.structured_content["code"] == "INVALID_INPUT"
             assert not marker.exists()
 
-            captured = await session.call_tool("capture_cpu_hotspots", capture_arguments)
-            await session.validate_tool_result("capture_cpu_hotspots", captured)
+            captured = await session.call_tool("capture_and_rank_cpu_hotspots", capture_arguments)
+            await session.validate_tool_result("capture_and_rank_cpu_hotspots", captured)
             assert captured.is_error is False
             assert captured.structured_content is not None
             payload = captured.structured_content
@@ -486,7 +497,7 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
             return evidence_id, payload["blocks"]
 
     evidence_id, blocks = anyio.run(exercise)
-    restarted = run_cli(store, "analyze", "cpu.hotspots", "--evidence", evidence_id)
+    restarted = run_cli(store, "analyze", "rank_cpu_hotspots", "--evidence", evidence_id)
     assert restarted["blocks"] == blocks
     assert marker.read_text() == "run\n"
 
@@ -527,7 +538,7 @@ def test_torch_cpu_capture_replays_all_trace_projections_without_rerunning(tmp_p
         async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
             await session.initialize()
             captured = await session.call_tool(
-                "capture_trace_pytorch",
+                "capture_and_summarize_pytorch_trace",
                 {
                     "target": {"argv": [sys.executable, str(workload)], "cwd": str(tmp_path)},
                     "provider": {
@@ -538,7 +549,7 @@ def test_torch_cpu_capture_replays_all_trace_projections_without_rerunning(tmp_p
                     "preserve": True,
                 },
             )
-            await session.validate_tool_result("capture_trace_pytorch", captured)
+            await session.validate_tool_result("capture_and_summarize_pytorch_trace", captured)
             assert not captured.is_error
             assert captured.structured_content is not None
             payload = captured.structured_content

@@ -27,7 +27,7 @@ def test_mcp_unavailable_provider_names_preparation_and_capture_retry(
             unmanaged_python.symlink_to(sys.executable)
             monkeypatch.setattr("flameox.runtime.sys.executable", str(unmanaged_python))
             unavailable = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "pass"],
@@ -49,7 +49,7 @@ def test_mcp_unavailable_provider_names_preparation_and_capture_retry(
             next_action = unavailable.structured_content["next_action"]
             assert next_action["tool"] == "prepare_providers"
             assert next_action["arguments"] == {"provider_ids": ["py-spy"]}
-            assert next_action["then_retry"] == "capture_cpu_hotspots"
+            assert next_action["then_retry"] == "capture_and_rank_cpu_hotspots"
 
     anyio.run(exercise)
 
@@ -60,7 +60,7 @@ def test_mcp_oracle_failure_does_not_become_a_workload_failure(tmp_path: Path) -
     async def exercise() -> None:
         async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "provider": {"kind": "direct"},
                     "target": {
@@ -106,7 +106,7 @@ def test_failed_capture_returns_full_provenance_inline(tmp_path: Path) -> None:
             )
         ) as client:
             result = await client.call_tool(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "raise SystemExit(7)", *arguments],

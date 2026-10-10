@@ -141,7 +141,7 @@ class InferenceExportProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         paths: Sequence[Path],
         formats: Sequence[str],
         arguments: Mapping[str, Any],
@@ -149,17 +149,17 @@ class InferenceExportProvider:
         max_rows: int,
     ) -> ProviderAnalysis | None:
         supported = {"vllm-benchmark", "sglang-benchmark", "mooncake-trace"}
-        if capability_id not in {"inference.summary", "inference.compare"} or not formats:
+        if operation not in {"summarize_inference", "compare_inference"} or not formats:
             return None
         if any(format_name not in supported for format_name in formats):
             return None
-        if capability_id == "inference.summary":
+        if operation == "summarize_inference":
             if len(paths) != 1:
-                raise ProviderFailure("INVALID_INPUT", "inference.summary accepts one input")
+                raise ProviderFailure("INVALID_INPUT", "summarize_inference accepts one input")
             return self._summary(paths[0], formats[0], max_rows=max_rows)
         if len(set(formats)) != 1:
             raise ProviderFailure(
-                "INVALID_INPUT", "inference.compare requires one compatible export format"
+                "INVALID_INPUT", "compare_inference requires one compatible export format"
             )
         analyses = [self._summary(path, formats[0], max_rows=max_rows) for path in paths]
         return self._compare(analyses, formats[0], arguments, max_rows=max_rows)
@@ -578,10 +578,10 @@ class InferenceExportProvider:
         max_rows: int,
     ) -> ProviderAnalysis:
         if len(analyses) < 2:
-            raise ProviderFailure("INVALID_INPUT", "inference.compare requires at least 2 inputs")
+            raise ProviderFailure("INVALID_INPUT", "compare_inference requires at least 2 inputs")
         if any(not analysis.complete for analysis in analyses):
             raise ProviderFailure(
-                "LIMIT_EXCEEDED", "inference.compare requires complete bounded inputs"
+                "LIMIT_EXCEEDED", "compare_inference requires complete bounded inputs"
             )
         baseline_index = int(arguments.get("baseline_index", 0))
         if baseline_index >= len(analyses):

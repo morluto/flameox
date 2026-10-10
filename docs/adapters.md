@@ -6,9 +6,9 @@ publish evidence, install providers, or own job lifecycle.
 
 ## Registry contract
 
-Each capability registry entry owns:
+Each operation registry entry owns:
 
-- the capability descriptor and stable ID;
+- the operation descriptor and stable ID;
 - accepted source modes and formats;
 - a strict validation-equivalent argument model;
 - compatibility rules derived from declared artifact formats;
@@ -22,7 +22,7 @@ drift.
 
 Adding or removing a format is complete only when these surfaces agree:
 
-1. the capability's accepted formats;
+1. the operation's accepted formats;
 2. the capture-provider contract and invocation builder, when capture is supported;
 3. explicit-path suffix detection;
 4. analysis dispatch into the provider or isolated worker;
@@ -30,10 +30,10 @@ Adding or removing a format is complete only when these surfaces agree:
 6. the support table below.
 
 Tests exercise explicit-path analysis and, when applicable, capture through the public runtime.
-A parser or worker that is not reachable through a declared capability is either intentionally
+A parser or worker that is not reachable through a declared operation is either intentionally
 internal and documented as such, or an incomplete registration—not latent support.
 
-Capability tools remain discoverable when a provider is absent. Capture validates the selected
+Operation tools remain discoverable when a provider is absent. Capture validates the selected
 provider's package, executable, platform, version, permission, and required external resources as
 part of the attempted operation, before workload execution. An unavailable provider returns a typed
 error with either an exact `prepare_providers` retry action or external host guidance.
@@ -88,14 +88,14 @@ Native heap samples can reference nodes absent from the exported call tree. Thos
 remain in the total counts and estimated bytes, with separate `unresolved_sample_count` and
 `unresolved_sampled_bytes` metrics, incomplete coverage, and an explicit attribution limitation.
 
-`triton.autotune` reads native `*.autotune.json` caches (`triton-cache`) emitted
+`inspect_triton_autotune` reads native `*.autotune.json` caches (`triton-cache`) emitted
 by Triton's `cache_results=True`, as well as the existing listener-event format.
 Native timing values retain producer order, including positive-infinity sentinels;
 they are not averaged as repeated samples. The best configuration is derived
 using Triton's lexicographic comparison. Native caches do not prove cache hits,
 device identity, semantic correctness, or representative performance improvement.
 
-The `triton.autotune` capture request uses Triton 3.7 in the declared workload interpreter.
+The `inspect_triton_autotune` capture request uses Triton 3.7 in the declared workload interpreter.
 It sets `TRITON_CACHE_AUTOTUNING=1` and a fresh request-owned `TRITON_CACHE_DIR`,
 preserving the native cache bundle, including compilation artifacts. This is a
 cold-cache tuning experiment, not a warm-cache benchmark. Kernels must already
@@ -107,7 +107,7 @@ Capture checks that pytest 8.3 or newer is available in that exact workload
 interpreter before invoking the collector; installing pytest in the server
 interpreter alone does not satisfy this requirement.
 
-`failures.summary` scans the complete bounded pytest event artifact for aggregate outcomes, but its
+`summarize_failures` scans the complete bounded pytest event artifact for aggregate outcomes, but its
 table projects only failed, errored, interrupted, and unexecuted identities. Failed collection
 reports retain their collector identity; successful collection events, passing tests, and skipped
 tests cannot consume the diagnostic row budget.
@@ -136,8 +136,8 @@ describe that same projected population. A bounded prefix of unrelated native ro
 that the requested activity is absent. OTLP time windows apply their span predicate before resource
 and scope rows consume the normalization budget; only owning context for retained spans is emitted.
 
-Nsight Systems CUDA runtime, driver, and synchronization tables feed `trace.operations`.
-`gpu.launches` selects device kernel and memory activity; CUDA API calls and profiler overhead
+Nsight Systems CUDA runtime, driver, and synchronization tables feed `summarize_trace_operations`.
+`inspect_gpu_launches` selects device kernel and memory activity; CUDA API calls and profiler overhead
 cannot establish that a GPU launch occurred. The native `CUPTI_ACTIVITY_KIND_*` table family
 contains both host and device evidence and must not be selected as one accelerator population.
 

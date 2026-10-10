@@ -28,7 +28,7 @@ class StructuredWorkerProviders:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         path: Path,
         input_sha256: str,
         format_name: str,
@@ -39,12 +39,12 @@ class StructuredWorkerProviders:
         maximum_rss_bytes: int,
         maximum_output_bytes: int,
     ) -> ProviderAnalysis | None:
-        if capability_id in {"cpu.hotspots", "cpu.callers"} and format_name == "pstats":
+        if operation in {"rank_cpu_hotspots", "inspect_cpu_callers"} and format_name == "pstats":
             metric = str(arguments.get("metric") or "self_time_seconds")
             pstats_result = self.harness.run_typed_sync(
                 PSTATS_WORKER,
                 PstatsWorkerRequest(
-                    projection="call_graph" if capability_id == "cpu.callers" else "hotspots",
+                    projection="call_graph" if operation == "inspect_cpu_callers" else "hotspots",
                     metric=cast(PstatsMetric, metric),
                     function=(
                         str(arguments["function"])
@@ -63,7 +63,7 @@ class StructuredWorkerProviders:
                 "function_count": pstats_result.function_count,
                 "reader_python_version": pstats_result.reader_version,
             }
-            if capability_id == "cpu.callers":
+            if operation == "inspect_cpu_callers":
                 metrics["edge_count"] = pstats_result.edge_count
                 metrics["direction"] = arguments.get("direction", "both")
                 metrics["function_filter"] = arguments.get("function")
@@ -81,15 +81,15 @@ class StructuredWorkerProviders:
                 ],
                 rows_observed=(
                     pstats_result.edge_count
-                    if capability_id == "cpu.callers"
+                    if operation == "inspect_cpu_callers"
                     else pstats_result.function_count
                 ),
                 complete=not pstats_result.truncated,
                 limitations=list(pstats_result.limitations),
             )
-        if (capability_id, format_name) in {
-            ("cpu.hotspots", "cpuprofile"),
-            ("memory.hotspots", "heapprofile"),
+        if (operation, format_name) in {
+            ("rank_cpu_hotspots", "cpuprofile"),
+            ("rank_allocation_hotspots", "heapprofile"),
         }:
             profile_kind: Literal["cpu", "heap"] = "cpu" if format_name == "cpuprofile" else "heap"
             result = self.harness.run_typed_sync(
@@ -129,7 +129,7 @@ class StructuredWorkerProviders:
                 and (profile_kind == "cpu" or result.unresolved_sample_count == 0),
                 limitations=list(result.limitations),
             )
-        if capability_id == "sanitizer.failures" and format_name == "compute-sanitizer":
+        if operation == "inspect_sanitizer_failures" and format_name == "compute-sanitizer":
             sanitizer_result = self.harness.run_typed_sync(
                 COMPUTE_SANITIZER_WORKER,
                 ComputeSanitizerWorkerRequest(

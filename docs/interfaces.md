@@ -13,7 +13,7 @@ tools. Analysis tools are read-only and idempotent. Capture tools execute a type
 annotated as effects; they never masquerade as reads. Lifecycle tools prepare providers or manage
 immutable evidence.
 
-Analysis tool names, in capability-registry order, are:
+Analysis tool names, in operation-registry order, are:
 
 ```text
 summarize_trace                 inspect_trace_call_graph
@@ -31,30 +31,40 @@ inspect_pytest_fixtures         summarize_coverage
 inspect_performance_candidates  preview_artifact
 ```
 
-Capture tools exist for capabilities with a compatible provider:
+Capture tool names combine `capture_and_` with the analysis task name. Available capture tools are:
 
 ```text
-capture_trace_summary           capture_trace_call_graph
-capture_trace_pytorch           capture_trace_operations
-capture_trace_lifecycle         capture_trace_window
-capture_cpu_hotspots            capture_cpu_callers
-capture_memory_hotspots         capture_memory_retained
-capture_benchmark_summary       capture_benchmark_scaling
-capture_gpu_launches            capture_gpu_kernel_metrics
-capture_triton_autotune         capture_sanitizer_failures
-capture_failures_summary        capture_pytest_fixtures
-capture_coverage_summary        capture_artifact_preview
+capture_and_summarize_trace
+capture_and_inspect_trace_call_graph
+capture_and_summarize_pytorch_trace
+capture_and_summarize_trace_operations
+capture_and_summarize_trace_lifecycle
+capture_and_inspect_trace_window
+capture_and_rank_cpu_hotspots
+capture_and_inspect_cpu_callers
+capture_and_rank_allocation_hotspots
+capture_and_rank_retained_memory
+capture_and_summarize_benchmarks
+capture_and_analyze_benchmark_scaling
+capture_and_inspect_gpu_launches
+capture_and_inspect_gpu_kernel_metrics
+capture_and_inspect_triton_autotune
+capture_and_inspect_sanitizer_failures
+capture_and_summarize_failures
+capture_and_inspect_pytest_fixtures
+capture_and_summarize_coverage
+capture_and_preview_artifact
 ```
 
 The five lifecycle tools are `prepare_providers`, `preserve_evidence`, `rescue_evidence`,
-`query_evidence`, and `inspect_evidence`. There are no gateway tools, opaque capability selectors,
+`query_evidence`, and `inspect_evidence`. There are no gateway tools, opaque operation selectors,
 or compatibility aliases.
-`flameox mcp inspect` lists compact names and annotations; `--capability CAPABILITY_ID` returns
-that capability's direct analysis/capture examples, capability-field schema, and compatible
-provider-field schemas. `--tool TOOL_NAME` shows one exact MCP input/output schema, and `--full`
+`flameox mcp inspect` lists compact names and annotations; `--tool TOOL_NAME` returns
+one exact MCP input/output schema, its operation examples, and compatible provider-field schemas.
+`--full`
 shows the complete catalog. CLI results omit process-local `analysis_id`
-because it cannot survive command exit. CLI inspection reports bounded tool/capability choices;
-an unsupported declared artifact format returns the capability's accepted formats before provider
+because it cannot survive command exit. CLI inspection reports bounded tool/operation choices;
+an unsupported declared artifact format returns the operation's accepted formats before provider
 decoding.
 
 `rescue_evidence` accepts one live session analysis and an agent-selected explicit absolute path
@@ -73,14 +83,14 @@ its parent before decoding or executing the workload, then returns the same resc
 `rescued`. The `--preserve` and `--rescue-to` options are mutually exclusive so the publication
 destination is unambiguous.
 
-Each analysis tool exposes `sources`, its capability-specific typed fields, optional `continuation`,
+Each analysis tool exposes `sources`, its operation-specific typed fields, optional `continuation`,
 `limits`, and `page_size` at the top level. Each capture tool exposes `target`, a discriminated `provider`
-object with `kind` and that collector's typed fields, capability-specific fields, `preserve`,
-`limits`, and `page_size`; only capabilities with multi-source analysis expose `experiment`. No request wrapper,
-opaque `options` bag, or capability selector appears in MCP arguments. Strict validation applies
+object with `kind` and that collector's typed fields, operation-specific fields, `preserve`,
+`limits`, and `page_size`; only operations with multi-source analysis expose `experiment`. No request wrapper,
+opaque `options` bag, or operation selector appears in MCP arguments. Strict validation applies
 source cardinality, format compatibility, provider compatibility, and experiment support against
 the domain registries before runtime execution. Invalid combinations use Flameox's structured
-failure contract, not raw Pydantic diagnostics. Capability-specific schemas are part of
+failure contract, not raw Pydantic diagnostics. Operation-specific schemas are part of
 `tools/list`, with optional CLI discovery for compact views.
 
 Trace-window bounds accept exact integers or canonical decimal strings from zero through
@@ -94,7 +104,7 @@ is shorthand for `limits.max_rows`; when both are supplied, they must agree. Con
 carry the effective limits so exact replay retains the original bounds. Field descriptions are
 part of the public MCP contract. Shared source, target, provider,
 and experiment descriptions are declared on their owning Pydantic models so CLI validation,
-runtime validation, and every generated capability tool use the same semantics. Transport-only
+runtime validation, and every generated operation tool use the same semantics. Transport-only
 fields such as continuations and preservation handles are described at the MCP boundary.
 
 Capture tools execute the target once by default. When present, `experiment` contains cases, blocks,
@@ -126,7 +136,7 @@ Older negotiated protocol revisions omit these fields.
 
 For analysis and capture results, `next_page` contains the exact named analysis tool and complete
 arguments for the next call. It includes ordered live path sources or preserved evidence sources,
-capability-specific fields, page size, and continuation. Callers do not reconstruct state from
+operation-specific fields, page size, and continuation. Callers do not reconstruct state from
 prose. Capture continuation always names the corresponding analysis tool and reads captured native
 artifacts; it never reruns the workload. `query_evidence` pagination instead names `query_evidence`
 and returns its exact next query arguments. Preserving a live paginated analysis may release its
@@ -150,16 +160,16 @@ If the response is partial, do not copy its continuation token into a newly asse
 Submit `next_page.tool` with `next_page.arguments` unchanged. This preserves source order, typed
 analysis fields, identity checks, and the original page size.
 
-Each capability declaration also owns its accepted source cardinality. The named tool's `sources`
+Each operation declaration also owns its accepted source cardinality. The named tool's `sources`
 schema carries that exact range before resolving paths or starting capture. Single-artifact
 summaries require exactly one source, comparison operations require at least two, and only
 intentional aggregations accept a larger bounded collection.
 
-Capability-specific fields appear directly at the tool's top level, defaulting according to the
-shared capability model. A capability may require fields such as the start and end bounds for
-`trace.window`; transport validation returns their field paths and accepted values where
+Operation-specific fields appear directly at the tool's top level, defaulting according to the
+shared operation model. A operation may require fields such as the start and end bounds for
+`inspect_trace_window`; transport validation returns their field paths and accepted values where
 applicable. Unknown fields are rejected, and pstats CPU metrics use a closed vocabulary in the
-tool schema. Its path-source `format` field enumerates the capability's accepted formats.
+tool schema. Its path-source `format` field enumerates the operation's accepted formats.
 An incompatible declared format returns a typed validation failure before path resolution or
 provider decoding. When omitted, the runtime detects the format where it is unambiguous.
 
@@ -181,7 +191,7 @@ annotations describe a whole tool, so combining read-only artifact analysis and 
 behind a mode flag would conceal a material effect change. Provider choice stays inside each capture
 tool because it is a typed implementation choice for one evidence question. Its schema enumerates
 compatible provider kinds and their exact fields; admission rejects incompatible
-capability/provider pairs before execution.
+operation/provider pairs before execution.
 
 `inspect_evidence` accepts an exact `evidence_id` and returns a validated, redacted projection of
 its canonical manifest inline. It includes ordered `analysis_sources`, logical source selectors,
@@ -235,7 +245,7 @@ The strict source union is:
 
 ```text
 PathSource     {kind: "path", path, format?, producer?, expected_sha256?}
-EvidenceSource {kind: "evidence", evidence_id, artifact_role? OR artifact_selector?}
+EvidenceSource {kind: "evidence", evidence_id, artifact_selector?}
 ```
 
 Continuations are opaque integrity cursors bound to the request and exact input
@@ -243,7 +253,7 @@ digests. They contain no authority, credentials, or artifact data and are not
 an authentication boundary: a caller already authorized to submit the analysis
 can choose which of its rows to request. They can cross process boundaries when their immutable
 inputs remain available, so an analysis of explicit paths can resume in a later CLI invocation.
-`flameox analyze --evidence EVIDENCE_ID` loads a preserved record's ordered analysis sources
+`flameox analyze OPERATION --evidence EVIDENCE_ID` loads a preserved record's ordered analysis sources
 directly. Tokens bind ordered content digests, formats,
 producer identities, arguments, and limits, independently of storage paths and publication roles.
 Paginated CLI analysis returns an executable `next_page.argv` for its explicit paths or evidence
@@ -255,7 +265,7 @@ A changed input cannot reuse a continuation. Tokens issued by older path-bound i
 must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
-For oversized text lines, `artifact.preview` accepts the top-level
+For oversized text lines, `preview_artifact` accepts the top-level
 `text_fragment_chars` field (1–4,096 decoded characters per fragment). It requires text sources,
 counts fragments instead of lines, and is bound into continuation identity. Start a fresh page when
 switching modes. Fragment rows preserve line and fragment positions; decoding replaces invalid
@@ -313,7 +323,7 @@ Capture console retention and preservation semantics are defined in
 
 A direct target contains an argv array, an existing absolute cwd, and at most 32 bounded environment
 overrides after experiment-case overrides are merged. Provider fields appear directly beside
-`provider.kind` inside that capture tool's discriminated provider object; capability fields appear
+`provider.kind` inside that capture tool's discriminated provider object; operation fields appear
 directly at the tool's top level. The runtime models remain the validation authority, and admission
 validates those projected typed fields before execution. Shell command strings are not accepted.
 
@@ -326,7 +336,7 @@ validates those projected typed fields before execution. Shell command strings a
 Both fields default to null. The workload budget's scope, observations, and limits are described in
 [runtime safety](runtime-safety.md).
 
-Provider output formats are compared with the requested capability before scratch allocation or
+Provider output formats are compared with the requested operation before scratch allocation or
 execution. Statically incompatible pairs fail with the declared formats and compatible capture
 providers. Capture then binds every real invocation, resolves the cwd and executables, and validates
 aggregate scratch and durable provenance capacity before allocating one request-owned scratch
@@ -348,9 +358,9 @@ Capture `outcome` is computed from every execution and retains exact success/fai
 MCP error classification consumes that outcome, and every execution record remains available in
 the structured result. Each execution identifies whether `returncode` belongs to the workload or
 collector, retains separate collector and workload executable SHA-256 identities, and leaves
-`workload_returncode` null for wrapped captures. The compatibility `executable_sha256` field identifies
-the invoked collector. Exit ownership is declared by each invocation builder: self-reporting workloads retain
-their observed exit even when they use a provider other than `direct`. A usable profile does not
+`workload_returncode` null for wrapped captures. Exit ownership is declared by each invocation
+builder: self-reporting workloads retain their observed exit even when they use a provider other
+than `direct`. A usable profile does not
 prove workload success. When retained, preserved stdout, stderr, and profiles
 are individually selectable from `inspect_evidence`.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
@@ -362,10 +372,10 @@ workload-owned result files or another independent semantic check when that coll
 workload output. A nonzero exit excludes the corresponding case-block observation from paired
 comparison.
 
-Comparison capabilities consume explicit artifacts; they do not capture their inputs. A caller captures
+Comparison operations consume explicit artifacts; they do not capture their inputs. A caller captures
 representative baseline and candidate summaries separately, preserves them when durable provenance
-is needed, and supplies at least two sources with capability `benchmark.compare`,
-`inference.compare`, or `kernel.compare`. Capture admission rejects these capabilities: experiment
+is needed, and supplies at least two sources with operation `compare_benchmarks`,
+`compare_inference`, or `compare_kernel_validation`. Capture admission rejects these operations: experiment
 capture reports the declared cases' effect but does not create the
 case-grouped native inputs required by artifact comparison.
 
@@ -387,13 +397,13 @@ flameox setup
 flameox update [--client CLIENT] [--version VERSION] [--check|--dry-run]
 flameox mcp serve [--limits JSON]
 flameox mcp inspect
-flameox analyze CAPABILITY_ID [PATH...] [OPTIONS]
+flameox analyze OPERATION [PATH...] [OPTIONS]
 flameox capture [OPTIONS] -- <argv...>
 flameox evidence query|show|location
 ```
 
 Analysis options include `--evidence`, `--arguments`, `--continuation`, `--limits`, and either
-`--preserve` or `--rescue-to`. Capture requires `--provider` and accepts `--capability`, `--cwd`,
+`--preserve` or `--rescue-to`. Capture requires `--provider` and accepts `--operation`, `--cwd`,
 `--capture-arguments`, `--analysis-arguments`, `--console-output`, `--workload-budget`,
 `--experiment`, `--limits`, and either `--preserve` or `--rescue-to`.
 
@@ -450,9 +460,8 @@ Named-index uv password/token environment variables cannot pass the broker's cre
 update rejects them explicitly with manual update guidance before changing pins.
 
 Setup and updated launchers disable implicit uv configuration and source overrides, so project
-`uv.toml` files cannot change their package resolution. Existing legacy setup launchers gain these
-flags on update. Custom launcher commands are rejected with manual setup guidance. Provider
-extras, client environment, disabled state, server limits, unrelated settings, and TOML/JSONC
+`uv.toml` files cannot change their package resolution. Custom launcher commands are rejected with
+manual setup guidance. Provider extras, client environment, disabled state, server limits, unrelated settings, and TOML/JSONC
 comments are retained. Preparation failure leaves all client configurations unchanged; publication
 checks for intervening configuration edits and replaces each file atomically. Multiple client
 files are not one transaction: a later write failure can leave earlier clients updated.

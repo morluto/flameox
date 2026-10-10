@@ -25,7 +25,7 @@ def test_text_fragments_preserve_native_bytes_and_resume_after_restart(
     limits = RequestLimits(max_rows=2)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
     try:
-        first = runtime.analyze("artifact.preview", sources, options, limits=limits)
+        first = runtime.analyze("preview_artifact", sources, options, limits=limits)
         fragments = [row["text"] for row in first["blocks"][1]["rows"]]
         token = first["continuation"]
         assert token is not None
@@ -36,7 +36,7 @@ def test_text_fragments_preserve_native_bytes_and_resume_after_restart(
     try:
         while token is not None:
             page = restarted.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [EvidenceSource(kind="evidence", evidence_id=preserved["evidence_id"])],
                 options,
                 limits=limits,
@@ -62,14 +62,14 @@ def test_text_fragment_continuation_binds_options_and_native_identity(
     limits = RequestLimits(max_rows=1)
     options = {"text_fragment_chars": 8}
     try:
-        first = runtime.analyze("artifact.preview", sources, options, limits=limits)
+        first = runtime.analyze("preview_artifact", sources, options, limits=limits)
         if change == "options":
             options = {"text_fragment_chars": 4}
         else:
             path.write_text("b" * 100)
         with pytest.raises(RuntimeFailure):
             runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 sources,
                 options,
                 limits=limits,

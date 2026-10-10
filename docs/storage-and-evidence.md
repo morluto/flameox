@@ -84,7 +84,7 @@ both logical and expanded artifact roles. If either collides, it assigns determi
 not parsed from newly published roles. Analysis inputs retain their original roles and identities.
 
 Evidence identity is SHA-256 of the RFC 8785 canonical manifest body. The body
-contains capability/provider identity, input digests, effective capture and
+contains operation/provider identity, input digests, effective capture and
 analysis requests, the evidence-episode timestamp, data-file digests, coverage,
 and limitations. Process-local handles such as `analysis_id` and continuation
 tokens are excluded from preserved data.
@@ -126,7 +126,7 @@ is provably dead.
 `query_evidence` sorts the manifest inventory deterministically and computes an
 inventory digest before filtering. A continuation is bound to that inventory;
 mutation makes it stale rather than silently changing the page. Filters cover
-evidence kind, capability, provider, input digest, and time bounds. The provider
+evidence kind, operation, provider, input digest, and time bounds. The provider
 filter matches either the analysis provider recorded in the manifest or, for
 capture evidence, the capture collector ID recorded in its target provenance.
 
@@ -177,11 +177,10 @@ requiring the original store. Switching
 stores does not recover evidence that was not preserved or rescued. Do not delete existing data or
 synthesize replacement metadata.
 
-## Format evolution
+## Repository format
 
-This is repository format `3`. Capture executions record collector and workload executable digests
-separately; wrapped captures pin and revalidate both identities. Unsupported repository, artifact, or
-manifest versions fail explicitly before their contents are trusted. Formats `1` and `2` are not
-supported. Existing stores are never rewritten automatically: inspect or export them with a compatible
-older release, and select a separate empty directory for a format-3 store.
-Changing the version field does not migrate evidence and would invalidate its contract.
+Repository format `4` records the same task name used by runtime, CLI, and MCP in `operation`.
+Analysis inputs bind their file or directory kind as well as their native digest. Unsupported
+repository, artifact, and manifest versions fail before contents are trusted. There are no aliases,
+legacy readers, or automatic migrations. Use an empty store for this contract; changing a version
+field cannot migrate content-addressed evidence.

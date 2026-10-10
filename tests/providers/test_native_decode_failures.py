@@ -9,17 +9,17 @@ from flameox.runtime_contracts import PathSource, RuntimeFailure
 
 
 @pytest.mark.parametrize(
-    ("capability", "format_name"),
+    ("operation", "format_name"),
     [
-        ("artifact.preview", "jsonl"),
-        ("cpu.hotspots", "py-spy"),
-        ("benchmark.summary", "nvbench"),
-        ("inference.summary", "vllm-benchmark"),
-        ("inference.summary", "sglang-benchmark"),
-        ("inference.summary", "mooncake-trace"),
-        ("kernel.validation", "kernel-validation"),
-        ("triton.autotune", "triton"),
-        ("triton.autotune", "triton-cache"),
+        ("preview_artifact", "jsonl"),
+        ("rank_cpu_hotspots", "py-spy"),
+        ("summarize_benchmarks", "nvbench"),
+        ("summarize_inference", "vllm-benchmark"),
+        ("summarize_inference", "sglang-benchmark"),
+        ("summarize_inference", "mooncake-trace"),
+        ("inspect_kernel_validation", "kernel-validation"),
+        ("inspect_triton_autotune", "triton"),
+        ("inspect_triton_autotune", "triton-cache"),
     ],
 )
 @pytest.mark.parametrize(
@@ -28,7 +28,7 @@ from flameox.runtime_contracts import PathSource, RuntimeFailure
     ids=["invalid-unicode", "integer-conversion-limit", "recursive-json"],
 )
 def test_native_json_decode_failures_remain_typed(
-    tmp_path: Path, capability: str, format_name: str, native: bytes
+    tmp_path: Path, operation: str, format_name: str, native: bytes
 ) -> None:
     artifact = tmp_path / "native.json"
     artifact.write_bytes(native)
@@ -36,7 +36,7 @@ def test_native_json_decode_failures_remain_typed(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(capability, [PathSource(path=str(source_path), format=format_name)], {})
+            runtime.analyze(operation, [PathSource(path=str(source_path), format=format_name)], {})
         assert failure.value.code == "DECODE_FAILURE"
         assert artifact.read_bytes() == native
     finally:

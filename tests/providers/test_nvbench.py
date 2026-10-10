@@ -82,12 +82,12 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
-            "benchmark.summary",
+            "summarize_benchmarks",
             [PathSource(path=str(baseline), format="nvbench")],
             {},
         )
         comparison = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="nvbench"),
                 PathSource(path=str(candidate), format="nvbench"),
@@ -97,7 +97,7 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(
         preserved = runtime.preserve_evidence(summary["analysis_id"])
         manifest = runtime.read_evidence(preserved["evidence_id"])
         scaling = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [PathSource(path=str(baseline), format="nvbench")],
             {"input_dimension": "elements"},
         )
@@ -122,7 +122,7 @@ def test_nvbench_comparison_preserves_an_undefined_ratio_for_zero_baselines(tmp_
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     sources = [PathSource(path=str(path), format="nvbench") for path in (baseline, candidate)]
     try:
-        result = runtime.analyze("benchmark.compare", sources, {})
+        result = runtime.analyze("compare_benchmarks", sources, {})
         assert result["blocks"][1]["rows"][0]["ratio"] is None
     finally:
         runtime.close()
@@ -134,7 +134,7 @@ def test_nvbench_compare_does_not_pair_different_states(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [
                 PathSource(path=str(baseline), format="nvbench"),
                 PathSource(path=str(candidate), format="nvbench"),
@@ -168,15 +168,15 @@ def test_nvbench_comparison_does_not_match_series_without_observations(
             if samples:
                 continue
             source = PathSource(path=str(bundle), format="nvbench")
-            summary = runtime.analyze("benchmark.summary", [source], {})
+            summary = runtime.analyze("summarize_benchmarks", [source], {})
             scaling = runtime.analyze(
-                "benchmark.scaling", [source], {"input_dimension": "elements"}
+                "analyze_benchmark_scaling", [source], {"input_dimension": "elements"}
             )
             assert summary["blocks"][0]["values"]["measurement_count"] == 0
             assert scaling["blocks"][0]["values"]["inconclusive_series_count"] == 1
             assert scaling["blocks"][1]["rows"][0]["point_count"] == 0
         result = runtime.analyze(
-            "benchmark.compare",
+            "compare_benchmarks",
             [PathSource(path=str(path), format="nvbench") for path in bundles],
             {},
         )
@@ -208,9 +208,9 @@ def test_nvbench_comparison_and_scaling_retain_partly_decoded_native_labels(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     sources = [PathSource(path=str(path), format="nvbench") for path in (baseline, candidate)]
     try:
-        compared = runtime.analyze("benchmark.compare", sources, {})
+        compared = runtime.analyze("compare_benchmarks", sources, {})
         scaled = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             [sources[0], PathSource(path=str(larger), format="nvbench")],
             {"input_dimension": "elements"},
         )
@@ -235,7 +235,7 @@ def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "benchmark.scaling",
+            "analyze_benchmark_scaling",
             sources,
             {"input_dimension": "elements", "metric": "cub.scan.sample_times"},
         )
@@ -261,19 +261,19 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
     try:
         with pytest.raises(RuntimeFailure) as unbound:
             runtime.analyze(
-                "benchmark.summary",
+                "summarize_benchmarks",
                 [PathSource(path=str(standalone), format="nvbench")],
                 {},
             )
         with pytest.raises(RuntimeFailure) as malformed:
             runtime.analyze(
-                "benchmark.summary",
+                "summarize_benchmarks",
                 [PathSource(path=str(invalid), format="nvbench")],
                 {},
             )
         with pytest.raises(RuntimeFailure) as hint_failure:
             runtime.analyze(
-                "benchmark.summary", [PathSource(path=str(malformed_hint), format="nvbench")], {}
+                "summarize_benchmarks", [PathSource(path=str(malformed_hint), format="nvbench")], {}
             )
         assert hint_failure.value.code == "DECODE_FAILURE"
     finally:
@@ -295,12 +295,12 @@ def test_nvbench_checks_size_bounds_before_decimal_conversion(tmp_path: Path, co
         if count.startswith("9"):
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+                    "summarize_benchmarks", [PathSource(path=str(bundle), format="nvbench")], {}
                 )
             assert failure.value.code == "LIMIT_EXCEEDED"
         else:
             summary = runtime.analyze(
-                "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+                "summarize_benchmarks", [PathSource(path=str(bundle), format="nvbench")], {}
             )
             assert summary["blocks"][0]["values"]["measurement_count"] == 2
     finally:
@@ -318,7 +318,7 @@ def test_nvbench_rejects_nonfinite_state_identity(tmp_path: Path, index: float) 
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+                "summarize_benchmarks", [PathSource(path=str(bundle), format="nvbench")], {}
             )
         assert failure.value.code == "DECODE_FAILURE"
     finally:

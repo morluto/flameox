@@ -177,7 +177,6 @@ class CaptureExecution(EvidenceModel):
     limit: ExecutionLimit | None
     returncode_scope: Literal["workload", "collector"]
     workload_returncode: int | None
-    executable_sha256: Digest
     collector_executable_sha256: Digest
     workload_executable_sha256: Digest
     artifact_rejections: list[ArtifactRejection] = Field(default_factory=list)
@@ -211,7 +210,7 @@ class AnalysisInput(EvidenceModel):
     path: Nonempty
     role: Nonempty
     producer: str | None
-    is_directory: bool | None = None
+    is_directory: bool
 
 
 class AnalysisFailure(EvidenceModel):
@@ -221,7 +220,7 @@ class AnalysisFailure(EvidenceModel):
 
 
 class AnalysisRequest(EvidenceModel):
-    capability_id: Nonempty
+    operation: Nonempty
     inputs: list[AnalysisInput] = Field(default_factory=list)
     offset: Count | None = None
     failure: AnalysisFailure | None = None
@@ -269,7 +268,7 @@ class SourceLayout(EvidenceModel):
 
 class ManifestBody(EvidenceModel):
     evidence_kind: Nonempty
-    capability_id: Nonempty
+    operation: Nonempty
     provider: ProviderIdentity
     inputs: list[InputIdentity]
     capture_request: CaptureRequest | None
@@ -315,7 +314,7 @@ class ManifestBody(EvidenceModel):
             if index >= len(layout.sources):
                 raise ValueError("Invalid analysis source index")
             source = layout.sources[index]
-            if item.is_directory is not None and item.is_directory != source.is_directory:
+            if item.is_directory != source.is_directory:
                 raise ValueError("Invalid analysis source kind")
             if (source.sha256, source.format, source.producer) != (
                 item.sha256,

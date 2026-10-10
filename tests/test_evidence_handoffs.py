@@ -34,18 +34,18 @@ def test_directory_handoff_preserves_empty_bundles_and_exact_members(
         (bundle / name).write_text(name + "\n")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(bundle))], {})
         ref = runtime.preserve_evidence(result["analysis_id"])
         runtime.close()
         runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
         projection = runtime.read_evidence_agent_projection(ref["evidence_id"])
         assert len(projection["analysis_sources"]) == 1
         sources = [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]]
-        restored = runtime.analyze("artifact.preview", sources, {})
+        restored = runtime.analyze("preview_artifact", sources, {})
         assert restored["inputs"][0]["sha256"] == result["inputs"][0]["sha256"]
         for artifact in projection["body"]["artifacts"]:
             selected = runtime.analyze(
-                "artifact.preview", [EvidenceSource.model_validate(artifact["source"])], {}
+                "preview_artifact", [EvidenceSource.model_validate(artifact["source"])], {}
             )
             assert selected["inputs"][0]["sha256"] == artifact["sha256"]
             selected_ref = runtime.preserve_evidence(selected["analysis_id"])
@@ -54,7 +54,7 @@ def test_directory_handoff_preserves_empty_bundles_and_exact_members(
             )
             assert len(selected_projection["analysis_sources"]) == 1
             again = runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [EvidenceSource.model_validate(selected_projection["analysis_sources"][0])],
                 {},
             )
@@ -62,23 +62,10 @@ def test_directory_handoff_preserves_empty_bundles_and_exact_members(
             assert artifact["source"]["artifact_selector"] not in {
                 hashlib.sha256(f"input:{name}".encode()).hexdigest() for name in members
             }
-        if members:
-            legacy = runtime.analyze(
-                "artifact.preview",
-                [
-                    EvidenceSource(
-                        kind="evidence",
-                        evidence_id=ref["evidence_id"],
-                        artifact_role=f"input:{members[0]}",
-                    )
-                ],
-                {},
-            )
-            assert legacy["blocks"][1]["rows"][0]["text"] == members[0]
-        else:
+        if not members:
             assert projection["body"]["artifacts"] == []
             default = runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [EvidenceSource(kind="evidence", evidence_id=ref["evidence_id"])],
                 {},
             )
@@ -119,9 +106,9 @@ def test_self_reporting_capture_retains_workload_exit(
                     ),
                 ),
                 {
-                    "benchmark-samples": "benchmark.summary",
-                    "observations": "failures.summary",
-                    "torch-profiler": "trace.window",
+                    "benchmark-samples": "summarize_benchmarks",
+                    "observations": "summarize_failures",
+                    "torch-profiler": "inspect_trace_window",
                 }[provider],
                 preserve=True,
             )
@@ -153,7 +140,7 @@ def test_source_layout_corruption_is_a_typed_repository_failure(
     (bundle / "member").write_text("contents")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(bundle))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(bundle))], {})
         ref = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = ref["evidence_id"]
         path = tmp_path / "store" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
@@ -192,7 +179,7 @@ def test_artifact_extra_fields_cannot_override_file_identity(tmp_path: Path) -> 
     artifact.write_text("contents")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         ref = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = ref["evidence_id"]
         path = tmp_path / "store" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
@@ -219,7 +206,7 @@ def test_preview_offset_is_a_logical_row(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         result = runtime.analyze(
-            "artifact.preview", [PathSource(path=str(artifact))], {"offset": 1}
+            "preview_artifact", [PathSource(path=str(artifact))], {"offset": 1}
         )
         assert [row["text"] for row in result["blocks"][1]["rows"]] == ["long second line", "third"]
     finally:
@@ -235,7 +222,7 @@ def test_mutating_page_handoffs_cannot_change_replay_or_preserved_provenance(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         first, handoff = runtime.analyze_page(
-            "artifact.preview",
+            "preview_artifact",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=1),
@@ -249,7 +236,7 @@ def test_mutating_page_handoffs_cannot_change_replay_or_preserved_provenance(
         assert replay["limits"]["max_rows"] == 1
         assert replay["options"]["offset"] == 0
         second = runtime.analyze(
-            replay["capability_id"],
+            replay["operation"],
             [PathSource.model_validate(item) for item in replay["sources"]],
             replay["options"],
             limits=RequestLimits.model_validate(replay["limits"]),
@@ -287,7 +274,7 @@ def test_preserved_capture_continuation_uses_discovered_sources(
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 limits=limits,
                 preserve=inline,
             )
@@ -303,7 +290,7 @@ def test_preserved_capture_continuation_uses_discovered_sources(
             token = first["continuation"]
             while token:
                 page = runtime.analyze(
-                    "artifact.preview", sources, {}, limits=limits, continuation=token
+                    "preview_artifact", sources, {}, limits=limits, continuation=token
                 )
                 rows.extend(page["blocks"][1]["rows"])
                 token = page["continuation"]
@@ -312,12 +299,12 @@ def test_preserved_capture_continuation_uses_discovered_sources(
             artifacts = projection["body"]["artifacts"]
             for artifact in artifacts:
                 selected = runtime.analyze(
-                    "artifact.preview", [EvidenceSource.model_validate(artifact["source"])], {}
+                    "preview_artifact", [EvidenceSource.model_validate(artifact["source"])], {}
                 )
                 assert selected["inputs"][0]["sha256"] == artifact["sha256"]
             with pytest.raises(RuntimeFailure, match="Continuation"):
                 runtime.analyze(
-                    "artifact.preview",
+                    "preview_artifact",
                     sources,
                     {"offset": 1},
                     limits=limits,
@@ -375,7 +362,7 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
     async def exercise() -> None:
         async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
             result = await client.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", "pass"],
@@ -436,7 +423,7 @@ def test_directory_sources_round_trip_without_revealing_member_names(tmp_path: P
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         first = runtime.analyze(
-            "artifact.preview", [PathSource(path=str(bundle), format="text")], {}
+            "preview_artifact", [PathSource(path=str(bundle), format="text")], {}
         )
         preserved = runtime.preserve_evidence(first["analysis_id"])
         resource = runtime.read_evidence_agent_projection(preserved["evidence_id"])
@@ -444,7 +431,7 @@ def test_directory_sources_round_trip_without_revealing_member_names(tmp_path: P
         assert "private-bundle" not in json.dumps(resource)
         assert len(resource["analysis_sources"]) == 1
         page = runtime.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [EvidenceSource.model_validate(item) for item in resource["analysis_sources"]],
             {},
         )
@@ -462,10 +449,10 @@ def test_preview_json_empty_object_and_malformed_boundaries(tmp_path: Path, cont
     try:
         if content in {"[", "\n[{]"}:
             with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+                runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert failure.value.code == "DECODE_FAILURE"
         else:
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert len(result["blocks"][1]["rows"]) == (1 if "key" in content else 0)
             assert result["coverage"]["complete"]
     finally:

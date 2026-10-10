@@ -35,7 +35,7 @@ def test_capture_rejects_missing_vendor_interface_before_execution(
                         cwd=str(tmp_path),
                         provider_id="nsight-compute",
                     ),
-                    "gpu.kernel_metrics",
+                    "inspect_gpu_kernel_metrics",
                 )
         finally:
             runtime.close()
@@ -65,7 +65,9 @@ def test_vendor_reader_symlink_loop_has_a_typed_unavailable_result(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "gpu.kernel_metrics", [PathSource(path=str(artifact), format="nsight-compute")], {}
+                "inspect_gpu_kernel_metrics",
+                [PathSource(path=str(artifact), format="nsight-compute")],
+                {},
             )
         assert failure.value.code == "UNAVAILABLE_CAPABILITY"
         assert str(interface) not in str(failure.value)

@@ -123,7 +123,7 @@ body:
       description: Select the earliest stage where the incorrect behavior is observable.
       options:
         - Request parsing or validation
-        - Capability discovery or provider setup
+        - Operation discovery or provider setup
         - Capture or explicit source resolution
         - Native artifact validation or provenance
         - Bounded provider analysis

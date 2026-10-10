@@ -60,12 +60,12 @@ def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
-            "inference.summary",
+            "summarize_inference",
             [PathSource(path=str(baseline), format="vllm-benchmark")],
             {},
         )
         comparison = runtime.analyze(
-            "inference.compare",
+            "compare_inference",
             [
                 PathSource(path=str(baseline), format="vllm-benchmark"),
                 PathSource(path=str(candidate), format="vllm-benchmark"),
@@ -104,14 +104,14 @@ def test_inference_comparison_rejects_unrepresentable_derived_ratio(tmp_path: Pa
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.compare",
+                "compare_inference",
                 [PathSource(path=str(path), format="vllm-benchmark") for path in paths],
                 {},
             )
         assert failure.value.code == "LIMIT_EXCEEDED"
         for path in paths:
             assert runtime.analyze(
-                "inference.summary", [PathSource(path=str(path), format="vllm-benchmark")], {}
+                "summarize_inference", [PathSource(path=str(path), format="vllm-benchmark")], {}
             )["coverage"]["complete"]
     finally:
         runtime.close()
@@ -138,7 +138,7 @@ def test_inference_rejects_unrepresentable_measured_values(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.summary", [PathSource(path=str(artifact), format=format_name)], {}
+                "summarize_inference", [PathSource(path=str(artifact), format=format_name)], {}
             )
         assert failure.value.code == "DECODE_FAILURE"
     finally:
@@ -162,12 +162,12 @@ def test_inference_compare_rejects_known_differences_unless_explicit(tmp_path: P
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.compare",
+                "compare_inference",
                 sources,
                 {"metric": "vllm.request_throughput"},
             )
         exploratory = runtime.analyze(
-            "inference.compare",
+            "compare_inference",
             sources,
             {"metric": "vllm.request_throughput", "allow_heterogeneous": True},
         )
@@ -196,7 +196,7 @@ def test_inference_compare_treats_one_sided_optional_identity_as_partial(tmp_pat
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "inference.compare",
+            "compare_inference",
             [
                 PathSource(path=str(baseline), format="vllm-benchmark"),
                 PathSource(path=str(candidate), format="vllm-benchmark"),
@@ -244,13 +244,13 @@ def test_sglang_rejects_detailed_output_and_projects_scalars(tmp_path: Path) -> 
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "inference.summary",
+            "summarize_inference",
             [PathSource(path=str(aggregate), format="sglang-benchmark")],
             {},
         )
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.summary",
+                "summarize_inference",
                 [PathSource(path=str(detailed), format="sglang-benchmark")],
                 {},
             )
@@ -294,7 +294,7 @@ def test_mooncake_trace_is_streamed_without_sensitive_payloads(tmp_path: Path) -
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "inference.summary",
+            "summarize_inference",
             [PathSource(path=str(trace), format="mooncake-trace")],
             {},
         )
@@ -326,7 +326,7 @@ def test_mooncake_summary_aggregates_beyond_returned_rows(tmp_path: Path) -> Non
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "inference.summary",
+            "summarize_inference",
             [PathSource(path=str(trace), format="mooncake-trace")],
             {},
             limits=RequestLimits(max_rows=1),
@@ -383,7 +383,7 @@ def test_aiperf_retains_empty_metric_failures_without_inventing_counts(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         sources = [PathSource(path=str(export), format="aiperf")]
-        result = runtime.analyze("inference.summary", sources, {})
+        result = runtime.analyze("summarize_inference", sources, {})
         metrics = result["blocks"][0]["values"]
         assert metrics["request_count"] == len(records)
         assert metrics["successful_requests"] == int(mixed)
@@ -398,7 +398,7 @@ def test_aiperf_retains_empty_metric_failures_without_inventing_counts(
         assert row["latency_ns"] is None and row["tpot_ns"] is None
         assert "PRIVATE_" not in json.dumps(result)
         if mixed:
-            compared = runtime.analyze("inference.compare", sources * 2, {})
+            compared = runtime.analyze("compare_inference", sources * 2, {})
             comparison = compared["blocks"][1]["rows"][0]
             assert comparison["ratio"] == 1
             assert comparison["baseline_samples"] == 1
@@ -449,7 +449,7 @@ def test_aiperf_runtime_comparison_uses_prompt_free_request_metrics(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "inference.compare",
+            "compare_inference",
             [
                 PathSource(path=str(baseline), format="aiperf", producer="aiperf"),
                 PathSource(path=str(candidate), format="aiperf", producer="aiperf"),
@@ -505,7 +505,7 @@ def test_aiperf_analysis_reports_missing_optional_package_as_unavailable(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.summary",
+                "summarize_inference",
                 [PathSource(path=str(export), format="aiperf", producer="aiperf")],
                 {},
             )
@@ -564,21 +564,21 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(
         if mode in {"scaled_overflow", "giant_duration"}:
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "inference.summary", [PathSource(path=str(export), format="aiperf")], {}
+                    "summarize_inference", [PathSource(path=str(export), format="aiperf")], {}
                 )
             assert failure.value.code == "DECODE_FAILURE"
             assert export.read_bytes() == native
             assert not (tmp_path / ".flameox").exists()
             return
         result = runtime.analyze(
-            "inference.summary",
+            "summarize_inference",
             [PathSource(path=str(export), format="aiperf", producer="aiperf")],
             {},
         )
         if mode == "giant_tokens":
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "inference.compare",
+                    "compare_inference",
                     [PathSource(path=str(export), format="aiperf")] * 2,
                     {"metric": "input_tokens"},
                 )
@@ -615,7 +615,7 @@ def test_inference_rejects_invalid_unicode_identity_without_leaking_native_text(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.summary", [PathSource(path=str(artifact), format=format_name)], {}
+                "summarize_inference", [PathSource(path=str(artifact), format=format_name)], {}
             )
         assert failure.value.code == "DECODE_FAILURE"
     finally:
@@ -654,12 +654,12 @@ def test_inference_line_bounds_apply_before_whitespace_skipping(
                 path=str(artifact), format="aiperf" if format_name == "aiperf" else "mooncake-trace"
             )
         ]
-        admitted = runtime.analyze("inference.summary", sources, {})
+        admitted = runtime.analyze("summarize_inference", sources, {})
         assert admitted["blocks"][1]["rows"][0]["line_index"] == 0
         artifact.write_text(prefix + " " * (line_limit + 1) + json.dumps(native) + "\n")
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "inference.summary",
+                "summarize_inference",
                 sources,
                 {},
             )
@@ -700,11 +700,11 @@ def test_mooncake_comparison_preserves_prefix_reuse_identity(
     try:
         if changed_prefixes:
             with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze("inference.compare", sources, {})
+                runtime.analyze("compare_inference", sources, {})
             assert failure.value.code == "INVALID_INPUT"
             assert failure.value.details == {"differing_fields": ["workload"]}
         comparison = runtime.analyze(
-            "inference.compare", sources, {"allow_heterogeneous": changed_prefixes}
+            "compare_inference", sources, {"allow_heterogeneous": changed_prefixes}
         )
         row = comparison["blocks"][1]["rows"][0]
         assert row["compatibility"] == ("heterogeneous" if changed_prefixes else "partial")

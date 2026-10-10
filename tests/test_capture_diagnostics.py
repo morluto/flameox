@@ -46,7 +46,7 @@ def test_capture_default_diagnostics_bound_noisy_native_capture_and_preservation
                     cwd=str(tmp_path),
                     provider_id="coverage",
                 ),
-                "coverage.summary",
+                "summarize_coverage",
                 limits=RequestLimits(max_output_bytes=1024 * 1024),
                 preserve=True,
             )
@@ -109,7 +109,7 @@ def test_native_capture_can_explicitly_preserve_full_console_output(tmp_path: Pa
                     provider_id="coverage",
                     console_output="full",
                 ),
-                "coverage.summary",
+                "summarize_coverage",
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,
             )
@@ -175,7 +175,7 @@ def test_capture_oracle_gets_full_workload_logs_but_keeps_its_own_diagnostics(
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 experiment=experiment,
                 limits=RequestLimits(max_output_bytes=1_000_000),
                 preserve=True,
@@ -221,10 +221,15 @@ def test_capture_oracle_gets_full_workload_logs_but_keeps_its_own_diagnostics(
 @pytest.mark.parametrize("preserve", [False, True])
 @pytest.mark.parametrize("console_output", ["diagnostics", "full"])
 @pytest.mark.parametrize(
-    ("provider_id", "capability_id", "analysis_arguments", "missing_role"),
+    ("provider_id", "operation", "analysis_arguments", "missing_role"),
     [
-        ("observations", "failures.summary", {}, "observations"),
-        ("benchmark-samples", "benchmark.scaling", {"input_dimension": "size"}, "benchmark"),
+        ("observations", "summarize_failures", {}, "observations"),
+        (
+            "benchmark-samples",
+            "analyze_benchmark_scaling",
+            {"input_dimension": "size"},
+            "benchmark",
+        ),
     ],
 )
 def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
@@ -232,7 +237,7 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
     preserve: bool,
     console_output: Literal["diagnostics", "full"],
     provider_id: str,
-    capability_id: str,
+    operation: str,
     analysis_arguments: dict[str, Any],
     missing_role: str,
 ) -> None:
@@ -254,7 +259,7 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
                     console_output=console_output,
                     analysis_arguments=analysis_arguments,
                 ),
-                capability_id,
+                operation,
                 limits=RequestLimits(max_output_bytes=64 * 1024),
                 preserve=preserve,
             )
@@ -263,7 +268,7 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
 
     result = anyio.run(exercise)
     execution = result["capture"]["executions"][0]
-    assert result["capability_id"] == capability_id
+    assert result["operation"] == operation
     assert execution["status"] == "failed"
     assert result["analysis_failure"]["code"] == "EXECUTION_FAILURE"
     assert result["analysis_failure"]["details"]["analysis_source_count"] == 0

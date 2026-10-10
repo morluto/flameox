@@ -19,7 +19,7 @@ class OtlpProvider:
     def analyze(
         self,
         path: Path,
-        capability_id: str,
+        operation: str,
         arguments: Mapping[str, Any],
         *,
         max_rows: int,
@@ -27,8 +27,8 @@ class OtlpProvider:
         maximum_rss_bytes: int,
         maximum_output_bytes: int,
     ) -> ProviderAnalysis:
-        start_ns = arguments.get("start_ns") if capability_id == "trace.window" else None
-        end_ns = arguments.get("end_ns") if capability_id == "trace.window" else None
+        start_ns = arguments.get("start_ns") if operation == "inspect_trace_window" else None
+        end_ns = arguments.get("end_ns") if operation == "inspect_trace_window" else None
         response = self.harness.run_typed_sync(
             OTLP_WORKER,
             OtlpWorkerRequest(
@@ -60,9 +60,9 @@ class OtlpProvider:
         limitations = list(response.limitations)
         if response.row_limit_exceeded and "otlp_row_limit_exceeded" not in limitations:
             limitations.append("otlp_row_limit_exceeded")
-        if capability_id == "trace.operations":
+        if operation == "summarize_trace_operations":
             return self._operations(response, counts, limitations, max_rows=max_rows)
-        if capability_id == "trace.lifecycle":
+        if operation == "summarize_trace_lifecycle":
             return self._lifecycle(response, counts, limitations, max_rows=max_rows)
         return ProviderAnalysis(
             provider_id="otlp",

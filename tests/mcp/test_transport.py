@@ -15,10 +15,10 @@ from mcp.client.stdio import stdio_client
 from mcp_types import TextContent
 
 from flameox import __version__
-from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
 from flameox.mcp.server import FlameoxServer
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.runtime import AnalysisRuntime
+from flameox.runtime_contracts import OPERATION_BY_CAPTURE_TOOL, OPERATION_BY_NAME
 from flameox.runtime_errors import DomainError, ErrorCode
 
 
@@ -92,7 +92,7 @@ def test_mcp_rejects_invalid_runtime_results_before_serialization(
 ) -> None:
     def invalid_projection(_self: AnalysisRuntime, _evidence_id: str) -> dict[str, Any]:
         return {
-            "format_version": "3",
+            "format_version": "4",
             "evidence_id": "0" * 64,
             "analysis_sources": [],
             "logical_sources": [],
@@ -142,8 +142,8 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert initialized.server_info.version == __version__
             assert initialized.instructions and "native artifacts" in initialized.instructions
             expected = (
-                set(ANALYSIS_TOOLS.values())
-                | set(CAPTURE_TOOLS.values())
+                set(OPERATION_BY_NAME)
+                | set(OPERATION_BY_CAPTURE_TOOL)
                 | {
                     "prepare_providers",
                     "preserve_evidence",
@@ -153,7 +153,10 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 }
             )
             assert set(by_name) == expected
-            assert not {"inspect_capabilities", "analyze", "capture_and_analyze"} & set(by_name)
+            removed = await session.call_tool("capture_cpu_hotspots", {})
+            assert removed.is_error is True
+            assert removed.structured_content["code"] == "UNKNOWN_TOOL"
+            assert not {"inspect_operations", "analyze", "capture_and_analyze"} & set(by_name)
             assert all(tool.output_schema for tool in listed.tools)
             for tool in listed.tools:
                 Draft202012Validator.check_schema(tool.input_schema)
@@ -162,13 +165,18 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 input_validator = Draft202012Validator(tool.input_schema)
                 for example in tool.input_schema.get("examples", []):
                     assert input_validator.is_valid(example), (tool.name, example)
-            for name in ANALYSIS_TOOLS.values():
+            for name in OPERATION_BY_NAME:
                 assert by_name[name].input_schema["additionalProperties"] is False
                 assert "sources" in by_name[name].input_schema["required"]
 
             evidence_source = {"kind": "evidence", "evidence_id": "0" * 64}
 
             query_schema = Draft202012Validator(by_name["query_evidence"].input_schema)
+            obsolete_query = {"capability_id": "cpu.hotspots"}
+            assert not query_schema.is_valid(obsolete_query)
+            rejected_query = await session.call_tool("query_evidence", obsolete_query)
+            assert rejected_query.is_error is True
+            assert rejected_query.structured_content["code"] == "INVALID_REQUEST"
             iso_query = {"created_after": "2026-01-01T00:00:00Z"}
             assert query_schema.is_valid(iso_query)
             queried = await session.call_tool("query_evidence", iso_query)
@@ -302,7 +310,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     ["destination"],
                 ),
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {"argv": [sys.executable], "cwd": "/tmp/impossible\x00path"},
                         "provider": {"kind": "direct"},
@@ -331,11 +339,10 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                             {
                                 **evidence_source,
                                 "artifact_role": "stdout",
-                                "artifact_selector": "1" * 64,
                             }
                         ]
                     },
-                    ["sources", 0],
+                    ["sources", 0, "artifact_role"],
                 ),
                 (
                     "preview_artifact",
@@ -349,7 +356,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 ),
                 (
                     "preview_artifact",
-                    {"request": {"capability_id": "artifact.preview", "sources": []}},
+                    {"request": {"operation": "preview_artifact", "sources": []}},
                     None,
                 ),
                 (
@@ -383,7 +390,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     None,
                 ),
                 (
-                    "capture_benchmark_summary",
+                    "capture_and_summarize_benchmarks",
                     {
                         "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
                         "provider": {"kind": "pyperf", "name": "bad\x00name"},
@@ -391,7 +398,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     ["provider", "name"],
                 ),
                 (
-                    "capture_cpu_hotspots",
+                    "capture_and_rank_cpu_hotspots",
                     {
                         "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
                         "provider": {"kind": "py-spy", "rate": 0},
@@ -399,7 +406,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     ["provider", "rate"],
                 ),
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", command, str(marker), "0"],
@@ -410,7 +417,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     None,
                 ),
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", command, str(marker), "0"],
@@ -421,7 +428,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     None,
                 ),
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", command, str(marker), "0"],
@@ -433,7 +440,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     ["page_size"],
                 ),
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", command, str(marker), "0"],
@@ -447,7 +454,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             )
             invalid_calls += tuple(
                 (
-                    "capture_artifact_preview",
+                    "capture_and_preview_artifact",
                     {
                         "target": {"argv": argv, "cwd": str(tmp_path)},
                         "provider": {"kind": "direct"},
@@ -458,7 +465,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             )
             invalid_calls += tuple(
                 (
-                    "capture_cpu_hotspots",
+                    "capture_and_rank_cpu_hotspots",
                     {
                         "target": {
                             "argv": [sys.executable, "-c", command, str(marker), "0"],
@@ -492,10 +499,10 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     None,
                 )
                 for tool, kind, field, maximum in (
-                    ("capture_gpu_kernel_metrics", "nsight-compute", "section", 200),
-                    ("capture_coverage_summary", "coverage", "source", 256),
-                    ("capture_coverage_summary", "coverage", "include", 256),
-                    ("capture_coverage_summary", "coverage", "omit", 256),
+                    ("capture_and_inspect_gpu_kernel_metrics", "nsight-compute", "section", 200),
+                    ("capture_and_summarize_coverage", "coverage", "source", 256),
+                    ("capture_and_summarize_coverage", "coverage", "include", 256),
+                    ("capture_and_summarize_coverage", "coverage", "omit", 256),
                 )
                 for value in ("", "x" * (maximum + 1), "bad\x00selector")
             )
@@ -543,11 +550,11 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 "provider": {"kind": "direct"},
                 "page_size": 1,
             }
-            assert Draft202012Validator(by_name["capture_artifact_preview"].input_schema).is_valid(
-                capture_arguments
-            )
-            captured = await session.call_tool("capture_artifact_preview", capture_arguments)
-            await session.validate_tool_result("capture_artifact_preview", captured)
+            assert Draft202012Validator(
+                by_name["capture_and_preview_artifact"].input_schema
+            ).is_valid(capture_arguments)
+            captured = await session.call_tool("capture_and_preview_artifact", capture_arguments)
+            await session.validate_tool_result("capture_and_preview_artifact", captured)
             inline = captured.content[0]
             assert isinstance(inline, TextContent)
             assert json.loads(inline.text) == captured.structured_content
@@ -588,7 +595,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert marker.read_text().splitlines() == ["started"]
 
             failed = await session.call_tool(
-                "capture_artifact_preview",
+                "capture_and_preview_artifact",
                 {
                     "target": {
                         "argv": [sys.executable, "-c", command, str(marker), "7"],
@@ -599,7 +606,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     "page_size": 1,
                 },
             )
-            await session.validate_tool_result("capture_artifact_preview", failed)
+            await session.validate_tool_result("capture_and_preview_artifact", failed)
             inline = failed.content[0]
             assert isinstance(inline, TextContent)
             assert json.loads(inline.text) == failed.structured_content
@@ -674,7 +681,7 @@ def test_stdio_perf_failures_redact_decoder_console_for_analysis_and_capture(
             assert analyzed.structured_content is not None
             assert analyzed.structured_content["details"]["decoder_exit_code"] == 7
             captured = await session.call_tool(
-                "capture_cpu_hotspots",
+                "capture_and_rank_cpu_hotspots",
                 {
                     "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
                     "provider": {"kind": "perf", "call_graph": "fp"},

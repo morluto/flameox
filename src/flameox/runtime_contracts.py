@@ -93,42 +93,16 @@ class PathSource(StrictModel):
 
 
 class EvidenceSource(StrictModel):
-    model_config = ConfigDict(
-        json_schema_extra={
-            "not": {
-                "required": ["artifact_role", "artifact_selector"],
-                "properties": {
-                    "artifact_role": {"type": "string"},
-                    "artifact_selector": {"type": "string"},
-                },
-            }
-        }
-    )
-
     kind: Literal["evidence"]
     evidence_id: str = Field(
         description="Identifier of previously preserved immutable evidence.",
         pattern=LOWERCASE_SHA256_PATTERN,
-    )
-    artifact_role: str | None = Field(
-        default=None,
-        description=(
-            "Select one artifact role when preserved evidence contains multiple artifacts."
-        ),
-        min_length=1,
-        max_length=80,
     )
     artifact_selector: str | None = Field(
         default=None,
         description="Opaque artifact selector returned by inspect_evidence; pass unchanged.",
         pattern=LOWERCASE_SHA256_PATTERN,
     )
-
-    @model_validator(mode="after")
-    def one_selector(self) -> EvidenceSource:
-        if self.artifact_role is not None and self.artifact_selector is not None:
-            raise ValueError("Use artifact_role or artifact_selector, not both")
-        return self
 
 
 def normalize_source_kind(value: Any) -> Any:
@@ -198,9 +172,9 @@ class CpuHotspotArguments(StrictModel):
         if self.metric is not None and any(format_name != "pstats" for format_name in formats):
             raise RuntimeFailure(
                 "INVALID_INPUT",
-                "cpu.hotspots metric selection is supported only for pstats artifacts",
+                "rank_cpu_hotspots metric selection is supported only for pstats artifacts",
                 details={
-                    "capability_id": "cpu.hotspots",
+                    "operation": "rank_cpu_hotspots",
                     "option": "metric",
                     "supported_formats": ["pstats"],
                 },
@@ -357,7 +331,7 @@ class WindowArguments(StrictModel):
 class CompareArguments(StrictModel):
     metric: str | None = Field(
         default=None,
-        description="Metric to compare; omit for the capability's default metric.",
+        description="Metric to compare; omit for the operation's default metric.",
         min_length=1,
         max_length=120,
     )
@@ -1041,7 +1015,7 @@ class AnalysisResult(StrictModel):
         description="Session-local handle accepted by preserve_evidence and rescue_evidence.",
         pattern=LOWERCASE_SHA256_PATTERN,
     )
-    capability_id: str = Field(description="Evidence capability that produced this result.")
+    operation: str = Field(description="Evidence operation that produced this result.")
     provider: ProviderIdentity = Field(description="Analysis provider identity and version.")
     inputs: list[InputIdentity] = Field(
         description="Ordered analyzed input identities and digests."
@@ -1068,14 +1042,18 @@ class AnalysisResult(StrictModel):
 
 
 @dataclass(frozen=True, slots=True)
-class Capability:
-    id: str
+class Operation:
+    name: str
     summary: str
     formats: tuple[str, ...]
     model: ArgumentModel
     limitation: str = "Observed artifact contents do not by themselves prove causality."
     minimum_sources: int = 1
     maximum_sources: int = 1
+
+    @property
+    def capture_name(self) -> str:
+        return f"capture_and_{self.name}"
 
     def validate_source_count(self, count: int) -> None:
         if self.minimum_sources <= count <= self.maximum_sources:
@@ -1087,9 +1065,9 @@ class Capability:
         )
         raise RuntimeFailure(
             "INVALID_INPUT",
-            f"{self.id} requires {expected} analysis source(s); received {count}.",
+            f"{self.name} requires {expected} analysis source(s); received {count}.",
             details={
-                "capability_id": self.id,
+                "operation": self.name,
                 "minimum_sources": self.minimum_sources,
                 "maximum_sources": self.maximum_sources,
                 "actual_sources": count,
@@ -1097,31 +1075,9 @@ class Capability:
         )
 
 
-def _caps(
-    ids: Iterable[str],
-    summary: str,
-    formats: tuple[str, ...],
-    model: ArgumentModel,
-    *,
-    minimum_sources: int = 1,
-    maximum_sources: int = 1,
-) -> list[Capability]:
-    return [
-        Capability(
-            item,
-            summary,
-            formats,
-            model,
-            minimum_sources=minimum_sources,
-            maximum_sources=maximum_sources,
-        )
-        for item in ids
-    ]
-
-
-CAPABILITIES = tuple(
-    _caps(
-        ("trace.summary",),
+OPERATIONS = (
+    Operation(
+        "summarize_trace",
         "Summarize bounded execution-trace evidence.",
         (
             "perfetto",
@@ -1134,178 +1090,185 @@ CAPABILITIES = tuple(
             "xctrace",
         ),
         EmptyArguments,
-    )
-    + _caps(
-        ("trace.call_graph",),
+    ),
+    Operation(
+        "inspect_trace_call_graph",
         "Project bounded caller-callee edges from Chrome, Perfetto, or PyTorch traces.",
         ("perfetto", "chrome-trace", "pytorch"),
         EmptyArguments,
-    )
-    + _caps(
-        ("trace.pytorch",),
+    ),
+    Operation(
+        "summarize_pytorch_trace",
         "Summarize bounded PyTorch operator and event evidence.",
         ("perfetto", "chrome-trace", "pytorch"),
         EmptyArguments,
-    )
-    + _caps(
-        ("trace.operations",),
+    ),
+    Operation(
+        "summarize_trace_operations",
         "Summarize bounded operation timing from OTLP or Nsight Systems traces.",
         ("otlp", "nsys-rep", "nsys-parquet"),
         EmptyArguments,
-    )
-    + _caps(
-        ("trace.lifecycle",),
+    ),
+    Operation(
+        "summarize_trace_lifecycle",
         "Summarize bounded execution lifecycle events from OTLP or Nsight Systems traces.",
         ("otlp", "nsys-rep", "nsys-parquet"),
         EmptyArguments,
-    )
-    + _caps(
-        ("trace.window",),
+    ),
+    Operation(
+        "inspect_trace_window",
         "Read a bounded trace time window.",
         ("perfetto", "chrome-trace", "pytorch", "otlp"),
         WindowArguments,
-    )
-    + _caps(
-        ("cpu.hotspots",),
+    ),
+    Operation(
+        "rank_cpu_hotspots",
         "Rank bounded CPU evidence.",
         ("cpuprofile", "pstats", "py-spy", "perf", "perf-data"),
         CpuHotspotArguments,
-    )
-    + _caps(
-        ("cpu.callers",),
+    ),
+    Operation(
+        "inspect_cpu_callers",
         "Project bounded caller-callee edges from pstats or sampled py-spy stacks. "
         "Sample weights are not deterministic invocation counts.",
         ("pstats", "py-spy"),
         CpuCallGraphArguments,
-    )
-    + _caps(
-        ("memory.hotspots",),
+    ),
+    Operation(
+        "rank_allocation_hotspots",
         "Rank bounded allocation hotspots from Memray or V8 sampling heap profiles.",
         ("memray", "heapprofile"),
         EmptyArguments,
-    )
-    + _caps(
-        ("memory.retained",),
+    ),
+    Operation(
+        "rank_retained_memory",
         "Rank bounded retained-memory evidence from a Memray capture.",
         ("memray",),
         EmptyArguments,
-    )
-    + _caps(
-        ("benchmark.summary",),
+    ),
+    Operation(
+        "summarize_benchmarks",
         "Summarize bounded benchmark latency measurements.",
         ("pyperf", "samples", "nvbench"),
         EmptyArguments,
         maximum_sources=MAX_INPUTS,
-    )
-    + _caps(
-        ("benchmark.scaling",),
+    ),
+    Operation(
+        "analyze_benchmark_scaling",
         "Estimate how benchmark measurements scale across a declared numeric input axis.",
         ("pyperf", "samples", "nvbench"),
         ScalingArguments,
         maximum_sources=MAX_INPUTS,
-    )
-    + _caps(
-        ("benchmark.compare",),
+    ),
+    Operation(
+        "compare_benchmarks",
         "Compare compatible benchmark artifacts.",
         ("pyperf", "samples", "nvbench"),
         CompareArguments,
         minimum_sources=2,
         maximum_sources=MAX_INPUTS,
-    )
-    + _caps(
-        ("inference.summary",),
+    ),
+    Operation(
+        "summarize_inference",
         "Summarize bounded inference-export measurements.",
         ("aiperf", "vllm-benchmark", "sglang-benchmark", "mooncake-trace"),
         EmptyArguments,
-    )
-    + _caps(
-        ("inference.compare",),
+    ),
+    Operation(
+        "compare_inference",
         "Compare compatible prompt-free inference measurements.",
         ("aiperf", "vllm-benchmark", "sglang-benchmark", "mooncake-trace"),
         InferenceCompareArguments,
         minimum_sources=2,
         maximum_sources=MAX_INPUTS,
-    )
-    + _caps(
-        ("gpu.launches",),
+    ),
+    Operation(
+        "inspect_gpu_launches",
         "Summarize GPU launch evidence.",
         ("nsys-rep", "nsys-parquet"),
         EmptyArguments,
-    )
-    + _caps(
-        ("gpu.kernel_metrics",),
+    ),
+    Operation(
+        "inspect_gpu_kernel_metrics",
         "Summarize GPU kernel metrics.",
         ("nsight-compute",),
         EmptyArguments,
-    )
-    + _caps(
-        ("triton.autotune",),
+    ),
+    Operation(
+        "inspect_triton_autotune",
         "Summarize Triton autotune events or native configuration-timing caches.",
         ("triton", "triton-cache"),
         EmptyArguments,
-    )
-    + _caps(
-        ("sanitizer.failures",),
+    ),
+    Operation(
+        "inspect_sanitizer_failures",
         "Summarize Compute Sanitizer failures.",
         ("compute-sanitizer",),
         EmptyArguments,
-    )
-    + _caps(
-        ("kernel.validation",),
+    ),
+    Operation(
+        "inspect_kernel_validation",
         "Summarize semantic kernel validation results.",
         ("kernel-validation",),
         EmptyArguments,
-    )
-    + _caps(
-        ("kernel.compare",),
+    ),
+    Operation(
+        "compare_kernel_validation",
         "Compare compatible kernel evidence.",
         ("kernel-validation",),
         CompareArguments,
         minimum_sources=2,
         maximum_sources=MAX_INPUTS,
-    )
-    + _caps(
-        ("failures.summary",),
+    ),
+    Operation(
+        "summarize_failures",
         "Summarize bounded reliability evidence.",
         ("pytest", "observations"),
         EmptyArguments,
-    )
-    + _caps(
-        ("pytest.fixtures",),
+    ),
+    Operation(
+        "inspect_pytest_fixtures",
         "Rank bounded pytest fixture setup and finalizer evidence.",
         ("pytest",),
         EmptyArguments,
-    )
-    + _caps(
-        ("coverage.summary",),
+    ),
+    Operation(
+        "summarize_coverage",
         "Summarize native coverage.py evidence.",
         ("coverage",),
         EmptyArguments,
-    )
-    + _caps(
-        ("static.performance_candidates",),
+    ),
+    Operation(
+        "inspect_performance_candidates",
         "Normalize performance candidates from an existing SARIF report.",
         ("sarif",),
         StaticArguments,
-    )
-    + _caps(
-        ("artifact.preview",),
+    ),
+    Operation(
+        "preview_artifact",
         "Preview a bounded artifact without mutation.",
         ("json", "jsonl", "csv", "text", "parquet"),
         PreviewArguments,
         maximum_sources=MAX_INPUTS,
-    )
+    ),
 )
-CAPABILITY_BY_ID = {item.id: item for item in CAPABILITIES}
+OPERATION_BY_NAME = {item.name: item for item in OPERATIONS}
 
 
-def compatible_capture_providers(capability: Capability) -> tuple[CaptureProviderContract, ...]:
-    """Return capture providers whose artifacts can feed a capability."""
+def compatible_capture_providers(spec: Operation) -> tuple[CaptureProviderContract, ...]:
+    """Return capture providers whose artifacts can feed an operation."""
 
-    if capability.id.endswith(".compare"):
+    if spec.name.startswith("compare_"):
         return ()
     return tuple(
         contract
         for contract in CAPTURE_PROVIDER_CONTRACTS.values()
-        if set(capability.formats).intersection(artifact.format for artifact in contract.artifacts)
+        if set(spec.formats).intersection(artifact.format for artifact in contract.artifacts)
     )
+
+
+OPERATION_BY_CAPTURE_TOOL = {
+    operation.capture_name: operation
+    for operation in OPERATIONS
+    if compatible_capture_providers(operation)
+}

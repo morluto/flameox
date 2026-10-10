@@ -25,7 +25,7 @@ def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: 
     artifact.write_text('[{"value":1}]')
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        analysis = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        analysis = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(analysis["analysis_id"])
         (tmp_path / ".flameox" / "repository.json").unlink()
 
@@ -36,7 +36,7 @@ def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: 
             runtime.read_evidence(preserved["evidence_id"])
         assert read_failure.value.code == "REPOSITORY_CORRUPTION"
         second = runtime.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=2),
@@ -72,7 +72,7 @@ def test_source_kind_changed_after_decoding_cannot_return_successful_analysis(
     monkeypatch.setattr(runtime, "_iter_rows", replaced)
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("artifact.preview", [PathSource(path=str(source), format="text")], {})
+            runtime.analyze("preview_artifact", [PathSource(path=str(source), format="text")], {})
         assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
     finally:
         runtime.close()
@@ -84,7 +84,7 @@ def test_interrupted_evidence_publication_never_exposes_partial_manifest(
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1}]')
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
-    result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+    result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
     original = os.rename
 
     def interrupt_evidence(stage: Path, destination: Path) -> None:
@@ -108,7 +108,7 @@ def test_unpreserved_operations_create_no_durable_state(tmp_path: Path) -> None:
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
     finally:
         runtime.close()
 
@@ -123,7 +123,7 @@ def test_preservation_rejects_input_mutation(tmp_path: Path) -> None:
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         artifact.write_text('[{"changed":true}]')
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(result["analysis_id"])
@@ -137,7 +137,7 @@ def test_corrupt_manifest_and_missing_data_are_not_returned(tmp_path: Path) -> N
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = preserved["evidence_id"]
         bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
@@ -157,7 +157,7 @@ def test_repository_rejects_recursively_nested_metadata(tmp_path: Path, filename
     store = tmp_path / "store"
     runtime = AnalysisRuntime(evidence_directory=store)
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
         metadata = next(store.rglob(filename))
         native = b"[" * 10_000 + b"0" + b"]" * 10_000
@@ -178,7 +178,7 @@ def test_repository_rejects_symlinked_evidence_data(tmp_path: Path, member: str)
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = preserved["evidence_id"]
         bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
@@ -215,7 +215,7 @@ def test_first_preservation_creates_missing_data_directory_ancestors(
     artifact.write_text("native evidence")
     runtime = AnalysisRuntime(evidence_directory=store)
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         assert not store.exists()
         preserved = runtime.preserve_evidence(result["analysis_id"])
         assert (
@@ -241,7 +241,7 @@ def test_initialization_rejects_symlinked_layout_before_writing(
     artifact.write_text("native")
     runtime = AnalysisRuntime(evidence_directory=store)
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(result["analysis_id"])
         assert failure.value.code == "REPOSITORY_CORRUPTION"
@@ -274,7 +274,7 @@ def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         preserved = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = preserved["evidence_id"]
         bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
@@ -302,7 +302,7 @@ def test_repeated_preservation_revalidates_bundle_and_returns_defensive_referenc
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         first = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = first["evidence_id"]
         first["evidence_id"] = "0" * 64
@@ -331,7 +331,7 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
         for index in range(3):
             artifact = tmp_path / f"samples-{index}.json"
             artifact.write_text(json.dumps([{"value": index}]))
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             runtime.preserve_evidence(result["analysis_id"])
 
         first = runtime.query_evidence(limit=2)
@@ -365,11 +365,11 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
             runtime.query_evidence(limit=2, cursor=non_integer_offset)
         assert invalid_type.value.code == "INVALID_INPUT"
 
-        filtered = runtime.query_evidence(limit=1, capability_id="artifact.preview")
+        filtered = runtime.query_evidence(limit=1, operation="preview_artifact")
         with pytest.raises(RuntimeFailure) as changed_filters:
             runtime.query_evidence(
                 limit=1,
-                capability_id="cpu.hotspots",
+                operation="rank_cpu_hotspots",
                 cursor=filtered["continuation"],
             )
         assert changed_filters.value.code == "INVALID_INPUT"
@@ -398,7 +398,7 @@ def test_preservation_does_not_mutate_project_git_configuration(tmp_path: Path) 
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         runtime.preserve_evidence(result["analysis_id"])
         runtime.preserve_evidence(result["analysis_id"])
     finally:
@@ -420,12 +420,12 @@ def test_empty_source_kind_is_retained_through_analysis_and_preservation(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         inputs = [PathSource(path=str(source), format="text")]
-        first = runtime.analyze("artifact.preview", inputs, {})
+        first = runtime.analyze("preview_artifact", inputs, {})
         assert first["coverage"]["complete"] is True
         preserved = runtime.preserve_evidence(first["analysis_id"])
         manifest = runtime.read_evidence(preserved["evidence_id"])
         assert manifest["body"]["source_layout"]["sources"][0]["is_directory"] is directory_first
-        pending = runtime.analyze("artifact.preview", inputs, {}, limits=RequestLimits(max_rows=1))
+        pending = runtime.analyze("preview_artifact", inputs, {}, limits=RequestLimits(max_rows=1))
         if directory_first:
             source.rmdir()
             source.write_bytes(b"")
@@ -433,7 +433,7 @@ def test_empty_source_kind_is_retained_through_analysis_and_preservation(
             source.unlink()
             source.mkdir()
         # Reusing this path and digest must not reuse the first source's kind.
-        second = runtime.analyze("artifact.preview", inputs, {})
+        second = runtime.analyze("preview_artifact", inputs, {})
         assert second["analysis_id"] != first["analysis_id"]
         with pytest.raises(RuntimeFailure) as failure:
             runtime.preserve_evidence(pending["analysis_id"])
@@ -442,5 +442,36 @@ def test_empty_source_kind_is_retained_through_analysis_and_preservation(
             runtime.preserve_evidence(second["analysis_id"])["evidence_id"]
             != preserved["evidence_id"]
         )
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("document", ["repository", "artifact", "manifest"])
+def test_obsolete_repository_formats_are_rejected_without_migration(
+    tmp_path: Path, document: str
+) -> None:
+    source = tmp_path / "native.txt"
+    source.write_text("preserved observation\n")
+    store = tmp_path / "store"
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        analysis = runtime.analyze("preview_artifact", [PathSource(path=str(source))], {})
+        reference = runtime.preserve_evidence(analysis["analysis_id"])
+        manifest = runtime.read_evidence(reference["evidence_id"])
+        assert manifest["format_version"] == "4"
+        if document == "repository":
+            path = store / "repository.json"
+        elif document == "artifact":
+            path = next((store / "artifacts").rglob("artifact.json"))
+        else:
+            path = next((store / "evidence").rglob("manifest.json"))
+        payload = json.loads(path.read_bytes())
+        payload["format_version"] = "3"
+        path.write_bytes(canonical_bytes(payload))
+        original = path.read_bytes()
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.read_evidence(reference["evidence_id"])
+        assert failure.value.code == "UNSUPPORTED_REPOSITORY_FORMAT"
+        assert path.read_bytes() == original
     finally:
         runtime.close()

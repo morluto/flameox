@@ -33,7 +33,7 @@ def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) ->
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="pstats", producer="cProfile")],
             {"metric": "cumulative_time_seconds"},
         )
@@ -69,7 +69,7 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.callers",
+            "inspect_cpu_callers",
             [PathSource(path=str(profile), format="pstats", producer="cProfile")],
             {"function": "leaf", "direction": "callers"},
         )
@@ -91,7 +91,7 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
 
 
 @pytest.mark.process
-@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+@pytest.mark.parametrize("operation", ["rank_cpu_hotspots", "inspect_cpu_callers"])
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -104,7 +104,7 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
     ],
 )
 def test_pstats_rejects_invalid_measurements_before_projection(
-    tmp_path: Path, capability: str, invalid: str
+    tmp_path: Path, operation: str, invalid: str
 ) -> None:
     artifact = tmp_path / "invalid.pstats"
     values: list[Any] = [1, 1, 0.1, 0.2, {}]
@@ -125,9 +125,9 @@ def test_pstats_rejects_invalid_measurements_before_projection(
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                capability,
+                operation,
                 [PathSource(path=str(artifact), format="pstats")],
-                {"function": "absent"} if capability == "cpu.callers" else {},
+                {"function": "absent"} if operation == "inspect_cpu_callers" else {},
             )
         assert failure.value.code == "DECODE_FAILURE"
     finally:
@@ -163,7 +163,7 @@ def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
             {},
         )
@@ -223,7 +223,7 @@ def test_sampled_callers_preserve_weights_recursion_and_profile_identity(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.callers", [PathSource(path=str(profile), format="py-spy")], arguments
+            "inspect_cpu_callers", [PathSource(path=str(profile), format="py-spy")], arguments
         )
     finally:
         runtime.close()
@@ -272,7 +272,7 @@ def test_speedscope_profiles_with_different_units_are_not_pooled(tmp_path: Path)
         runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
         try:
             runtime.analyze(
-                "cpu.hotspots",
+                "rank_cpu_hotspots",
                 [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
                 {},
             )
@@ -303,7 +303,7 @@ def test_speedscope_rejects_a_weight_that_cannot_be_represented(tmp_path: Path) 
     try:
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
-                "cpu.hotspots",
+                "rank_cpu_hotspots",
                 [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
                 {},
             )
@@ -338,12 +338,12 @@ def test_pyspy_speedscope_profile_keeps_resolved_samples_when_one_stack_is_empty
         if weight != 1:
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "cpu.hotspots", [PathSource(path=str(profile), format="py-spy")], {}
+                    "rank_cpu_hotspots", [PathSource(path=str(profile), format="py-spy")], {}
                 )
             assert failure.value.code == "DECODE_FAILURE"
             return
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="py-spy", producer="py-spy")],
             {},
         )
@@ -377,14 +377,14 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
-            "cpu.hotspots",
+            "rank_cpu_hotspots",
             [PathSource(path=str(profile), format="perf", producer="perf")],
             {},
         )
         profile.write_bytes(b"x" * (256 * 1024 + 1))
         with pytest.raises(RuntimeFailure) as oversized:
             runtime.analyze(
-                "cpu.hotspots",
+                "rank_cpu_hotspots",
                 [PathSource(path=str(profile), format="perf", producer="perf")],
                 {},
             )
@@ -397,7 +397,7 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
             profile.write_text(native)
             with pytest.raises(RuntimeFailure) as malformed:
                 runtime.analyze(
-                    "cpu.hotspots",
+                    "rank_cpu_hotspots",
                     [PathSource(path=str(profile), format="perf", producer="perf")],
                     {},
                 )
@@ -449,7 +449,7 @@ def test_pyspy_capture_rejects_ambient_path_fallback(
                         provider_id="py-spy",
                         capture_arguments={"rate": 250, "gil": True},
                     ),
-                    "cpu.hotspots",
+                    "rank_cpu_hotspots",
                 )
         finally:
             runtime.close()
@@ -488,7 +488,7 @@ def test_wrapped_capture_revalidates_workload_after_admission(
                         provider_id="perf",
                         capture_arguments={"frequency": 99, "call_graph": "fp"},
                     ),
-                    "cpu.hotspots",
+                    "rank_cpu_hotspots",
                     progress=replace_workload,
                 )
             assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
@@ -519,7 +519,9 @@ def test_perf_analysis_rejects_failed_decoder_output(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("cpu.hotspots", [PathSource(path=str(native), format="perf-data")], {})
+            runtime.analyze(
+                "rank_cpu_hotspots", [PathSource(path=str(native), format="perf-data")], {}
+            )
         assert failure.value.code == "DECODE_FAILURE"
         assert failure.value.details["decoder_exit_code"] == 7
         assert failure.value.details["decoder_stderr"] == "decoder failed\n"
@@ -545,7 +547,9 @@ def test_perf_conversion_reports_signalled_decoder_termination(
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("cpu.hotspots", [PathSource(path=str(native), format="perf-data")], {})
+            runtime.analyze(
+                "rank_cpu_hotspots", [PathSource(path=str(native), format="perf-data")], {}
+            )
         assert failure.value.details["decoder_exit_code"] is None
         assert failure.value.details["decoder_termination"] == {
             "kind": "signalled",
@@ -597,7 +601,7 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
                     provider_id="py-spy",
                     capture_arguments={"subprocesses": subprocesses},
                 ),
-                "cpu.hotspots",
+                "rank_cpu_hotspots",
                 preserve=True,
             )
             manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
@@ -620,10 +624,10 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     }
 
 
-@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+@pytest.mark.parametrize("operation", ["rank_cpu_hotspots", "inspect_cpu_callers"])
 @pytest.mark.parametrize("weight", [2**53 + 1, 1e308])
 def test_speedscope_preserves_exact_counts_and_rejects_overflowed_totals(
-    tmp_path: Path, capability: str, weight: int | float
+    tmp_path: Path, operation: str, weight: int | float
 ) -> None:
     profile = tmp_path / "weighted.json"
     profile.write_text(
@@ -645,14 +649,14 @@ def test_speedscope_preserves_exact_counts_and_rejects_overflowed_totals(
     try:
         if isinstance(weight, float):
             with pytest.raises(RuntimeFailure) as caught:
-                runtime.analyze(capability, [PathSource(path=str(profile), format="py-spy")], {})
+                runtime.analyze(operation, [PathSource(path=str(profile), format="py-spy")], {})
             assert caught.value.code == "LIMIT_EXCEEDED"
         else:
             result = runtime.analyze(
-                capability, [PathSource(path=str(profile), format="py-spy")], {}
+                operation, [PathSource(path=str(profile), format="py-spy")], {}
             )
             row = result["blocks"][1]["rows"][0]
-            assert row["self_weight" if capability == "cpu.hotspots" else "weight"] == str(
+            assert row["self_weight" if operation == "rank_cpu_hotspots" else "weight"] == str(
                 weight * 2
             )
     finally:
@@ -685,14 +689,14 @@ def test_rejected_input_mutation_cannot_poison_later_analysis_cache(tmp_path: Pa
         try:
             with pytest.raises(RuntimeFailure) as failure:
                 runtime.analyze(
-                    "cpu.hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
+                    "rank_cpu_hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
                 )
         finally:
             sys.setprofile(previous)
         assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
         artifact.write_text(original)
         result = runtime.analyze(
-            "cpu.hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
+            "rank_cpu_hotspots", [PathSource(path=str(artifact), format="py-spy")], {}
         )
         assert result["blocks"][1]["rows"][0]["self_weight"] == 1
     finally:
@@ -700,9 +704,9 @@ def test_rejected_input_mutation_cannot_poison_later_analysis_cache(tmp_path: Pa
         runtime.close()
 
 
-@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+@pytest.mark.parametrize("operation", ["rank_cpu_hotspots", "inspect_cpu_callers"])
 def test_profile_removed_after_admission_has_a_typed_runtime_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     from collections.abc import Mapping
 
@@ -721,7 +725,7 @@ def test_profile_removed_after_admission_has_a_typed_runtime_failure(
     original = runtime.cpu_profiles.analyze
 
     def removed(
-        capability_id: str,
+        operation: str,
         path: Path,
         format_name: str,
         arguments: Mapping[str, Any],
@@ -729,15 +733,15 @@ def test_profile_removed_after_admission_has_a_typed_runtime_failure(
         max_rows: int,
     ) -> ProviderAnalysis | None:
         path.unlink()
-        return original(capability_id, path, format_name, arguments, max_rows=max_rows)
+        return original(operation, path, format_name, arguments, max_rows=max_rows)
 
     try:
         sources = [PathSource(path=str(artifact), format="py-spy")]
-        assert runtime.analyze(capability, sources, {})["coverage"]["complete"] is True
+        assert runtime.analyze(operation, sources, {})["coverage"]["complete"] is True
         artifact.write_text(artifact.read_text() + "\n")
         monkeypatch.setattr(runtime.cpu_profiles, "analyze", removed)
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze(capability, sources, {})
+            runtime.analyze(operation, sources, {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()

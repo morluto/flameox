@@ -38,7 +38,7 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
                         cwd=str(tmp_path),
                         provider_id="pyperf",
                     ),
-                    "failures.summary",
+                    "summarize_failures",
                 )
         finally:
             runtime.close()
@@ -67,7 +67,7 @@ def test_experiment_environment_limit_applies_after_overrides_are_merged(
                         provider_id="direct",
                         environment={f"TARGET_{index}": "value" for index in range(32)},
                     ),
-                    "artifact.preview",
+                    "preview_artifact",
                     experiment=ExperimentDesign(
                         cases=[
                             ExperimentCase(
@@ -103,7 +103,7 @@ def test_capture_rejects_unbounded_durable_provenance_before_execution(tmp_path:
                         cwd=str(tmp_path),
                         provider_id="direct",
                     ),
-                    "artifact.preview",
+                    "preview_artifact",
                     limits=RequestLimits(max_provenance_bytes=4 * 1024),
                 )
             after = list(runtime.scratch.iterdir())
@@ -122,7 +122,7 @@ def test_session_analysis_cache_expires_least_recently_used_handles(tmp_path: Pa
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         first = runtime.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [PathSource(path=str(artifact))],
             {},
             limits=RequestLimits(max_rows=1),
@@ -130,7 +130,7 @@ def test_session_analysis_cache_expires_least_recently_used_handles(tmp_path: Pa
         latest = first
         for _ in range(64):
             latest = runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [PathSource(path=str(artifact))],
                 {},
                 limits=RequestLimits(max_rows=1),
@@ -155,7 +155,7 @@ def test_explicit_inputs_fail_at_byte_and_file_bounds(tmp_path: Path) -> None:
     try:
         with pytest.raises(RuntimeFailure) as byte_failure:
             runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [PathSource(path=str(oversized))],
                 {},
                 limits=RequestLimits(max_input_bytes=1024),
@@ -164,7 +164,7 @@ def test_explicit_inputs_fail_at_byte_and_file_bounds(tmp_path: Path) -> None:
 
         with pytest.raises(RuntimeFailure) as file_failure:
             runtime.analyze(
-                "artifact.preview",
+                "preview_artifact",
                 [PathSource(path=str(directory))],
                 {},
                 limits=RequestLimits(max_input_files=1),
@@ -181,7 +181,7 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     with pytest.raises(RuntimeFailure, match="SHA-256 mismatch") as failure:
         runtime.analyze(
-            "artifact.preview",
+            "preview_artifact",
             [PathSource(path=str(artifact), expected_sha256="0" * 64)],
             {},
         )
@@ -223,7 +223,7 @@ def test_direct_capture_reports_progress_and_preserves_native_output(
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 progress=progress,
             )
             assert result["blocks"][1]["rows"][0]["text"] == "captured"
@@ -234,7 +234,7 @@ def test_direct_capture_reports_progress_and_preserves_native_output(
                 path=result["inputs"][0]["path"], format=result["inputs"][0]["format"]
             )
             sibling = runtime.analyze(
-                "artifact.preview", [source], {}, limits=RequestLimits(max_rows=1)
+                "preview_artifact", [source], {}, limits=RequestLimits(max_rows=1)
             )
             assert sibling["analysis_id"] != result["analysis_id"]
             preserved = runtime.preserve_evidence(result["analysis_id"])
@@ -261,8 +261,10 @@ def test_direct_capture_reports_progress_and_preserves_native_output(
             durable = json.loads((bundle / "data" / "analysis.json").read_text())
             assert durable["provider"]["id"] == provider_id
             execution = manifest["body"]["capture_request"]["executions"][0]
-            assert execution["collector_executable_sha256"] == execution["executable_sha256"]
-            assert execution["workload_executable_sha256"] == execution["executable_sha256"]
+            assert (
+                execution["collector_executable_sha256"] == execution["workload_executable_sha256"]
+            )
+            assert "executable_sha256" not in execution
         finally:
             runtime.close()
 
@@ -300,7 +302,7 @@ def test_experiment_rejects_changed_oracle_or_capture_bytes(tmp_path: Path, muta
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(argv=argv, cwd=str(tmp_path), provider_id="direct"),
-                "artifact.preview",
+                "preview_artifact",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="base"), ExperimentCase(name="candidate")],
                     blocks=1,
@@ -344,7 +346,7 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
                 experiment=ExperimentDesign(
                     cases=[
                         ExperimentCase(
@@ -424,7 +426,7 @@ def test_preview_rejects_lossy_or_oversized_csv(tmp_path: Path, document: str) -
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
         with pytest.raises(RuntimeFailure) as failure:
-            runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
@@ -449,7 +451,7 @@ def test_preview_preserves_native_fields_that_collide_with_provenance(
         artifact.write_text(json.dumps([row] if format_name == "json" else row))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         observed = result["blocks"][1]["rows"][0]
         assert observed["input_sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
         assert observed["value"] == row
@@ -462,7 +464,7 @@ def test_preview_preserves_native_section_field(tmp_path: Path) -> None:
     artifact.write_text(json.dumps({"actual": [{"section": "native", "answer": 42}]}))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
         row = result["blocks"][1]["rows"][0]
         assert row["section"] == "actual"
         assert row["value"] == {"section": "native", "answer": 42}
@@ -493,10 +495,10 @@ def test_preview_native_values_stay_preservable_or_fail_with_typed_error(
     try:
         if expected is None or (format_name == "json" and native in {"NaN", "1e400"}):
             with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+                runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert failure.value.code == "DECODE_FAILURE"
         else:
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert result["blocks"][1]["rows"][0]["value"] == expected
             reference = runtime.preserve_evidence(result["analysis_id"])
             assert runtime.read_evidence(reference["evidence_id"])
@@ -520,7 +522,7 @@ def test_experiment_retains_completed_capture_when_later_executable_changes(tmp_
         try:
             result = await runtime.capture_and_analyze(
                 CaptureTarget(argv=[str(workload)], cwd=str(tmp_path), provider_id="direct"),
-                "artifact.preview",
+                "preview_artifact",
                 preserve=True,
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="baseline"), ExperimentCase(name="candidate")],
@@ -576,7 +578,7 @@ def test_experiment_retains_capture_when_oracle_cannot_admit_more_files(tmp_path
                     cwd=str(tmp_path),
                     provider_id="benchmark-samples",
                 ),
-                "benchmark.summary",
+                "summarize_benchmarks",
                 experiment=ExperimentDesign(
                     cases=[ExperimentCase(name="a"), ExperimentCase(name="b")],
                     blocks=1,
@@ -630,7 +632,7 @@ def test_capture_reports_storage_reserve_and_observed_free_space(
                     cwd=str(tmp_path),
                     provider_id="direct",
                 ),
-                "artifact.preview",
+                "preview_artifact",
             )
             limit = result["capture"]["executions"][0]["limit"]
             assert limit["kind"] == "storage_reserve_exceeded"
@@ -649,13 +651,13 @@ def test_stale_external_inputs_do_not_break_unrelated_analysis_eviction(tmp_path
     stale.write_text("old observation")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
-        runtime.analyze("artifact.preview", [PathSource(path=str(stale))], {})
+        runtime.analyze("preview_artifact", [PathSource(path=str(stale))], {})
         stale.unlink()
         stale.symlink_to(stale)
         for index in range(65):
             artifact = tmp_path / f"current-{index}.txt"
             artifact.write_text(f"observation {index}")
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert result["blocks"][1]["rows"][0]["text"] == f"observation {index}"
         preserved = runtime.preserve_evidence(result["analysis_id"])
         assert runtime.read_evidence(preserved["evidence_id"])
@@ -676,11 +678,11 @@ def test_unreadable_directory_members_prevent_analysis_and_preservation(tmp_path
     runtime = AnalysisRuntime(evidence_directory=store)
     try:
         source = PathSource(path=str(bundle))
-        readable = runtime.analyze("artifact.preview", [source], {})
+        readable = runtime.analyze("preview_artifact", [source], {})
         assert readable["coverage"]["complete"] is True
         hidden.chmod(0)
         with pytest.raises(RuntimeFailure) as analysis_failure:
-            runtime.analyze("artifact.preview", [source], {})
+            runtime.analyze("preview_artifact", [source], {})
         assert analysis_failure.value.code == "INVALID_INPUT"
         with pytest.raises(RuntimeFailure) as preservation_failure:
             runtime.preserve_evidence(readable["analysis_id"])
@@ -718,7 +720,7 @@ def test_live_scratch_file_churn_does_not_interrupt_other_analysis(tmp_path: Pat
             time.sleep(0.01)
         assert ready.exists()
         for _ in range(300):
-            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            result = runtime.analyze("preview_artifact", [PathSource(path=str(artifact))], {})
             assert result["coverage"]["complete"] is True
         assert workload.poll() is None
     finally:
@@ -754,11 +756,11 @@ def test_projection_cache_and_continuations_bind_external_reader_identity(
     if provider == "perfetto":
         monkeypatch.setenv("FLAMEOX_TRACE_PROCESSOR", str(reader))
         selected = runtime.perfetto
-        capability, format_name = "trace.summary", "chrome-trace"
+        operation, format_name = "summarize_trace", "chrome-trace"
     else:
         runtime.nsight_compute.interface_path = reader
         selected = runtime.nsight_compute
-        capability, format_name = "gpu.kernel_metrics", "nsight-compute"
+        operation, format_name = "inspect_gpu_kernel_metrics", "nsight-compute"
     artifact = tmp_path / "input.json"
     artifact.write_text('{"traceEvents":[]}')
     sources = [PathSource(path=str(artifact), format=format_name)]
@@ -784,25 +786,25 @@ def test_projection_cache_and_continuations_bind_external_reader_identity(
 
     monkeypatch.setattr(selected, "analyze", project)
     try:
-        first = runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
-        assert runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1)) == first
+        first = runtime.analyze(operation, sources, {}, limits=RequestLimits(max_rows=1))
+        assert runtime.analyze(operation, sources, {}, limits=RequestLimits(max_rows=1)) == first
         assert calls == 1
         reader.write_text("#!/bin/sh\n# replacement reader\nexit 0\n")
         with pytest.raises(RuntimeFailure) as continuation_failure:
             runtime.analyze(
-                capability,
+                operation,
                 sources,
                 {},
                 limits=RequestLimits(max_rows=1),
                 continuation=first["continuation"],
             )
         assert continuation_failure.value.code == "INVALID_INPUT"
-        second = runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
+        second = runtime.analyze(operation, sources, {}, limits=RequestLimits(max_rows=1))
         assert calls == 2
         assert second["blocks"][0]["rows"][0]["reader"] != first["blocks"][0]["rows"][0]["reader"]
         reader.unlink()
         with pytest.raises(RuntimeFailure) as missing_failure:
-            runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
+            runtime.analyze(operation, sources, {}, limits=RequestLimits(max_rows=1))
         assert missing_failure.value.code == "UNAVAILABLE_CAPABILITY"
         assert calls == 2
     finally:

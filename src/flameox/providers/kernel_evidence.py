@@ -28,7 +28,7 @@ class KernelEvidenceProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         paths: Sequence[Path],
         formats: Sequence[str],
         arguments: Mapping[str, Any],
@@ -39,13 +39,17 @@ class KernelEvidenceProvider:
             return None
         if all(format_name == "kernel-validation" for format_name in formats):
             documents = [self._kernel_document(path) for path in paths]
-            if capability_id == "kernel.compare":
+            if operation == "compare_kernel_validation":
                 return self._compare_kernel(documents, arguments, max_rows=max_rows)
-            if capability_id == "kernel.validation" and len(documents) == 1:
+            if operation == "inspect_kernel_validation" and len(documents) == 1:
                 return self._summarize_kernel(documents[0], max_rows=max_rows)
-        if capability_id == "triton.autotune" and len(paths) == 1 and formats[0] == "triton":
+        if operation == "inspect_triton_autotune" and len(paths) == 1 and formats[0] == "triton":
             return self._triton(paths[0], max_rows=max_rows)
-        if capability_id == "triton.autotune" and len(paths) == 1 and formats[0] == "triton-cache":
+        if (
+            operation == "inspect_triton_autotune"
+            and len(paths) == 1
+            and formats[0] == "triton-cache"
+        ):
             if paths[0].is_dir():
                 return _triton_cache_directory(paths[0], max_rows=max_rows)
             return _triton_cache(paths[0], max_rows=max_rows)
@@ -251,7 +255,9 @@ class KernelEvidenceProvider:
         max_rows: int,
     ) -> ProviderAnalysis:
         if len(documents) < 2:
-            raise ProviderFailure("INVALID_INPUT", "kernel.compare requires at least 2 inputs")
+            raise ProviderFailure(
+                "INVALID_INPUT", "compare_kernel_validation requires at least 2 inputs"
+            )
         baseline_index = int(arguments.get("baseline_index", 0))
         if baseline_index >= len(documents):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")

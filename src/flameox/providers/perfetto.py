@@ -35,7 +35,7 @@ class PerfettoProvider:
 
     def analyze(
         self,
-        capability_id: str,
+        operation: str,
         path: Path,
         arguments: Mapping[str, Any],
         *,
@@ -46,11 +46,13 @@ class PerfettoProvider:
     ) -> ProviderAnalysis:
         binary = self._binary()
         version = self._identity(binary)
-        if capability_id == "trace.window":
+        if operation == "inspect_trace_window":
             start_ns = arguments.get("start_ns")
             end_ns = arguments.get("end_ns")
             if not isinstance(start_ns, int) or not isinstance(end_ns, int):
-                raise ProviderFailure("INVALID_INPUT", "trace.window requires window arguments")
+                raise ProviderFailure(
+                    "INVALID_INPUT", "inspect_trace_window requires window arguments"
+                )
             response = self.harness.run_typed_sync(
                 PERFETTO_WORKER,
                 PerfettoWindowRequest(
@@ -88,9 +90,9 @@ class PerfettoProvider:
                 max_rows=max_rows,
                 projection=(
                     "call_graph"
-                    if capability_id == "trace.call_graph"
+                    if operation == "inspect_trace_call_graph"
                     else "pytorch"
-                    if capability_id == "trace.pytorch"
+                    if operation == "summarize_pytorch_trace"
                     else "slices"
                 ),
             ),
@@ -101,19 +103,19 @@ class PerfettoProvider:
         if not isinstance(response, PerfettoExtractResult):
             raise ProviderFailure("DECODE_FAILURE", "Perfetto returned another operation")
         metrics: dict[str, Any]
-        if capability_id == "trace.call_graph":
+        if operation == "inspect_trace_call_graph":
             rows = [row.model_dump(mode="json") for row in response.call_graph_rows]
             metrics = {"edge_count": response.projected_total}
         else:
             slices = [row.model_dump(mode="json") for row in response.rows]
-            rows = self._project(capability_id, slices)
+            rows = self._project(operation, slices)
             slice_count = len(slices)
             metrics = {"slice_count": slice_count}
         limitations = [
             "Slice duration is inclusive and nested slices can overlap.",
             "Trace nesting does not by itself prove causal dependence.",
         ]
-        if capability_id == "trace.pytorch":
+        if operation == "summarize_pytorch_trace":
             metrics = {
                 "source_slice_count": slice_count,
                 "pytorch_event_count": len(rows),
@@ -129,7 +131,7 @@ class PerfettoProvider:
             ],
             rows_observed=(
                 response.projected_total
-                if capability_id == "trace.call_graph" and response.projected_total is not None
+                if operation == "inspect_trace_call_graph" and response.projected_total is not None
                 else len(rows) + int(response.truncated)
             ),
             complete=not response.truncated and len(rows) <= max_rows,
@@ -137,8 +139,8 @@ class PerfettoProvider:
         )
 
     @staticmethod
-    def _project(capability_id: str, slices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if capability_id == "trace.pytorch":
+    def _project(operation: str, slices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if operation == "summarize_pytorch_trace":
             rows = []
             for row in slices:
                 name = str(row["name"])

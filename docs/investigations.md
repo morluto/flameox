@@ -10,7 +10,7 @@ symptom → explicit artifact or capture → bounded evidence → hypothesis
         → discriminating experiment → supported, refuted, or inconclusive finding
 ```
 
-An analysis result identifies the capability/provider, exact input digests,
+An analysis result identifies the operation/provider, exact input digests,
 typed evidence blocks, coverage, truncation, limitations, and an opaque
 continuation. These fields distinguish what was observed from what an agent may
 infer.
@@ -37,15 +37,15 @@ MCP capture tools run the target once by default. Capabilities whose analysis in
 multiple artifacts also accept an optional top-level `experiment` design. Single-artifact analyses
 do not advertise that field and reject experiments before a target starts. The
 CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON` when the chosen
-capability supports it. An experiment declares cases, blocks, seed, metric, estimand, practical
+operation supports it. An experiment declares cases, blocks, seed, metric, estimand, practical
 threshold, and an optional semantic oracle. Cases are bounded and execute through the same broker
 as a single capture.
 
 For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
-correctness through `kernel.validation` and `kernel.compare` analysis, checks hazards with a
-`sanitizer.failures` capture, measures representative baseline/candidate cases with a
-`benchmark.summary` experiment, and profiles only the remaining uncertainty with `gpu.launches` or
-`gpu.kernel_metrics`. Flameox preserves the verification evidence;
+correctness through `inspect_kernel_validation` and `compare_kernel_validation` analysis, checks hazards with a
+`inspect_sanitizer_failures` capture, measures representative baseline/candidate cases with a
+`summarize_benchmarks` experiment, and profiles only the remaining uncertainty with `inspect_gpu_launches` or
+`inspect_gpu_kernel_metrics`. Flameox preserves the verification evidence;
 it does not generate kernels, wrap compilers, or decide which optimization to implement.
 
 The runtime accepts `wall_time_ns` and paired `median_difference` or
@@ -69,7 +69,7 @@ owns randomized case order and repeated measurements within one request.
 
 ## Scaling
 
-`benchmark.scaling` is distinct from both workflows. The caller names a declared numeric benchmark
+`analyze_benchmark_scaling` is distinct from both workflows. The caller names a declared numeric benchmark
 dimension such as `elements`; Flameox groups positive measurements for each compatible benchmark
 series while retaining all non-axis dimensions, averages repeated samples at each input value,
 and fits
@@ -113,7 +113,7 @@ identity. Successful records still require their token metrics.
 
 ## Pytest fixture work
 
-`pytest.fixtures` records fixture setup and finalizer phases without serializing fixture values.
+`inspect_pytest_fixtures` records fixture setup and finalizer phases without serializing fixture values.
 Each invocation retains its fixture name, scope, test identity, worker, phase outcome, and measured
 duration. Session-scoped fixtures therefore appear once per xdist worker, rather than being
 mistaken for one global invocation. Aggregate work is summed evidence and can overlap across
