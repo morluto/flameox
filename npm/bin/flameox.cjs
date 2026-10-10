@@ -11,9 +11,9 @@ if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
   process.exit(0);
 }
 const command = args[0];
-if (command !== "setup") {
+if (command !== "setup" && command !== "update") {
   process.stderr.write(
-    "The npm package exposes setup only. Run `npx flameox@latest setup`.\n" +
+    "The npm package exposes setup and update. Run `npx flameox@latest setup`.\n" +
       "Use uvx or the Python package for Flameox CLI commands.\n",
   );
   process.exit(2);
@@ -60,11 +60,11 @@ child.on("error", (error) => {
   removeSignalHandlers();
   if (error.code === "ENOENT") {
     process.stderr.write(
-      "flameox setup requires uv. Install it from https://docs.astral.sh/uv/ and then " +
-        "run `npx flameox@latest setup`.\n",
+      `flameox ${command} requires uv. Install it from https://docs.astral.sh/uv/ and then ` +
+        `run \`npx flameox@latest ${command}\`.\n`,
     );
   } else {
-    process.stderr.write(`Could not start flameox setup: ${error.message}\n`);
+    process.stderr.write(`Could not start flameox ${command}: ${error.message}\n`);
   }
   process.exitCode = 1;
 });

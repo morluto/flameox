@@ -34,6 +34,18 @@ clients explicitly, for example `--client codex --yes` or `--all --yes`; `--dry-
 paths and actions without writing. Setup preserves unrelated client configuration and does not
 change project files. See [the npm package guide](npm/README.md) for details.
 
+Update existing MCP registrations with:
+
+```console
+npx flameox@latest update
+```
+
+`update --check` reports available updates without changing configuration. Updates preserve each
+client's provider extras and settings, verify the new environment before changing release pins,
+and report which clients need a restart or reconnect. Use `--client codex` to select one client,
+or `--version 0.2.8` to select a specific release, including for rollback. The Python CLI exposes
+the same `flameox update` command.
+
 For direct CLI use, pass exact artifact paths or an explicit command:
 
 ```console

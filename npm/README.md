@@ -1,6 +1,6 @@
 # flameox
 
-The npm package provides the `setup` command for configuring Flameox as a local MCP server:
+The npm package provides `setup` and `update` for managing Flameox as a local MCP server:
 
 ```console
 npx flameox@latest setup
@@ -17,7 +17,14 @@ Detection does not select clients automatically in non-interactive mode. Optiona
 arguments prepare the complete managed provider set for the launcher. Host tools and drivers
 remain separately managed.
 
-The npm command only exposes setup. For analysis, capture, evidence management, and MCP server
+Update already configured clients with `npx flameox@latest update`. It checks PyPI for the latest
+stable Python release, preserves each client's provider extras and settings, and verifies all
+selected environments before updating their version pins. `--client codex` selects one configured
+client; without it, update targets all existing Flameox registrations and creates none.
+`--check` and `--dry-run` report planned changes without preparing environments or writing files.
+Use `--version 0.2.8` for a specific release or rollback. Restart or reconnect changed clients.
+
+The npm command exposes setup and update. For analysis, capture, evidence management, and MCP server
 commands, use the Python CLI through `uv` or `uvx`. See the
 [interface guide](https://github.com/morluto/flameox/blob/main/docs/interfaces.md) for setup and
 CLI contracts.
