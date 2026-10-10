@@ -107,7 +107,9 @@ provides enough metadata. Known-different identities fail validation by default.
 `allow_heterogeneous=true` for an explicitly exploratory ratio; the result labels that comparison
 `heterogeneous` and retains the differing axes. Missing identity axes produce `partial`, not a
 claim of compatibility. Prompts, generations, endpoints, and raw model or dataset names remain
-excluded from normalized evidence.
+excluded from normalized evidence. Failed or cancelled AIPerf records may omit token metrics;
+unknown token totals remain null, and incomplete token populations do not establish a workload
+identity. Successful records still require their token metrics.
 
 ## Pytest fixture work
 
@@ -121,7 +123,10 @@ instead of assigning missing finalizers a zero duration.
 
 Session completion also retains pytest's nonzero `run_finished.exitstatus`. Repeated phase reports
 remain an ordered attempt history; a failed attempt followed by a passing attempt is reported as
-flaky rather than allowing the later report to erase the failure.
+flaky rather than allowing the later report to erase the failure. Attempts are grouped by
+worker and test identity so replicated xdist executions do not become false retries. Collected
+test counts describe logical test identities; executed counts include worker replicas. Test
+identities longer than the event bound retain a prefix and a digest of the complete identity.
 
 The capture plugin is scoped to the owned pytest invocation and propagated through pytest arguments
 to xdist workers; it does not export plugin state that would instrument nested pytest processes.

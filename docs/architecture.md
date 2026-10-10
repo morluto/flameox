@@ -61,6 +61,8 @@ durable SHA-256 identity derived from the canonical manifest body.
 - `evidence_models.py` owns typed persisted document shapes and membership invariants;
   `source_files.py` owns shared native-source identities, hashing, and bounded copying.
 - `adapters/json_preview.py` owns the streaming JSON preview projection.
+- `adapters/json_events.py` distinguishes literal object keys from array locations for native
+  streaming parsers.
 - `execution.py` and `command_binding.py` own executable binding, subprocess
   limits, cancellation, output bounds, and descendant cleanup.
 - `mcp/server.py` and `cli.py` are thin projections over the same runtime.

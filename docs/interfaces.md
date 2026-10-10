@@ -269,6 +269,13 @@ a root scalar yields one value row. At the root object, arrays yield section row
 yield key/value rows, and nested objects yield key/type summaries. Object keys are literal strings,
 so a key containing a dot is not confused with a nested path. Pagination can stop before the end
 of the document; only a complete preview has validated JSON through end-of-file.
+Native row fields named `input_sha256`, or `section` in JSON section rows, remain under
+`value` when they collide with preview metadata. CSV rejects duplicate headers and ragged
+records rather than silently discarding or inventing values. Preview rows use the same canonical
+value projection as typed providers: integers outside the interoperable JSON range and nonfinite
+native numeric values become strings before inline output or preservation. Native JSON parser
+limits still apply; YAJL can replace unpaired escaped surrogates during JSON decoding, while
+JSONL rejects invalid Unicode. Native bytes remain authoritative.
 
 Decoded offsets must be integers within the available bounded population. Negative offsets and
 offsets at or beyond the end fail with `INVALID_INPUT`; they never use Python slicing semantics or

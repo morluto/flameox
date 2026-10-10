@@ -80,7 +80,10 @@ Source maps are not resolved. CPU counts use exported sample node IDs rather tha
 `hitCount` metadata. Inclusive CPU counts sum call-tree occurrences and can repeat recursive
 frames. Heap `sample_count` counts native allocation sample records per
 frame, including records from multiple call-tree nodes with the same identity. `self_value`
-and `inclusive_value` retain V8's allocation estimates, independently of sample counts.
+and `inclusive_value` retain V8's allocation estimates, independently of sample counts. V8 and
+SARIF extraction use literal object keys and distinct array locations; dotted keys cannot
+impersonate native nodes, samples, or results. Malformed V8 child containers and duplicate
+object fields fail decoding.
 Native heap samples can reference nodes absent from the exported call tree. Those samples
 remain in the total counts and estimated bytes, with separate `unresolved_sample_count` and
 `unresolved_sampled_bytes` metrics, incomplete coverage, and an explicit attribution limitation.
@@ -223,3 +226,22 @@ Pyperf command capture preserves multiline typed argv through a metadata-safe la
 pyperf rejects newline characters in its display metadata. The launcher executes the original argv
 without shell parsing, but its startup is included in each command measurement; exact Flameox
 capture provenance remains authoritative for the requested argv.
+
+Memray frame extraction applies record, frame, and aggregate bounds to the requested high-watermark
+or retained-end population. Allocation history contributes scalar byte/operation totals without
+producing unrelated frame rows; temporary-allocation projections are not computed. Summary totals
+remain independent of which supported frame population was requested.
+
+OTLP encoding comes from native content rather than the artifact filename, including after
+preservation relocates JSON into an extensionless payload. Ambiguous protobuf prefixes are
+validated as protobuf when JSON decoding fails. SARIF's implicit source root is resolved into
+effective analysis arguments, so preserved replay and continuation retain the same path scope.
+Nsight Systems rows preserve colliding native `table` columns under `value`; the outer `table`
+continues to identify the actual source table.
+
+OTLP nonfinite double attributes remain distinguishable from strings as tagged
+`{"type":"double","value":"NaN"}` (with `"Infinity"` or `"-Infinity"` for infinite values). Nested
+attributes use the same projection; native integer attributes retain exact values.
+
+SARIF candidate coordinates index the native result within each run. Compute Sanitizer marks
+coverage incomplete when host-stack frames are omitted, separately from omitted record counts.

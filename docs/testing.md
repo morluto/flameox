@@ -134,3 +134,43 @@ caller-edge representations. Deadline-bound POSIX checks exercise admitted
 native-file copying and hashing after replacement with FIFOs. They cover the
 shared file boundary directly because a normal runtime request may reject the
 replacement during an earlier validation, before reaching the copy operation.
+
+Repository and setup regressions cover first preservation with missing data-directory ancestors,
+reserved-layout symlinks before publication, malformed staging-owner identifiers, FIFO client
+configurations, JSONC BOM preservation, and malformed
+dependency probe/version responses. Recovery workflows exercise typed rescue-path failures and
+live analysis/rescue with corrupt repository metadata. Executable and broker workflows reject
+symlink loops at admission and after binding, including working-directory and allowed-root loops.
+
+A native Speedscope mutation/retry workflow verifies rejected input changes cannot poison the
+provider projection cache. Cache-eviction workflows tolerate stale external symlink loops while
+continuing to preserve valid unrelated evidence. SARIF decimal regressions bound exponent
+expansion before integer conversion; inference readers reject oversized whitespace lines before
+skipping blank records.
+
+Capture workflows bind oracle executables at admission, detect captured-output replacement,
+query preserved captures by evidence kind, and retain completed evidence when later executable
+validation or oracle admission fails. The scratch-capacity regression reaches the real file
+ceiling; the disk-reserve regression distinguishes configured thresholds from observed free space.
+Real MCP stdio verifies inline decoder failures without private console text, including partial
+capture failures, and rejects NUL benchmark names before execution. The advertised pytest fixture
+capture example runs against a real test and fixture.
+
+Native provider workflows cover long pytest identities and xdist replicas, missing failed-AIPerf
+token metrics, invalid inference identity Unicode, wide NVBench identities, nonfinite state
+metadata, tagged infinite kernel comparators, and unresolved Speedscope weights. Memray workflows
+verify that transient work does not consume retained-frame bounds and scalar totals agree across
+requested populations. Compute Sanitizer distinguishes omitted frames from omitted records and
+marks partial coverage without inflating record counts.
+
+Streaming and replay workflows cover literal dotted-key isolation in V8 and SARIF, malformed V8
+children/coordinates and exact sample fields, SARIF malformed collections versus valid empty
+collections, and native result coordinates across multiple runs. OTLP JSON and protobuf replay
+survive relocation, ambiguous prefixes and nonfinite attributes; SARIF continuation retains its
+implicit source root. Nsight Parquet and preview field collisions preserve native values and
+provenance. Preview regressions cover canonical preservation and malformed CSV; upstream JSON
+surrogate replacement remains a documented decoding limitation.
+
+Existing execution and trace-window workflows cover removal of unused descriptor transfer,
+executable policies, reader branches, and alternate Perfetto pagination fields. These fixtures
+establish contract behavior, not compatibility with every installed vendor collector.
