@@ -242,6 +242,9 @@ class ScalingArguments(StrictModel):
     )
 
 
+type PathSelector = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^\u0000]+$")]
+
+
 class StaticArguments(StrictModel):
     source_root: str | None = Field(
         default=None,
@@ -252,23 +255,16 @@ class StaticArguments(StrictModel):
         min_length=1,
         max_length=4096,
     )
-    include_paths: list[str] = Field(
+    include_paths: list[PathSelector] = Field(
         default_factory=list,
         description="Path patterns eligible for static analysis.",
         max_length=128,
     )
-    exclude_paths: list[str] = Field(
+    exclude_paths: list[PathSelector] = Field(
         default_factory=list,
         description="Path patterns excluded after includes are applied.",
         max_length=128,
     )
-
-    @field_validator("include_paths", "exclude_paths")
-    @classmethod
-    def bounded_patterns(cls, value: list[str]) -> list[str]:
-        if any(not pattern or len(pattern) > 256 or "\x00" in pattern for pattern in value):
-            raise ValueError("path patterns must be non-empty, bounded, and contain no NUL")
-        return value
 
     @field_validator("source_root")
     @classmethod
@@ -629,18 +625,13 @@ class NsightComputeCaptureArguments(StrictModel):
     launch_count: int = Field(
         default=1, description="Matching kernel launches to profile.", ge=1, le=1_000_000
     )
-    section: list[str] = Field(
-        default_factory=list,
-        description="Nsight Compute section identifiers; empty uses its default section set.",
-        max_length=32,
+    section: list[Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[^\u0000]+$")]] = (
+        Field(
+            default_factory=list,
+            description="Nsight Compute section identifiers; empty uses its default section set.",
+            max_length=32,
+        )
     )
-
-    @field_validator("section")
-    @classmethod
-    def bounded_sections(cls, value: list[str]) -> list[str]:
-        if any(not item or len(item) > 200 or "\x00" in item for item in value):
-            raise ValueError("Nsight Compute sections must be non-empty and bounded")
-        return value
 
 
 class RocprofCaptureArguments(StrictModel):
@@ -709,22 +700,15 @@ class TorchProfilerCaptureArguments(StrictModel):
 
 class CoverageCaptureArguments(StrictModel):
     branch: bool = Field(default=False, description="Measure branch as well as statement coverage.")
-    source: list[str] = Field(
+    source: list[PathSelector] = Field(
         default_factory=list, description="coverage.py source selectors to measure.", max_length=64
     )
-    include: list[str] = Field(
+    include: list[PathSelector] = Field(
         default_factory=list, description="coverage.py file patterns to include.", max_length=64
     )
-    omit: list[str] = Field(
+    omit: list[PathSelector] = Field(
         default_factory=list, description="coverage.py file patterns to omit.", max_length=64
     )
-
-    @field_validator("source", "include", "omit")
-    @classmethod
-    def bounded_values(cls, value: list[str]) -> list[str]:
-        if any(not item or len(item) > 256 or "\x00" in item for item in value):
-            raise ValueError("coverage selectors must be non-empty and bounded")
-        return value
 
 
 class TorchBenchmarkRuntimeArguments(StrictModel):

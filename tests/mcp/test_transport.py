@@ -441,6 +441,34 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 )
                 for unsupported in ("execution", "experiment")
             )
+            invalid_calls += tuple(
+                (
+                    "inspect_performance_candidates",
+                    {"sources": [{"path": str(artifact)}], "include_paths": [pattern]},
+                    ["include_paths", 0],
+                )
+                for pattern in ("", "x" * 257, "bad\x00pattern")
+            )
+            invalid_calls += tuple(
+                (
+                    tool,
+                    {
+                        "target": {
+                            "argv": [sys.executable, "-c", command, str(marker), "0"],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": kind, field: [value]},
+                    },
+                    None,
+                )
+                for tool, kind, field, maximum in (
+                    ("capture_gpu_kernel_metrics", "nsight-compute", "section", 200),
+                    ("capture_coverage_summary", "coverage", "source", 256),
+                    ("capture_coverage_summary", "coverage", "include", 256),
+                    ("capture_coverage_summary", "coverage", "omit", 256),
+                )
+                for value in ("", "x" * (maximum + 1), "bad\x00selector")
+            )
             for tool_name, arguments, expected_field_path in invalid_calls:
                 assert not Draft202012Validator(by_name[tool_name].input_schema).is_valid(
                     arguments
