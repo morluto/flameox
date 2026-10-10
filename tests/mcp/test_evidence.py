@@ -327,12 +327,13 @@ def test_analysis_preservation_query_inspection_and_restart(tmp_path: Path) -> N
 @pytest.mark.integration
 @pytest.mark.process
 @pytest.mark.parametrize("mode", ["analysis", "capture", "failed_analysis"])
+@pytest.mark.parametrize("corruption", ["unexpected", "repository.json"])
 def test_mcp_rescues_live_analysis_from_unusable_configured_store(
-    tmp_path: Path, mode: str
+    tmp_path: Path, mode: str, corruption: str
 ) -> None:
     configured = tmp_path / "configured"
     configured.mkdir()
-    (configured / "unexpected").write_text("corrupt")
+    (configured / corruption).write_text("corrupt")
     rescue = tmp_path / "rescue"
     artifact = tmp_path / "input.json"
     artifact.write_text('[{"value": 1}]')

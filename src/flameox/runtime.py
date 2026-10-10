@@ -2059,7 +2059,13 @@ class AnalysisRuntime:
             raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an absolute path")
         selected = Path(os.path.abspath(supplied))
         configured = self.repository.root
-        if self._paths_overlap(selected, configured):
+        try:
+            overlaps = self._paths_overlap(selected, configured)
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Rescue destination cannot be resolved"
+            ) from error
+        if overlaps:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Rescue destination must be outside the configured repository"
             )

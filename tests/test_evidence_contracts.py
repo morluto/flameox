@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -238,5 +239,20 @@ def test_source_selection_checks_selected_payload_not_unrelated_analysis_data(
         with pytest.raises(RuntimeFailure) as failure:
             runtime.read_evidence_agent_projection(evidence_id)
         assert failure.value.code == "REPOSITORY_CORRUPTION"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
+def test_rescue_rejects_unresolvable_destination_before_publication(tmp_path: Path) -> None:
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preflight_rescue_destination(str(loop / "new"))
+        assert failure.value.code == "INVALID_INPUT"
+        assert str(tmp_path) not in failure.value.message
+        assert not (tmp_path / "store").exists()
     finally:
         runtime.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -382,6 +383,14 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                     None,
                 ),
                 (
+                    "capture_benchmark_summary",
+                    {
+                        "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
+                        "provider": {"kind": "pyperf", "name": "bad\x00name"},
+                    },
+                    ["provider", "name"],
+                ),
+                (
                     "capture_cpu_hotspots",
                     {
                         "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
@@ -619,5 +628,66 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert replay.is_error is False
             assert replay.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
             assert marker.read_text().splitlines() == ["started", "started"]
+
+    anyio.run(exercise)
+
+
+@pytest.mark.e2e
+@pytest.mark.process
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
+def test_stdio_perf_failures_redact_decoder_console_for_analysis_and_capture(
+    tmp_path: Path,
+) -> None:
+    private = "private-customer-decoder-token"
+    collector = tmp_path / "perf"
+    collector.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\nfrom pathlib import Path\n"
+        "if 'record' in sys.argv:\n"
+        "    Path(sys.argv[sys.argv.index('--output') + 1]).write_bytes(b'native profile')\n"
+        "elif '--version' in sys.argv:\n"
+        "    print('perf version 6.0')\n"
+        "else:\n"
+        f"    print({private!r}, file=sys.stderr)\n"
+        "    raise SystemExit(7)\n"
+    )
+    collector.chmod(0o755)
+    native = tmp_path / "perf.data"
+    native.write_bytes(b"native profile")
+
+    async def exercise() -> None:
+        parameters = StdioServerParameters(
+            command=str(Path(sys.executable).with_name("flameox")),
+            args=["mcp", "serve"],
+            cwd=tmp_path,
+            env={
+                "FLAMEOX_DATA_DIR": str(tmp_path / "store"),
+                "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
+            },
+        )
+        async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+            await session.initialize()
+            analyzed = await session.call_tool(
+                "rank_cpu_hotspots", {"sources": [{"path": str(native), "format": "perf-data"}]}
+            )
+            assert analyzed.is_error
+            assert analyzed.structured_content is not None
+            assert analyzed.structured_content["details"]["decoder_exit_code"] == 7
+            captured = await session.call_tool(
+                "capture_cpu_hotspots",
+                {
+                    "target": {"argv": [sys.executable, "-c", "pass"], "cwd": str(tmp_path)},
+                    "provider": {"kind": "perf", "call_graph": "fp"},
+                },
+            )
+            assert captured.structured_content is not None
+            assert (
+                captured.structured_content["analysis_failure"]["details"]["decoder_exit_code"] == 7
+            )
+            for result in (analyzed, captured):
+                assert private not in result.model_dump_json()
+                inline = result.content[0]
+                assert isinstance(inline, TextContent)
+                assert json.loads(inline.text) == result.structured_content
 
     anyio.run(exercise)

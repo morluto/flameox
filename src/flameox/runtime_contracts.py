@@ -557,6 +557,7 @@ class PyperfCaptureArguments(StrictModel):
         description="Benchmark name recorded in the pyperf suite.",
         min_length=1,
         max_length=120,
+        pattern=r"^[^\x00]*$",
     )
 
 

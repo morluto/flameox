@@ -42,6 +42,7 @@ from flameox.mcp.result_contracts import (
 )
 from flameox.mcp.tool_registry import tool_contracts
 from flameox.mcp.validation import normalize_schema_error, normalize_validation_error
+from flameox.repository import RepositoryError
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITY_BY_ID,
@@ -69,6 +70,11 @@ def _failure_result(value: ToolFailureEnvelope) -> CallToolResult:
         value.model_dump(mode="json"),
         is_error=True,
     )
+
+
+def _failure_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    # Native decoder text remains in local diagnostics, outside the MCP contract.
+    return {key: value for key, value in details.items() if key != "decoder_stderr"}
 
 
 def _runtime_failure(
@@ -104,7 +110,7 @@ def _runtime_failure(
             message=error.message,
             retryable=True,
             next_action=retry_action,
-            details=error.details,
+            details=_failure_details(error.details),
         )
         return _tool_result(value.model_dump(mode="json"))
     if error.code == "UNAVAILABLE_CAPABILITY":
@@ -116,7 +122,7 @@ def _runtime_failure(
             next_action=OperatorAction(kind="operator_action", message=remediation)
             if error.remediation
             else None,
-            details=error.details,
+            details=_failure_details(error.details),
         )
         return _tool_result(value.model_dump(mode="json"))
     accepted: list[str] | None = None
@@ -179,7 +185,7 @@ def _runtime_failure(
             field_path=field_path,
             accepted_values=accepted,
             next_action=next_action,
-            details=error.details,
+            details=_failure_details(error.details),
         )
     )
 
@@ -247,8 +253,11 @@ class FlameoxServer(Server[AnalysisRuntime]):
     async def _lifespan(self, _: Server[AnalysisRuntime]) -> AsyncIterator[AnalysisRuntime]:
         active = AnalysisRuntime(evidence_directory=self._evidence_directory, limits=self._limits)
         try:
-            if active.repository.exists:
-                active.repository.cleanup_abandoned_staging()
+            try:
+                if active.repository.exists:
+                    active.repository.cleanup_abandoned_staging()
+            except (RepositoryError, OSError):
+                pass  # Optional preservation failures belong to explicit repository operations.
             yield active
         finally:
             active.close()
@@ -430,6 +439,8 @@ class FlameoxServer(Server[AnalysisRuntime]):
             )
             value["next_action"] = None
             analysis_failure = value.get("analysis_failure")
+            if analysis_failure is not None:
+                analysis_failure["details"] = _failure_details(analysis_failure["details"])
             can_reanalyze = (
                 analysis_failure is not None
                 and analysis_failure["details"]["analysis_source_count"] > 0
