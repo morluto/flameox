@@ -85,7 +85,9 @@ async def test_broker_rejects_an_executable_changed_after_binding(tmp_path: Path
 
 
 @pytest.mark.skipif(os.name != "posix", reason="FIFOs require POSIX")
-@pytest.mark.parametrize("boundary", ["filesystem", "executable"])
+@pytest.mark.parametrize(
+    "boundary", ["filesystem", "executable", "repository", "manifest", "artifact_metadata"]
+)
 def test_special_files_are_rejected_without_blocking(tmp_path: Path, boundary: str) -> None:
     script = """
 import os, shutil, sys
@@ -94,8 +96,24 @@ from flameox.command_binding import ExecutableResolver
 from flameox.executable_models import ExecutableResolutionRequest, ExecutableTrustPolicy
 from flameox.filesystem import BoundedFileSystem
 from flameox.runtime_errors import DomainError, ErrorCode
+from flameox.runtime import AnalysisRuntime
+from flameox.runtime_contracts import PathSource, RuntimeFailure
 root = Path(sys.argv[1])
 path = root / 'native'
+repository_boundary = sys.argv[2] in {'repository', 'manifest', 'artifact_metadata'}
+if repository_boundary:
+    path.write_text('native evidence')
+    runtime = AnalysisRuntime(evidence_directory=root / 'store')
+    result = runtime.analyze('artifact.preview', [PathSource(path=str(path))], {})
+    evidence_id = runtime.preserve_evidence(result['analysis_id'])['evidence_id']
+    if sys.argv[2] == 'repository':
+        path = root / 'store' / 'repository.json'
+    elif sys.argv[2] == 'manifest':
+        path = (root / 'store' / 'evidence' / 'sha256'
+                / evidence_id[:2] / evidence_id / 'manifest.json')
+    else:
+        path = next((root / 'store' / 'artifacts' / 'sha256').glob('*/*/artifact.json'))
+    path.unlink()
 if sys.argv[2] == 'executable':
     shutil.copy2(sys.executable, path)
     resolver = ExecutableResolver()
@@ -105,14 +123,17 @@ if sys.argv[2] == 'executable':
     path.unlink()
 os.mkfifo(path)
 try:
-    if sys.argv[2] == 'filesystem':
+    if repository_boundary:
+        runtime.read_evidence(evidence_id)
+    elif sys.argv[2] == 'filesystem':
         BoundedFileSystem((root,)).read_bytes(path, max_bytes=1024)
     else:
         resolver.revalidate(binding)
-except DomainError as error:
-    expected = (ErrorCode.EXECUTION_FAILURE if sys.argv[2] == 'filesystem'
-                else ErrorCode.MISSING_OR_CHANGED_INPUT)
-    assert error.code is expected
+except (DomainError, RuntimeFailure) as error:
+    expected = ('REPOSITORY_CORRUPTION' if repository_boundary
+                else 'EXECUTION_FAILURE' if sys.argv[2] == 'filesystem'
+                else 'MISSING_OR_CHANGED_INPUT')
+    assert error.code == expected
 else:
     raise AssertionError('special file was accepted')
 """

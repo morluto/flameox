@@ -33,7 +33,9 @@ from flameox.evidence_models import (
     SourceLayout,
     VersionHeader,
 )
+from flameox.filesystem import BoundedFileSystem
 from flameox.runtime_contracts import LOWERCASE_SHA256_PATTERN, RuntimeFailure
+from flameox.runtime_errors import DomainError
 from flameox.source_files import (
     NativeSource,
     bundle_digest,
@@ -748,14 +750,18 @@ class EvidenceRepository:
     def _read_document[M: BaseModel](self, path: Path, model: type[M]) -> M:
         self._assert_no_symlink_path(path)
         try:
-            value = json.loads(path.read_bytes())
+            with (
+                BoundedFileSystem((self.root,)).open_regular(path) as descriptor,
+                os.fdopen(descriptor, "rb", closefd=False) as stream,
+            ):
+                value = json.load(stream)
             header = VersionHeader.model_validate(value)
             if header.format_version != REPOSITORY_FORMAT:
                 raise RepositoryError(
                     "UNSUPPORTED_REPOSITORY_FORMAT", "The evidence format is unsupported."
                 )
             return model.model_validate(value)
-        except (OSError, ValueError, RecursionError) as exc:
+        except (OSError, ValueError, RecursionError, DomainError) as exc:
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Evidence metadata is unreadable or invalid."
             ) from exc
