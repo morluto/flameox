@@ -255,19 +255,20 @@ class KernelEvidenceProvider:
         if baseline_index >= len(documents):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
         requested_metric = arguments.get("metric")
-        consistency_failures = [
-            {"input_index": input_index, **failure}
-            for input_index, document in enumerate(documents)
-            for failure in _kernel_consistency_failures(document)
-        ]
+        consistency_failures: list[dict[str, Any]] = []
         series: list[dict[bytes, float]] = []
         identities: list[dict[bytes, dict[str, Any]]] = []
         statuses: list[dict[bytes, str]] = []
-        for document in documents:
+        for input_index, document in enumerate(documents):
+            validated_rows = self._kernel_rows(document)
+            consistency_failures.extend(
+                {"input_index": input_index, **failure}
+                for failure in _kernel_consistency_failures(document)
+            )
             values: dict[bytes, float] = {}
             members: dict[bytes, dict[str, Any]] = {}
             state: dict[bytes, str] = {}
-            for row in self._kernel_rows(document):
+            for row in validated_rows:
                 if row["evidence_kind"] != "measurement":
                     continue
                 identity = {

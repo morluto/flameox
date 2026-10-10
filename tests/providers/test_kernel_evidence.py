@@ -186,15 +186,21 @@ def test_kernel_validation_rejects_coerced_coverage_and_duplicate_metrics(
     invalid_comparator = _kernel_document(0.0)
     invalid_comparator["cases"][0]["outputs"][0]["metrics"][0]["comparator"] = []  # type: ignore[index]
     overflow = _kernel_document(10**400)
+    null_outputs = _kernel_document(0.0)
+    null_outputs["cases"][0]["outputs"] = None  # type: ignore[index]
+    null_metrics = _kernel_document(0.0)
+    null_metrics["cases"][0]["outputs"][0]["metrics"] = None  # type: ignore[index]
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        for name, document in (
-            ("coverage", coverage),
-            ("duplicate", duplicate),
-            ("status", invalid_status),
-            ("case", invalid_case),
-            ("comparator", invalid_comparator),
-            ("overflow", overflow),
+        for name, document, code in (
+            ("coverage", coverage, "DECODE_FAILURE"),
+            ("duplicate", duplicate, "DECODE_FAILURE"),
+            ("status", invalid_status, "DECODE_FAILURE"),
+            ("case", invalid_case, "DECODE_FAILURE"),
+            ("comparator", invalid_comparator, "DECODE_FAILURE"),
+            ("overflow", overflow, "DECODE_FAILURE"),
+            ("null_outputs", null_outputs, "LIMIT_EXCEEDED"),
+            ("null_metrics", null_metrics, "LIMIT_EXCEEDED"),
         ):
             artifact = tmp_path / f"{name}.json"
             artifact.write_text(json.dumps(document))
@@ -205,7 +211,7 @@ def test_kernel_validation_rejects_coerced_coverage_and_duplicate_metrics(
             ):
                 with pytest.raises(RuntimeFailure) as failure:
                     runtime.analyze(capability, sources, {})
-                assert failure.value.code == "DECODE_FAILURE"
+                assert failure.value.code == code
     finally:
         runtime.close()
 
