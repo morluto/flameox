@@ -80,6 +80,7 @@ def _aggregate_cpu(
     if not roots and nodes:
         _malformed("V8 CPU profile node tree contains a cycle.")
 
+    identities: dict[tuple[str, str, int, int, str | None, str], dict[str, Any]] = {}
     frame_rows: dict[str, dict[str, Any]] = {}
     aggregates: dict[str, dict[str, int]] = {}
     visited: set[int] = set()
@@ -90,7 +91,7 @@ def _aggregate_cpu(
             node_id, closing = stack.pop()
             if closing:
                 node = nodes[node_id]
-                identity = _frame_identity(node["call_frame"], request)
+                identity = _frame_identity(node["call_frame"], request, identities)
                 subtree = node["self_samples"] + sum(
                     subtree_totals[child_id] for child_id in node["children"]
                 )
@@ -144,6 +145,7 @@ def _aggregate_cpu(
 def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - streaming validation
     path = Path(request.artifact_path)
     _validate_profile_root(path, {"head": "start_map", "samples": "start_array"})
+    identities: dict[tuple[str, str, int, int, str | None, str], dict[str, Any]] = {}
     frame_rows: dict[str, dict[str, Any]] = {}
     aggregates: dict[str, dict[str, int]] = {}
     node_count = 0
@@ -232,7 +234,7 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 node_ids.add(node_id)
                 if node_stack:
                     node_stack[-1]["child_total"] += self_size + current["child_total"]
-                identity = _frame_identity(call_frame, request)
+                identity = _frame_identity(call_frame, request, identities)
                 frames_by_node[node_id] = identity["frame_id"]
                 frame_rows.setdefault(identity["frame_id"], identity)
                 values = aggregates.setdefault(
@@ -327,7 +329,11 @@ def _strict_int(value: Any, field: str) -> int:
     return value
 
 
-def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> dict[str, Any]:
+def _frame_identity(
+    call_frame: dict[str, Any],
+    request: V8ProfileRequest,
+    identities: dict[tuple[str, str, int, int, str | None, str], dict[str, Any]],
+) -> dict[str, Any]:
     function_value = call_frame.get("functionName")
     function = (
         function_value if isinstance(function_value, str) and function_value else "(anonymous)"
@@ -343,6 +349,17 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
         if not normalized and isinstance(script_id, (str, int)) and not isinstance(script_id, bool)
         else None
     )
+    symbolization = (
+        "complete"
+        if function_value
+        and normalized
+        and normalized != "internal"
+        and not normalized.startswith("node:")
+        else "partial"
+    )
+    key = (function, normalized, line, column, disambiguator, symbolization)
+    if cached := identities.get(key):
+        return cached
     identity_payload: dict[str, object] = {
         "language": "JavaScript",
         "function": function,
@@ -353,7 +370,7 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
     if disambiguator is not None:
         identity_payload["disambiguator"] = disambiguator
     frame_id = digest_model(identity_payload)
-    return {
+    identity = {
         "frame_id": frame_id,
         "language": "JavaScript",
         "function": function,
@@ -368,15 +385,10 @@ def _frame_identity(call_frame: dict[str, Any], request: V8ProfileRequest) -> di
         "source_state_id": None,
         "artifact_id": request.artifact_id,
         "inlined": False,
-        "symbolization": (
-            "complete"
-            if function_value
-            and normalized
-            and normalized != "internal"
-            and not normalized.startswith("node:")
-            else "partial"
-        ),
+        "symbolization": symbolization,
     }
+    identities[key] = identity
+    return identity
 
 
 def _bounded_profile_rows(
