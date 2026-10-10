@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import json5
 import pytest
 from mcp import StdioServerParameters
 from mcp.client.session import ClientSession
@@ -129,6 +130,66 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
     assert malformed_token.returncode == 1
     assert json.loads(malformed_token.stderr)["code"] == "INVALID_INPUT"
     assert "Traceback" not in malformed_token.stderr
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "line_comment",
+        "block_comment",
+        "duplicate_section",
+        "duplicate_entry",
+        "nested_json",
+        "nested_jsonc",
+    ],
+)
+def test_installed_setup_preserves_comments_and_rejects_ambiguous_configuration(
+    tmp_path: Path, mode: str
+) -> None:
+    client = "cursor" if mode == "nested_json" else "opencode"
+    relative = ".cursor/mcp.json" if client == "cursor" else ".config/opencode/opencode.jsonc"
+    config = tmp_path / relative
+    config.parent.mkdir(parents=True)
+    source = {
+        "line_comment": '{"enabled":true// keep this comment\n}',
+        "block_comment": '{"enabled":true/* keep this comment */}',
+        "duplicate_section": '{"mcp":{},"mcp":{}}',
+        "duplicate_entry": '{"mcp":{"flameox":{},"flameox":{}}}',
+        "nested_json": "[" * 10_000 + "0" + "]" * 10_000,
+        "nested_jsonc": "[" * 10_000 + "0" + "]" * 10_000,
+    }[mode]
+    config.write_text(source)
+    environment = {**os.environ, "HOME": str(tmp_path), "NO_COLOR": "1"}
+    command = [
+        str(Path(sys.executable).with_name("flameox")),
+        "setup",
+        "--client",
+        client,
+        "--yes",
+        "--json",
+    ]
+    result = subprocess.run(
+        command, env=environment, capture_output=True, text=True, timeout=30, check=False
+    )
+    if mode not in {"line_comment", "block_comment"}:
+        assert result.returncode == 2
+        assert "Could not read" in result.stderr
+        assert "Traceback" not in result.stderr
+        assert config.read_text() == source
+        return
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["clients"][0]["status"] == "created"
+    updated = config.read_text()
+    document = json5.loads(updated)
+    assert document["enabled"] is True
+    assert "keep this comment" in updated
+    assert document["mcp"]["flameox"]["command"][-3:] == ["flameox", "mcp", "serve"]
+    repeated = subprocess.run(
+        command, env=environment, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert json.loads(repeated.stdout)["clients"][0]["status"] == "already_current"
+    assert config.read_text() == updated
 
 
 def test_capture_preserve_restart_and_replay_native_evidence(tmp_path: Path) -> None:

@@ -220,6 +220,8 @@ def _jsonc_value_end(source: str, index: int) -> int:
         return _jsonc_string_end(source, index)
     if source[index] not in "[{":
         while index < len(source) and source[index] not in ",}]" and not source[index].isspace():
+            if source.startswith(("//", "/*"), index):
+                break
             index += 1
         return index
 
@@ -359,8 +361,12 @@ def _json_plan(
     if path.exists():
         try:
             source = path.read_text()
-            document = json5.loads(source) if path.suffix == ".jsonc" else json.loads(source)
-        except (OSError, UnicodeError, ValueError) as error:
+            document = (
+                json5.loads(source, allow_duplicate_keys=False)
+                if path.suffix == ".jsonc"
+                else json.loads(source)
+            )
+        except (OSError, ValueError, RecursionError) as error:
             raise SetupFailure(
                 f"Could not read {client.display_name} configuration: {path}"
             ) from error

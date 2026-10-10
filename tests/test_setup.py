@@ -45,7 +45,10 @@ def test_setup_preserves_existing_client_configuration_and_is_idempotent(
 def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Path) -> None:
     config = tmp_path / ".config" / "opencode" / "opencode.jsonc"
     config.parent.mkdir(parents=True)
-    config.write_text('{\n  // keep this comment\n  "theme": "dark",\n}\n')
+    config.write_text(
+        '{\n  // keep this comment\n  "theme": "dark",\n'
+        '  "enabled": true// keep the scalar comment\n}\n'
+    )
 
     plan = plan_client_setup([SetupClient.OPENCODE], [], home=tmp_path)[0]
     apply_client_setup([plan])
@@ -53,6 +56,8 @@ def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Pat
     content = config.read_text()
     document = json5.loads(content)
     assert "keep this comment" in content
+    assert "true,// keep the scalar comment" in content
+    assert document["enabled"] is True
     assert document["theme"] == "dark"
     assert document["mcp"]["flameox"]["type"] == "local"
     assert document["mcp"]["flameox"]["command"][-3:] == ["flameox", "mcp", "serve"]
