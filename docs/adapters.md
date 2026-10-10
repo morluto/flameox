@@ -8,7 +8,7 @@ publish evidence, install providers, or own job lifecycle.
 
 Each operation registry entry owns:
 
-- the operation descriptor and stable ID;
+- the operation descriptor and canonical task name;
 - accepted source modes and formats;
 - a strict validation-equivalent argument model;
 - compatibility rules derived from declared artifact formats;
@@ -33,10 +33,13 @@ Tests exercise explicit-path analysis and, when applicable, capture through the 
 A parser or worker that is not reachable through a declared operation is either intentionally
 internal and documented as such, or an incomplete registration—not latent support.
 
-Operation tools remain discoverable when a provider is absent. Capture validates the selected
-provider's package, executable, platform, version, permission, and required external resources as
-part of the attempted operation, before workload execution. An unavailable provider returns a typed
-error with either an exact `prepare_providers` retry action or external host guidance.
+Operation tools remain discoverable when a provider is absent. Before dispatch, capture validates
+typed arguments, declared format compatibility, and the selected executable or package binding.
+Provider-specific version and resource checks run where implemented; there is no universal
+permission or hardware preflight. Permissions, hardware availability, and target compatibility can
+still fail when the upstream collector starts. Started attempts retain execution provenance.
+An unavailable provider returns a typed result with either an exact `prepare_providers` retry
+action or external host guidance.
 
 ## Evidence and capture support
 
