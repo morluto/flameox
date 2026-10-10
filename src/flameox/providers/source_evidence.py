@@ -61,9 +61,15 @@ class SourceEvidenceProvider:
             )
         if capability_id != "static.performance_candidates" or format_name != "sarif":
             return None
+        try:
+            source_root = Path(arguments["source_root"]).resolve()
+        except (OSError, RuntimeError) as error:
+            raise ProviderFailure(
+                "INVALID_INPUT", "The SARIF source root cannot be resolved"
+            ) from error
         parsed = parse_sarif(
             path,
-            source_root=Path(arguments.get("source_root") or path.parent).resolve(),
+            source_root=source_root,
             include_paths=tuple(arguments.get("include_paths", ())),
             exclude_paths=tuple(arguments.get("exclude_paths", ())),
             default_exclude_paths=DEFAULT_EXCLUDE_PATHS,

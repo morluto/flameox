@@ -104,6 +104,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     Source,
+    StaticArguments,
     StrictModel,
     WorkloadBudget,
     compatible_capture_providers,
@@ -501,6 +502,8 @@ class AnalysisRuntime:
                     ),
                 },
             )
+        if isinstance(validated, StaticArguments) and validated.source_root is None:
+            validated = validated.model_copy(update={"source_root": str(resolved[0].path.parent)})
         if isinstance(validated, CpuHotspotArguments):
             validated.validate_formats(item.format for item in resolved)
         identity = {

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-import ijson
 from ijson import IncompleteJSONError, JSONError
+
+from flameox.adapters.json_events import JsonLocation, parse_json_events
 
 DEFAULT_EXCLUDE_PATHS = (
     ".git",
@@ -25,8 +27,8 @@ DEFAULT_EXCLUDE_PATHS = (
     "*.egg-info",
 )
 
-_RESULT_PREFIX = "runs.item.results.item"
-_LOCATION_PREFIX = f"{_RESULT_PREFIX}.locations.item"
+_RESULT_PREFIX: JsonLocation = ("runs", None, "results", None)
+_LOCATION_PREFIX = (*_RESULT_PREFIX, "locations", None)
 _MAX_IDENTIFIER_LENGTH = 1_024
 _MAX_MESSAGE_LENGTH = 16_384
 _MAX_DEFERRED_RESULTS = 1_000
@@ -78,6 +80,7 @@ class SarifParseResult:
 
 @dataclass(slots=True)
 class _Run:
+    result_count: int = 0
     name: str | None = None
     version: str | None = None
     pending_results: list[_Result] = field(default_factory=list)
@@ -113,6 +116,7 @@ class _Document:
     version: str | None = None
     root_started: bool = False
     root_finished: bool = False
+    runs_seen: bool = False
     current_run_index: int = -1
     current_run: _Run | None = None
     current_result: _Result | None = None
@@ -230,7 +234,7 @@ def _stream_document(path: Path, normalization: _Normalization) -> tuple[_Docume
     parse_error: str | None = None
     try:
         with path.open("rb") as stream:
-            for prefix, event, value in ijson.parse(stream):
+            for prefix, event, value in parse_json_events(stream):
                 if _consume_document_event(document, normalization, prefix, event, value):
                     continue
                 if document.current_result is not None:
@@ -244,6 +248,8 @@ def _stream_document(path: Path, normalization: _Normalization) -> tuple[_Docume
                         else:
                             normalization.add(document.current_result, run)
                         document.current_result = None
+            if not document.runs_seen:
+                raise ValueError("SARIF runs array is missing")
     except (IncompleteJSONError, JSONError, OSError, ValueError) as error:
         parse_error = str(error) or type(error).__name__
     _finish_run(document, normalization)
@@ -253,36 +259,47 @@ def _stream_document(path: Path, normalization: _Normalization) -> tuple[_Docume
 def _consume_document_event(
     document: _Document,
     normalization: _Normalization,
-    prefix: str,
+    prefix: JsonLocation,
     event: str,
     value: object,
 ) -> bool:
-    if prefix == "" and event == "start_map":
+    if prefix == () and event == "start_map":
         document.root_started = True
         return True
-    if prefix == "" and event == "end_map":
+    if prefix == () and event == "end_map":
         document.root_finished = True
         return True
-    if prefix == "version":
+    if prefix in {("runs",), ("runs", None, "results")}:
+        if event not in {"start_array", "end_array"}:
+            raise ValueError("SARIF runs and results must be arrays")
+        if prefix == ("runs",) and event == "start_array":
+            document.runs_seen = True
+    if prefix in {("runs", None), _RESULT_PREFIX} and event not in {
+        "start_map",
+        "end_map",
+        "map_key",
+    }:
+        raise ValueError("SARIF run and result entries must be objects")
+    if prefix == ("version",):
         document.version = value if event == "string" and isinstance(value, str) else None
         return True
-    if prefix == "runs.item" and event == "start_map":
+    if prefix == ("runs", None) and event == "start_map":
         document.current_run_index += 1
         document.current_run = _Run()
         return True
-    if prefix == "runs.item" and event == "end_map":
+    if prefix == ("runs", None) and event == "end_map":
         _finish_run(document, normalization)
         return True
-    if prefix == "runs.item.tool.driver.name":
+    if prefix == ("runs", None, "tool", "driver", "name"):
         run = document.current_run
         _set_run_text(run, "name", event, value)
         if run is not None and run.name is not None:
             normalization.flush(run)
         return True
-    if prefix == "runs.item.tool.driver.version":
+    if prefix == ("runs", None, "tool", "driver", "version"):
         _set_run_text(document.current_run, "version", event, value)
         return True
-    if prefix == "runs.item.invocations.item.exitCode":
+    if prefix == ("runs", None, "invocations", None, "exitCode"):
         exit_code = _integer(value) if event == "number" else None
         if exit_code is not None and exit_code >= 0 and document.current_run is not None:
             if exit_code in document.exit_codes:
@@ -293,11 +310,13 @@ def _consume_document_event(
                 document.multiple_exit_statuses = True
         return True
     if prefix == _RESULT_PREFIX and event == "start_map":
+        assert document.current_run is not None
         document.result_count += 1
         document.current_result = _Result(
             run_index=document.current_run_index,
-            result_index=document.result_count - 1,
+            result_index=document.current_run.result_count,
         )
+        document.current_run.result_count += 1
         return True
     return False
 
@@ -404,7 +423,7 @@ def _set_run_text(
             run.analyzer_field_truncated = True
 
 
-def _consume_result_event(result: _Result, prefix: str, event: str, value: object) -> None:
+def _consume_result_event(result: _Result, prefix: JsonLocation, event: str, value: object) -> None:
     if prefix == _LOCATION_PREFIX:
         if event == "start_map":
             result.current_location_index = result.location_count
@@ -414,18 +433,21 @@ def _consume_result_event(result: _Result, prefix: str, event: str, value: objec
         return
     if prefix == _RESULT_PREFIX and event == "end_map":
         return
-    if prefix == f"{_RESULT_PREFIX}.ruleId":
+    if prefix == (*_RESULT_PREFIX, "ruleId"):
         result.rule_id = _result_text(result, "rule ID", event, value, _MAX_IDENTIFIER_LENGTH)
-    elif prefix == f"{_RESULT_PREFIX}.level":
+    elif prefix == (*_RESULT_PREFIX, "level"):
         result.level = _result_text(result, "level", event, value, _MAX_IDENTIFIER_LENGTH)
-    elif prefix == f"{_RESULT_PREFIX}.message.text":
+    elif prefix == (*_RESULT_PREFIX, "message", "text"):
         result.message_text = _result_text(result, "message", event, value, _MAX_MESSAGE_LENGTH)
-    elif prefix == f"{_RESULT_PREFIX}.message.markdown":
+    elif prefix == (*_RESULT_PREFIX, "message", "markdown"):
         result.message_markdown = _result_text(result, "message", event, value, _MAX_MESSAGE_LENGTH)
-    elif prefix == f"{_RESULT_PREFIX}.guid":
+    elif prefix == (*_RESULT_PREFIX, "guid"):
         result.guid = _result_text(result, "guid", event, value, _MAX_IDENTIFIER_LENGTH)
-    elif prefix.startswith(f"{_RESULT_PREFIX}.partialFingerprints.") or prefix.startswith(
-        f"{_RESULT_PREFIX}.fingerprints."
+    elif (
+        len(prefix) == len(_RESULT_PREFIX) + 2
+        and prefix[:-2] == _RESULT_PREFIX
+        and prefix[-2] in {"partialFingerprints", "fingerprints"}
+        and isinstance(prefix[-1], str)
     ):
         fingerprint = _result_text(
             result,
@@ -435,14 +457,15 @@ def _consume_result_event(result: _Result, prefix: str, event: str, value: objec
             _MAX_IDENTIFIER_LENGTH,
         )
         if fingerprint is not None:
-            name = prefix.rsplit(".", maxsplit=1)[-1]
+            name = prefix[-1]
+            assert isinstance(name, str)
             if len(name) <= _MAX_IDENTIFIER_LENGTH and (
                 result.fingerprint_name is None
                 or (name, fingerprint) < (result.fingerprint_name, result.fingerprint_value or "")
             ):
                 result.fingerprint_name = name
                 result.fingerprint_value = fingerprint
-    elif prefix == f"{_RESULT_PREFIX}.properties.confidence":
+    elif prefix == (*_RESULT_PREFIX, "properties", "confidence"):
         confidence = _confidence(value) if event == "number" else None
         if confidence is not None:
             result.confidence = confidence
@@ -452,10 +475,12 @@ def _consume_result_event(result: _Result, prefix: str, event: str, value: objec
         _consume_first_location_event(result, prefix, event, value)
 
 
-def _consume_first_location_event(result: _Result, prefix: str, event: str, value: object) -> None:
-    if prefix == f"{_LOCATION_PREFIX}.physicalLocation.artifactLocation.uri":
+def _consume_first_location_event(
+    result: _Result, prefix: JsonLocation, event: str, value: object
+) -> None:
+    if prefix == (*_LOCATION_PREFIX, "physicalLocation", "artifactLocation", "uri"):
         result.uri = _result_text(result, "artifact URI", event, value, _MAX_MESSAGE_LENGTH)
-    elif prefix == f"{_LOCATION_PREFIX}.physicalLocation.artifactLocation.uriBaseId":
+    elif prefix == (*_LOCATION_PREFIX, "physicalLocation", "artifactLocation", "uriBaseId"):
         result.uri_base_id = _result_text(
             result,
             "artifact URI base",
@@ -463,13 +488,13 @@ def _consume_first_location_event(result: _Result, prefix: str, event: str, valu
             value,
             _MAX_IDENTIFIER_LENGTH,
         )
-    elif prefix == f"{_LOCATION_PREFIX}.physicalLocation.region.startLine":
+    elif prefix == (*_LOCATION_PREFIX, "physicalLocation", "region", "startLine"):
         result.start_line = _position(result, "start line", event, value)
-    elif prefix == f"{_LOCATION_PREFIX}.physicalLocation.region.startColumn":
+    elif prefix == (*_LOCATION_PREFIX, "physicalLocation", "region", "startColumn"):
         result.start_column = _position(result, "start column", event, value)
-    elif prefix == f"{_LOCATION_PREFIX}.physicalLocation.region.endLine":
+    elif prefix == (*_LOCATION_PREFIX, "physicalLocation", "region", "endLine"):
         result.end_line = _position(result, "end line", event, value)
-    elif prefix == f"{_LOCATION_PREFIX}.physicalLocation.region.endColumn":
+    elif prefix == (*_LOCATION_PREFIX, "physicalLocation", "region", "endColumn"):
         result.end_column = _position(result, "end column", event, value)
 
 
@@ -502,8 +527,10 @@ def _integer(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, Decimal) and value == value.to_integral_value():
-        return int(value)
+    if isinstance(value, Decimal) and value.is_finite():
+        digit_limit = sys.get_int_max_str_digits() or sys.int_info.default_max_str_digits
+        if value.adjusted() < digit_limit and value == value.to_integral_value():
+            return int(value)
     return None
 
 
@@ -582,6 +609,8 @@ def _relative_source_path(
         relative = resolved.relative_to(source_root)
     except ValueError:
         return None, "the result URI is outside the declared source root"
+    except (OSError, RuntimeError):
+        return None, "the result URI cannot be resolved"
     return relative.as_posix(), ""
 
 

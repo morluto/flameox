@@ -395,3 +395,121 @@ def test_v8_hotspot_projection_bounds_distinct_aggregated_frames(tmp_path: Path)
         "complete": False,
     }
     assert result["blocks"][1]["rows"][0]["self_value"] == 1
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("children", [[42], [[]], [None], {}, False])
+def test_v8_heap_rejects_malformed_child_nodes(tmp_path: Path, children: object) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "id": 1,
+                    "selfSize": 12,
+                    "callFrame": {"functionName": "work", "url": "work.js"},
+                    "children": children,
+                },
+                "samples": [],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+def test_v8_heap_ignores_unrelated_nested_measurement_fields(tmp_path: Path) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "id": 1,
+                    "selfSize": 12,
+                    "callFrame": {"functionName": "work", "url": "work.js"},
+                    "children": [],
+                    "extra": {"id": 99, "selfSize": 999, "children": []},
+                },
+                "samples": [{"size": 12, "nodeId": 1, "extra": {"size": 999, "nodeId": 2}}],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        assert result["blocks"][0]["values"]["total_sampled_bytes"] == 12
+        row = result["blocks"][1]["rows"][0]
+        assert row["sample_count"] == 1
+        assert row["self_value"] == 12
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+@pytest.mark.parametrize("extra", ['"samples.item": 1', '"extra": {"id": 1, "id": 2}'])
+def test_v8_validates_literal_native_object_fields(
+    tmp_path: Path, profile_kind: str, extra: str
+) -> None:
+    if profile_kind == "cpu":
+        payload: dict[str, object] = {
+            "nodes": [{"id": 1, "callFrame": {"functionName": "work"}}],
+            "samples": [],
+        }
+        capability, format_name = "cpu.hotspots", "cpuprofile"
+    else:
+        payload = {
+            "head": {
+                "id": 1,
+                "selfSize": 12,
+                "callFrame": {"functionName": "work"},
+                "children": [],
+            },
+            "samples": [],
+        }
+        capability, format_name = "memory.hotspots", "heapprofile"
+    artifact = tmp_path / f"native.{format_name}"
+    artifact.write_text(json.dumps(payload)[:-1] + "," + extra + "}")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        if "samples.item" in extra:
+            result = runtime.analyze(capability, [PathSource(path=str(artifact))], {})
+            assert result["blocks"][0]["values"]["sample_count"] == 0
+        else:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(capability, [PathSource(path=str(artifact))], {})
+            assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("coordinate", [False, True, {}, [], None, "1", 1.5])
+def test_v8_heap_rejects_supplied_invalid_coordinates(tmp_path: Path, coordinate: object) -> None:
+    profile = tmp_path / "memory.heapprofile"
+    profile.write_text(
+        json.dumps(
+            {
+                "head": {
+                    "id": 1,
+                    "selfSize": 1,
+                    "callFrame": {"functionName": "work", "lineNumber": coordinate},
+                    "children": [],
+                },
+                "samples": [],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("memory.hotspots", [PathSource(path=str(profile))], {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()

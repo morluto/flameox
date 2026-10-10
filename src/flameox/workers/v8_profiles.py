@@ -5,6 +5,7 @@ from typing import Any, NoReturn, cast
 
 import ijson
 
+from flameox.adapters.json_events import json_items, parse_json_events
 from flameox.canonical import digest_model
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.protocol import WorkerApplication, WorkerFailureKind, run_typed_worker
@@ -21,7 +22,7 @@ def _parse_cpu(request: V8ProfileRequest) -> V8ProfileResult:
         Path(request.artifact_path), {"nodes": "start_array", "samples": "start_array"}
     )
     with Path(request.artifact_path).open("rb") as stream:
-        for node in ijson.items(stream, "nodes.item"):
+        for node in json_items(stream, ("nodes", None)):
             if len(nodes) >= request.max_nodes:
                 _limit("V8 CPU profile node limit exceeded.")
             if not isinstance(node, dict):
@@ -51,7 +52,7 @@ def _parse_cpu(request: V8ProfileRequest) -> V8ProfileResult:
 def _count_cpu_samples(path: Path, limit: int, *, nodes: dict[int, dict[str, Any]]) -> int:
     count = 0
     with path.open("rb") as stream:
-        for sample in ijson.items(stream, "samples.item"):
+        for sample in json_items(stream, ("samples", None)):
             if count >= limit:
                 _limit("V8 CPU profile sample limit exceeded.")
             sample_id = _strict_int(sample, "sample node id")
@@ -157,13 +158,16 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
     node_stack: list[dict[str, Any]] = []
     sample: dict[str, Any] | None = None
     with path.open("rb") as stream:
-        for prefix, event, value in ijson.parse(stream):
-            if event == "start_map" and (prefix == "head" or prefix.endswith(".children.item")):
+        for prefix, event, value in parse_json_events(stream):
+            child_prefix = node_stack[-1]["prefix"] + ("children", None) if node_stack else None
+            if prefix == child_prefix and event not in {"start_map", "end_map", "map_key"}:
+                _malformed("V8 heap profile child must be a node object.")
+            if event == "start_map" and (prefix == ("head",) or prefix == child_prefix):
                 if node_count + len(node_stack) >= request.max_nodes:
                     _limit("V8 heap profile node limit exceeded.")
                 node_stack.append(
                     {
-                        "call_frame": None,
+                        "prefix": prefix,
                         "id": None,
                         "self_size": None,
                         "children": False,
@@ -171,37 +175,45 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                     }
                 )
                 continue
-            if event == "start_map" and prefix == "samples.item":
+            if event == "start_map" and prefix == ("samples", None):
                 sample = {}
                 continue
-            if prefix == "samples.item" and event not in {"start_map", "end_map", "map_key"}:
+            if prefix == ("samples", None) and event not in {"start_map", "end_map", "map_key"}:
                 _malformed("V8 heap sample must be an object.")
             if node_stack:
                 current = node_stack[-1]
-                if event == "start_array" and prefix.endswith(".children"):
-                    current["children"] = True
-                elif event in {"string", "number", "null"}:
-                    if prefix.endswith(".selfSize"):
+                if prefix == current["prefix"] + ("children",):
+                    if event == "start_array":
+                        current["children"] = True
+                    elif event != "end_array":
+                        _malformed("V8 heap profile node children must be an array.")
+                elif prefix in {
+                    current["prefix"] + ("callFrame", "lineNumber"),
+                    current["prefix"] + ("callFrame", "columnNumber"),
+                } and event in {"start_map", "start_array"}:
+                    _malformed("V8 heap frame coordinates must be integers.")
+                elif event in {"string", "number", "null", "boolean"}:
+                    if prefix == current["prefix"] + ("selfSize",):
                         current["self_size"] = value
-                    elif prefix.endswith(".id"):
+                    elif prefix == current["prefix"] + ("id",):
                         current["id"] = value
-                    elif prefix.endswith(".callFrame.functionName"):
+                    elif prefix == current["prefix"] + ("callFrame", "functionName"):
                         current.setdefault("call_frame_values", {})["functionName"] = value
-                    elif prefix.endswith(".callFrame.url"):
+                    elif prefix == current["prefix"] + ("callFrame", "url"):
                         current.setdefault("call_frame_values", {})["url"] = value
-                    elif prefix.endswith(".callFrame.lineNumber"):
+                    elif prefix == current["prefix"] + ("callFrame", "lineNumber"):
                         current.setdefault("call_frame_values", {})["lineNumber"] = value
-                    elif prefix.endswith(".callFrame.columnNumber"):
+                    elif prefix == current["prefix"] + ("callFrame", "columnNumber"):
                         current.setdefault("call_frame_values", {})["columnNumber"] = value
-                    elif prefix.endswith(".callFrame.scriptId"):
+                    elif prefix == current["prefix"] + ("callFrame", "scriptId"):
                         current.setdefault("call_frame_values", {})["scriptId"] = value
             if (
                 sample is not None
                 and event in {"string", "number", "null"}
-                and prefix.endswith((".size", ".nodeId"))
+                and prefix in {("samples", None, "size"), ("samples", None, "nodeId")}
             ):
-                sample[prefix.rsplit(".", 1)[-1]] = value
-            if event == "end_map" and prefix == "samples.item":
+                sample[str(prefix[-1])] = value
+            if event == "end_map" and prefix == ("samples", None):
                 if sample is None:
                     _malformed("V8 heap sample is malformed.")
                 if sample_count >= request.max_samples:
@@ -216,11 +228,7 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
                 sample_count += 1
                 sample = None
                 continue
-            if (
-                event == "end_map"
-                and node_stack
-                and (prefix == "head" or prefix.endswith(".children.item"))
-            ):
+            if event == "end_map" and node_stack and prefix == node_stack[-1]["prefix"]:
                 current = node_stack.pop()
                 call_frame = current.get("call_frame_values")
                 if not isinstance(call_frame, dict) or not current["children"]:
@@ -295,6 +303,7 @@ def _validate_profile_root(path: Path, required: dict[str, str]) -> None:
     keys: set[str] = set()
     depth = 0
     pending: str | None = None
+    objects: list[set[str] | None] = []
     with path.open("rb") as stream:
         for event, value in ijson.basic_parse(stream):
             if depth == 0 and event != "start_map":
@@ -303,15 +312,22 @@ def _validate_profile_root(path: Path, required: dict[str, str]) -> None:
                 if pending in required and event != required[pending]:
                     _malformed(f"V8 profile field {pending!r} has an invalid container type.")
                 pending = None
+            if event == "map_key":
+                key = str(value)
+                current_keys = objects[-1]
+                assert current_keys is not None
+                if key in current_keys:
+                    _malformed("V8 profile contains duplicate object fields.")
+                current_keys.add(key)
             if depth == 1 and event == "map_key":
                 key = str(value)
-                if key in keys:
-                    _malformed(f"V8 profile repeats top-level field {key!r}.")
                 keys.add(key)
                 pending = key
             if event in {"start_map", "start_array"}:
+                objects.append(set() if event == "start_map" else None)
                 depth += 1
             elif event in {"end_map", "end_array"}:
+                objects.pop()
                 depth -= 1
     if not required.keys() <= keys:
         _malformed(f"V8 profile must contain {', '.join(required)}.")
