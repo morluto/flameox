@@ -86,7 +86,16 @@ async def test_broker_rejects_an_executable_changed_after_binding(tmp_path: Path
 
 @pytest.mark.skipif(os.name != "posix", reason="FIFOs require POSIX")
 @pytest.mark.parametrize(
-    "boundary", ["filesystem", "executable", "repository", "manifest", "artifact_metadata"]
+    "boundary",
+    [
+        "filesystem",
+        "executable",
+        "repository",
+        "manifest",
+        "artifact_metadata",
+        "native_copy",
+        "native_hash",
+    ],
 )
 def test_special_files_are_rejected_without_blocking(tmp_path: Path, boundary: str) -> None:
     script = """
@@ -98,8 +107,14 @@ from flameox.filesystem import BoundedFileSystem
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import PathSource, RuntimeFailure
+from flameox.source_files import NativeSource, copy_verified_file, sha256_file
 root = Path(sys.argv[1])
 path = root / 'native'
+if sys.argv[2] in {'native_copy', 'native_hash'}:
+    path.write_bytes(b'admitted')
+    digest, size = sha256_file(path)
+    source = NativeSource(path, digest, size, 'text', None, 'input')
+    path.unlink()
 repository_boundary = sys.argv[2] in {'repository', 'manifest', 'artifact_metadata'}
 if repository_boundary:
     path.write_text('native evidence')
@@ -127,11 +142,16 @@ try:
         runtime.read_evidence(evidence_id)
     elif sys.argv[2] == 'filesystem':
         BoundedFileSystem((root,)).read_bytes(path, max_bytes=1024)
+    elif sys.argv[2] == 'native_copy':
+        copy_verified_file(source, root / 'copy')
+    elif sys.argv[2] == 'native_hash':
+        sha256_file(path)
     else:
         resolver.revalidate(binding)
 except (DomainError, RuntimeFailure) as error:
     expected = ('REPOSITORY_CORRUPTION' if repository_boundary
                 else 'EXECUTION_FAILURE' if sys.argv[2] == 'filesystem'
+                else 'INVALID_INPUT' if sys.argv[2] == 'native_hash'
                 else 'MISSING_OR_CHANGED_INPUT')
     assert error.code == expected
 else:

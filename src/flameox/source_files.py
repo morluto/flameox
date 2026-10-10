@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from flameox.filesystem import BoundedFileSystem
 from flameox.runtime_contracts import RuntimeFailure
+from flameox.runtime_errors import DomainError, ErrorCode
 
 
 @dataclass(slots=True)
@@ -39,20 +42,24 @@ def bundle_digest(members: Iterable[tuple[str, str]]) -> str:
 
 
 def sha256_file(path: Path, *, max_bytes: int | None = None) -> tuple[str, int]:
-    if not path.is_file():
-        raise RuntimeFailure("INVALID_INPUT", "Source must be a regular file")
-    if max_bytes is not None and path.stat().st_size > max_bytes:
-        raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_bytes")
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as stream:
-        while chunk := stream.read(
-            1024 * 1024 if max_bytes is None else min(1024 * 1024, max_bytes - size + 1)
+    try:
+        with (
+            BoundedFileSystem((path.parent,)).open_regular(path, max_bytes=max_bytes) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as stream,
         ):
-            size += len(chunk)
-            if max_bytes is not None and size > max_bytes:
-                raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_bytes")
-            digest.update(chunk)
+            while chunk := stream.read(
+                1024 * 1024 if max_bytes is None else min(1024 * 1024, max_bytes - size + 1)
+            ):
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_bytes")
+                digest.update(chunk)
+    except DomainError as error:
+        if error.code is ErrorCode.LIMIT_EXCEEDED:
+            raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_bytes") from error
+        raise RuntimeFailure("INVALID_INPUT", "Source must be a regular file") from error
     return digest.hexdigest(), size
 
 
@@ -60,16 +67,25 @@ def copy_verified_file(source: NativeSource, target: Path) -> None:
     """Copy no more than the admitted bytes, rejecting changed native inputs."""
     digest = hashlib.sha256()
     remaining = source.size_bytes
-    with source.path.open("rb") as reader, target.open("xb") as writer:
-        while remaining:
-            chunk = reader.read(min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            writer.write(chunk)
-            digest.update(chunk)
-            remaining -= len(chunk)
-        if remaining or reader.read(1) or digest.hexdigest() != source.sha256:
-            raise RuntimeFailure("MISSING_OR_CHANGED_INPUT", "Input changed during copying")
+    try:
+        with (
+            BoundedFileSystem((source.path.parent,)).open_regular(
+                source.path, max_bytes=source.size_bytes
+            ) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as reader,
+            target.open("xb") as writer,
+        ):
+            while remaining:
+                chunk = reader.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                writer.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if remaining or reader.read(1) or digest.hexdigest() != source.sha256:
+                raise RuntimeFailure("MISSING_OR_CHANGED_INPUT", "Input changed during copying")
+    except DomainError as error:
+        raise RuntimeFailure("MISSING_OR_CHANGED_INPUT", "Input changed before copying") from error
 
 
 def directory_files(path: Path, *, max_files: int | None = None) -> list[Path]:
