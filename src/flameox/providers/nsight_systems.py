@@ -86,6 +86,7 @@ class NsightSystemsParquetProvider:
                 for batch in parquet.iter_batches(batch_size=min(256, max_rows - len(rows))):
                     for value in batch.to_pylist():
                         normalized = json.loads(json.dumps(value, default=str))
+                        normalized = {"value": normalized} if "table" in normalized else normalized
                         rows.append({"table": file.stem, **normalized})
                         if len(rows) >= max_rows:
                             break

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,6 @@ class OtlpRowLimitExceeded(Exception):
 
 def parse_otlp(
     path: Path,
-    media_type: str,
     *,
     row_limit: int,
     start_ns: int | None = None,
@@ -46,25 +46,20 @@ def parse_otlp(
             "OTLP extraction requires the optional trace provider packages.",
         ) from error
     request = ExportTraceServiceRequest()
-    normalized = media_type.split(";", 1)[0].strip().lower()
-    if normalized in {"application/x-protobuf", "application/protobuf"}:
-        try:
-            request.ParseFromString(payload)
-        except Exception as error:
-            raise DomainError(ErrorCode.DECODE_FAILURE, "Malformed OTLP protobuf.") from error
-    elif normalized == "application/json":
+    if payload.lstrip().startswith(b"{"):
         try:
             json_format.Parse(payload.decode("utf-8"), request, ignore_unknown_fields=False)
-        except Exception as error:
-            raise DomainError(
-                ErrorCode.DECODE_FAILURE,
-                "Malformed OTLP protobuf JSON or unknown field.",
-            ) from error
-    else:
+        except Exception:
+            # Protobuf tag/length bytes can resemble whitespace followed by a JSON object.
+            request.Clear()
+        else:
+            return _normalize(request, row_limit=row_limit, start_ns=start_ns, end_ns=end_ns)
+    try:
+        request.ParseFromString(payload)
+    except Exception as error:
         raise DomainError(
-            ErrorCode.DECODE_FAILURE,
-            "OTLP requires an explicit protobuf or JSON media type.",
-        )
+            ErrorCode.DECODE_FAILURE, "Malformed OTLP protobuf or protobuf JSON."
+        ) from error
     return _normalize(request, row_limit=row_limit, start_ns=start_ns, end_ns=end_ns)
 
 
@@ -245,7 +240,11 @@ def _any_value(value: Any) -> Any:
     if kind == "int_value":
         return value.int_value
     if kind == "double_value":
-        return value.double_value
+        number = value.double_value
+        if math.isfinite(number):
+            return number
+        label = "NaN" if math.isnan(number) else "Infinity" if number > 0 else "-Infinity"
+        return {"type": "double", "value": label}
     if kind == "bytes_value":
         return {"type": "bytes", "base64": base64.b64encode(value.bytes_value).decode("ascii")}
     if kind == "array_value":

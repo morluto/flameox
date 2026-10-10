@@ -14,12 +14,18 @@ from flameox.runtime_contracts import (
 )
 
 
-def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: Path) -> None:
+@pytest.mark.parametrize("collision", [False, True])
+def test_nsight_systems_projects_native_uint64_identifiers_losslessly(
+    tmp_path: Path, collision: bool
+) -> None:
     parquetdir = tmp_path / "report.parquetdir"
     parquetdir.mkdir()
     native_id = 18_302_628_885_633_695_744
     pq.write_table(
-        pa.table({"correlationId": pa.array([native_id], type=pa.uint64())}),
+        pa.table(
+            {"correlationId": pa.array([native_id], type=pa.uint64())}
+            | ({"table": ["native-table-value"]} if collision else {})
+        ),
         parquetdir / "CUDA_GPU_KERN_SUM.parquet",
     )
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -33,7 +39,12 @@ def test_nsight_systems_projects_native_uint64_identifiers_losslessly(tmp_path: 
     finally:
         runtime.close()
 
-    assert result["blocks"][1]["rows"][0]["correlationId"] == str(native_id)
+    row = result["blocks"][1]["rows"][0]
+    assert row["table"] == "CUDA_GPU_KERN_SUM"
+    native_row = row["value"] if collision else row
+    assert native_row["correlationId"] == str(native_id)
+    if collision:
+        assert native_row["table"] == "native-table-value"
     assert preserved["evidence_id"]
 
 

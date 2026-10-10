@@ -12,7 +12,6 @@ type OtlpRow = dict[str, JsonValue]
 
 class OtlpWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
-    media_type: str = Field(min_length=1, max_length=200)
     row_limit: Annotated[int, Field(gt=0, le=100_000_000)]
     start_ns: Annotated[int, Field(ge=0)] | None = None
     end_ns: Annotated[int, Field(gt=0)] | None = None

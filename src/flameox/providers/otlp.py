@@ -27,16 +27,12 @@ class OtlpProvider:
         maximum_rss_bytes: int,
         maximum_output_bytes: int,
     ) -> ProviderAnalysis:
-        media_type = (
-            "application/json" if path.suffix.casefold() == ".json" else "application/x-protobuf"
-        )
         start_ns = arguments.get("start_ns") if capability_id == "trace.window" else None
         end_ns = arguments.get("end_ns") if capability_id == "trace.window" else None
         response = self.harness.run_typed_sync(
             OTLP_WORKER,
             OtlpWorkerRequest(
                 artifact_path=str(path),
-                media_type=media_type,
                 row_limit=max_rows,
                 start_ns=start_ns,
                 end_ns=end_ns,

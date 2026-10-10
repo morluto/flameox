@@ -18,7 +18,6 @@ def _handle(request: OtlpWorkerRequest, _job_root: Path) -> OtlpWorkerResult:
     try:
         parsed = parse_otlp(
             Path(request.artifact_path),
-            request.media_type,
             row_limit=request.row_limit,
             start_ns=request.start_ns,
             end_ns=request.end_ns,
