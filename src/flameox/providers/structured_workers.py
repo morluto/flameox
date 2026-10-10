@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flameox.providers.contracts import ProviderAnalysis
 from flameox.runtime_contracts import PstatsMetric
@@ -87,11 +87,15 @@ class StructuredWorkerProviders:
                 complete=not pstats_result.truncated,
                 limitations=list(pstats_result.limitations),
             )
-        if capability_id == "cpu.hotspots" and format_name == "cpuprofile":
+        if (capability_id, format_name) in {
+            ("cpu.hotspots", "cpuprofile"),
+            ("memory.hotspots", "heapprofile"),
+        }:
+            profile_kind: Literal["cpu", "heap"] = "cpu" if format_name == "cpuprofile" else "heap"
             result = self.harness.run_typed_sync(
                 V8_PROFILE_WORKER,
                 V8ProfileRequest(
-                    profile_kind="cpu",
+                    profile_kind=profile_kind,
                     artifact_path=str(path),
                     artifact_id=input_sha256,
                     max_nodes=_V8_MAX_NODES,
@@ -104,60 +108,25 @@ class StructuredWorkerProviders:
             )
             frames = {str(frame["frame_id"]): frame for frame in result.frames}
             rows = [{**frames[str(row["frame_id"])], **row} for row in result.frame_measurements]
-            return ProviderAnalysis(
-                provider_id="v8-cpu-profile",
-                provider_version=V8_PROFILE_WORKER.implementation,
-                blocks=[
-                    {
-                        "type": "metrics",
-                        "values": {
-                            "node_count": result.node_count,
-                            "sample_count": result.sample_count,
-                        },
-                    },
-                    {"type": "table", "rows": rows},
-                ],
-                rows_observed=result.frame_count,
-                complete=not result.truncated,
-                limitations=list(result.limitations),
-            )
-        if capability_id == "memory.hotspots" and format_name == "heapprofile":
-            result = self.harness.run_typed_sync(
-                V8_PROFILE_WORKER,
-                V8ProfileRequest(
-                    profile_kind="heap",
-                    artifact_path=str(path),
-                    artifact_id=input_sha256,
-                    max_nodes=_V8_MAX_NODES,
-                    max_samples=_V8_MAX_SAMPLES,
-                    max_rows=max_rows,
-                ),
-                timeout_seconds=timeout_seconds,
-                maximum_rss_bytes=maximum_rss_bytes,
-                maximum_writable_growth_bytes=maximum_output_bytes,
-            )
-            frames = {str(frame["frame_id"]): frame for frame in result.frames}
-            rows = [{**frames[str(row["frame_id"])], **row} for row in result.frame_measurements]
-            heap_metrics: dict[str, object] = {
+            profile_metrics: dict[str, object] = {
                 "node_count": result.node_count,
                 "sample_count": result.sample_count,
-                "total_sampled_bytes": result.total_sampled_bytes,
             }
-            if result.unresolved_sample_count:
-                heap_metrics["unresolved_sample_count"] = result.unresolved_sample_count
-                heap_metrics["unresolved_sampled_bytes"] = result.unresolved_sampled_bytes
+            if profile_kind == "heap":
+                profile_metrics["total_sampled_bytes"] = result.total_sampled_bytes
+                if result.unresolved_sample_count:
+                    profile_metrics["unresolved_sample_count"] = result.unresolved_sample_count
+                    profile_metrics["unresolved_sampled_bytes"] = result.unresolved_sampled_bytes
             return ProviderAnalysis(
-                provider_id="v8-heap-profile",
+                provider_id=f"v8-{profile_kind}-profile",
                 provider_version=V8_PROFILE_WORKER.implementation,
                 blocks=[
-                    {
-                        "type": "metrics",
-                        "values": heap_metrics,
-                    },
+                    {"type": "metrics", "values": profile_metrics},
                     {"type": "table", "rows": rows},
                 ],
                 rows_observed=result.frame_count,
-                complete=not result.truncated and result.unresolved_sample_count == 0,
+                complete=not result.truncated
+                and (profile_kind == "cpu" or result.unresolved_sample_count == 0),
                 limitations=list(result.limitations),
             )
         if capability_id == "sanitizer.failures" and format_name == "compute-sanitizer":
