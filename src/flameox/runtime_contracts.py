@@ -131,12 +131,10 @@ class EvidenceSource(StrictModel):
         return self
 
 
-def _normalize_source_kind(value: Any) -> Any:
-    """Inject the advertised default ``kind`` when a source omits the discriminator.
+def normalize_source_kind(value: Any) -> Any:
+    """Select the source kind from its identity when the discriminator is omitted.
 
-    ``PathSource.kind`` defaults to ``"path"`` in the public schema, so a request that
-    omits ``kind`` is admitted by the contract and must select the path member. An
-    explicit ``kind`` is left untouched, so unknown values keep failing validation.
+    An explicit ``kind`` is left untouched, so unknown values keep failing validation.
     """
     if isinstance(value, Mapping) and "kind" not in value:
         value = dict(value)
@@ -147,7 +145,7 @@ def _normalize_source_kind(value: Any) -> Any:
 Source = Annotated[
     PathSource | EvidenceSource,
     Field(discriminator="kind"),
-    BeforeValidator(_normalize_source_kind),
+    BeforeValidator(normalize_source_kind),
 ]
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
 from types import GenericAlias
 from typing import Annotated, Any, Literal, cast
@@ -32,6 +31,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     StrictModel,
     compatible_capture_providers,
+    normalize_source_kind,
 )
 
 PREPARABLE_PROVIDER_IDS = tuple(sorted(MANAGED_PROVIDER_EXTRAS | SYSTEM_PROVIDER_GUIDANCE))
@@ -55,13 +55,6 @@ PreparableProviderId = Annotated[
 ]
 
 
-def _normalize_mcp_source_kind(value: Any) -> Any:
-    if isinstance(value, Mapping) and "kind" not in value:
-        value = dict(value)
-        value["kind"] = "evidence" if "evidence_id" in value else "path"
-    return value
-
-
 class McpEvidenceSource(EvidenceSource):
     kind: Literal["evidence"] = "evidence"
 
@@ -69,7 +62,7 @@ class McpEvidenceSource(EvidenceSource):
 McpSource = Annotated[
     PathSource | McpEvidenceSource,
     Field(discriminator="kind"),
-    BeforeValidator(_normalize_mcp_source_kind),
+    BeforeValidator(normalize_source_kind),
 ]
 
 
@@ -137,7 +130,7 @@ def analysis_arguments(capability: Capability) -> type[AnalysisArguments]:
     source_type = cast(Any, Annotated)[
         path_model | McpEvidenceSource,
         Field(discriminator="kind"),
-        BeforeValidator(_normalize_mcp_source_kind),
+        BeforeValidator(normalize_source_kind),
     ]
     model = create_model(
         _model_name(capability.id, "Analysis"),
