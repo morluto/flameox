@@ -200,9 +200,14 @@ def capture_example(capability: Capability) -> dict[str, Any]:
     provider = compatible_capture_providers(capability)[0]
     executable = "node" if provider.id.startswith("node-") else "python"
     workload = "workload.js" if executable == "node" else "workload.py"
+    argv = (
+        [executable, "-m", "pytest", "test_workload.py"]
+        if provider.id == "pytest"
+        else [executable, workload]
+    )
     return {
         **option_example(capability),
-        "target": {"argv": [executable, workload], "cwd": "/absolute/workdir"},
+        "target": {"argv": argv, "cwd": "/absolute/workdir"},
         "provider": {"kind": provider.id},
     }
 

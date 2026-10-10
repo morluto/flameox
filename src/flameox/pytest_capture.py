@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import itertools
 import json
@@ -48,10 +49,18 @@ def _text(value: object) -> str:
     return str(value)[:_MAX_TEXT]
 
 
+def _identity(value: object) -> str:
+    text = str(value)
+    if len(text) <= _MAX_TEXT:
+        return text
+    suffix = f"...[sha256:{hashlib.sha256(text.encode()).hexdigest()}]"
+    return text[: _MAX_TEXT - len(suffix)] + suffix
+
+
 def _worker_id(config: Any) -> str:
     worker_input = getattr(config, "workerinput", None)
     if isinstance(worker_input, dict) and isinstance(worker_input.get("workerid"), str):
-        return _text(worker_input["workerid"])
+        return _identity(worker_input["workerid"])
     return "main"
 
 
@@ -59,9 +68,9 @@ def _worker_id(config: Any) -> str:
 def pytest_fixture_setup(fixturedef: Any, request: Any) -> Any:
     worker_id = _worker_id(request.config)
     invocation_id = f"{worker_id}:{next(_FIXTURE_INVOCATIONS)}"
-    fixture = _text(fixturedef.argname)
+    fixture = _identity(fixturedef.argname)
     scope = _text(fixturedef.scope)
-    nodeid = _text(getattr(request.node, "nodeid", ""))
+    nodeid = _identity(getattr(request.node, "nodeid", ""))
     teardown_started_ns: int | None = None
 
     def finish_teardown() -> None:
@@ -133,7 +142,13 @@ def pytest_sessionstart(session: object) -> None:
 
 def pytest_collection_modifyitems(items: list[Any]) -> None:
     for item in items:
-        _write({"event": "test_collected", "nodeid": _text(item.nodeid)})
+        _write(
+            {
+                "event": "test_collected",
+                "nodeid": _identity(item.nodeid),
+                "worker_id": _current_worker_id,
+            }
+        )
 
 
 def pytest_collectreport(report: Any) -> None:
@@ -141,7 +156,8 @@ def pytest_collectreport(report: Any) -> None:
         _write(
             {
                 "event": "collection_error",
-                "nodeid": _text(report.nodeid),
+                "nodeid": _identity(report.nodeid),
+                "worker_id": _current_worker_id,
                 "outcome": _text(report.outcome),
             }
         )
@@ -153,7 +169,7 @@ def pytest_runtest_logreport(report: Any) -> None:
     _write(
         {
             "event": "test_phase",
-            "nodeid": _text(report.nodeid),
+            "nodeid": _identity(report.nodeid),
             "phase": _text(report.when),
             "outcome": _text(report.outcome),
             "duration_ns": max(0, round(report.duration * 1_000_000_000)),

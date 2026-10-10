@@ -216,7 +216,9 @@ class ReliabilityProvider:
 
     def _pytest(self, path: Path, *, max_rows: int) -> ProviderAnalysis:
         collected: set[str] = set()
-        phase_events: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(dict)
+        phase_events: dict[tuple[str | None, str], dict[str, list[dict[str, Any]]]] = defaultdict(
+            dict
+        )
         collection_errors: list[dict[str, Any]] = []
         global_failures: list[dict[str, Any]] = []
         finished = False
@@ -231,7 +233,10 @@ class ReliabilityProvider:
                 phase = event.get("phase")
                 outcome = event.get("outcome")
                 if all(isinstance(item, str) for item in (nodeid, phase, outcome)):
-                    reports = phase_events[str(nodeid)]
+                    worker = event.get("worker_id")
+                    reports = phase_events[
+                        (worker if isinstance(worker, str) else None, str(nodeid))
+                    ]
                     reports.setdefault(str(phase), []).append(self._pytest_row(index, event))
             elif event_name == "collection_error" and isinstance(event.get("nodeid"), str):
                 collection_errors.append(
@@ -257,6 +262,7 @@ class ReliabilityProvider:
             nodeid: {phase: str(events[-1]["outcome"]) for phase, events in reports.items()}
             for nodeid, reports in phase_events.items()
         }
+        unexecuted = collected.difference(nodeid for _, nodeid in phases)
         outcomes = {"passed": 0, "failed": 0, "skipped": 0, "errored": 0}
         for final_reports in phases.values():
             outcomes[self._pytest_classification(final_reports)] += 1
@@ -267,7 +273,9 @@ class ReliabilityProvider:
             for events in reports.values()
         )
         outcome_rows = [
-            self._pytest_outcome_row(nodeid, reports) for nodeid, reports in phase_events.items()
+            self._pytest_outcome_row(nodeid, reports)
+            | ({"worker_id": worker} if worker is not None else {})
+            for (worker, nodeid), reports in phase_events.items()
         ]
         flaky = sum(row["classification"] == "flaky" for row in outcome_rows)
         if retried:
@@ -286,7 +294,7 @@ class ReliabilityProvider:
                 "failing_phase": None,
                 "phase_outcomes": {},
             }
-            for nodeid in sorted(collected.difference(phases))
+            for nodeid in sorted(unexecuted)
         )
         priority = {
             "errored": 0,
@@ -300,6 +308,7 @@ class ReliabilityProvider:
             key=lambda row: (
                 priority[str(row["classification"])],
                 str(row.get("nodeid") or ""),
+                str(row.get("worker_id") or ""),
             )
         )
         completion = self._pytest_completion(
@@ -309,7 +318,7 @@ class ReliabilityProvider:
             "completion": completion,
             "collected": len(collected),
             "executed": len(phases),
-            "unexecuted": len(collected.difference(phases)),
+            "unexecuted": len(unexecuted),
             **outcomes,
         }
         if exit_status not in {None, 0}:
@@ -330,6 +339,8 @@ class ReliabilityProvider:
                 "Rows contain failure, error, interruption, and unexecuted identities; passing "
                 "and skipped identities remain summarized in metrics.",
                 "Failure tracebacks remain in the native pytest artifact and are not projected.",
+                "Collection counts logical test IDs; execution counts distinguish workers. "
+                "Unexecuted IDs were not observed on any worker; replica coverage is unknown.",
             ],
         )
 

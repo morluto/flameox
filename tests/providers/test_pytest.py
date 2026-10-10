@@ -9,8 +9,10 @@ from typing import Any
 import anyio
 import pytest
 
+from flameox.mcp.request_contracts import capture_example
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
+    CAPABILITY_BY_ID,
     CaptureTarget,
     PathSource,
     RequestLimits,
@@ -48,6 +50,56 @@ def test_pytest_capture_checks_the_exact_workload_interpreter_dependency(tmp_pat
             assert str(python) in failure.value.message
             assert not marker.exists()
             assert not (tmp_path / "store").exists()
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("distribution", ["single", "load", "each"])
+def test_pytest_keeps_long_ids_and_worker_executions_distinct(
+    tmp_path: Path, distribution: str
+) -> None:
+    test_file = tmp_path / "test_long.py"
+    test_file.write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('case', ['a', 'b'], ids=['x'*4096+'a', 'x'*4096+'b'])\n"
+        "def test_case(case):\n    assert case == 'a'\n"
+    )
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(
+                    argv=[sys.executable, "-m", "pytest", "-q", str(test_file)]
+                    + (["-n", "2", "--dist", distribution] if distribution != "single" else []),
+                    cwd=str(tmp_path),
+                    provider_id="pytest",
+                ),
+                "failures.summary",
+            )
+            metrics = result["blocks"][0]["values"]
+            replicas = 2 if distribution == "each" else 1
+            assert metrics["collected"] == 2
+            assert metrics["executed"] == 2 * replicas
+            assert metrics["passed"] == replicas
+            assert metrics["failed"] == replicas
+            assert metrics["unexecuted"] == 0
+            assert "retried" not in metrics
+            rows = result["blocks"][1]["rows"]
+            assert len(rows) == replicas
+            if distribution == "each":
+                assert {row["worker_id"] for row in rows} == {"gw0", "gw1"}
+            native = next(item for item in result["inputs"] if item["format"] == "pytest")
+            events = [json.loads(line) for line in Path(native["path"]).read_text().splitlines()]
+            collected = {event["nodeid"] for event in events if event["event"] == "test_collected"}
+            assert len(collected) == 2
+            assert all(len(nodeid) == 4096 and "sha256:" in nodeid for nodeid in collected)
+            assert {
+                event["nodeid"] for event in events if event["event"] == "test_phase"
+            } == collected
         finally:
             runtime.close()
 
@@ -617,3 +669,29 @@ def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_r
         "known_work_ns": 27,
         "incomplete_invocation_count": 1,
     }
+
+
+@pytest.mark.process
+def test_advertised_pytest_capture_example_runs_the_named_fixture_workflow(tmp_path: Path) -> None:
+    (tmp_path / "test_workload.py").write_text(
+        "import pytest\n@pytest.fixture\ndef answer():\n    return 42\n"
+        "def test_work(answer):\n    assert answer == 42\n"
+    )
+    example = capture_example(CAPABILITY_BY_ID["pytest.fixtures"])
+    example["target"]["argv"][0] = sys.executable
+    example["target"]["cwd"] = str(tmp_path)
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            result = await runtime.capture_and_analyze(
+                CaptureTarget(**example["target"], provider_id=example["provider"]["kind"]),
+                "pytest.fixtures",
+            )
+            assert result["capture"]["outcome"]["status"] == "succeeded"
+            assert result["provider"]["id"] == "pytest"
+            assert any(row.get("fixture") == "answer" for row in result["blocks"][1]["rows"])
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
