@@ -189,6 +189,11 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
     standalone = tmp_path / "results.json"
     standalone.write_text("{}")
     invalid = _bundle(tmp_path / "invalid", [float("nan")])
+    malformed_hint = _bundle(tmp_path / "malformed-hint", [1.0])
+    primary = malformed_hint / "results.json"
+    document = json.loads(primary.read_text())
+    document["benchmarks"][0]["states"][0]["summaries"][0]["hint"] = []
+    primary.write_text(json.dumps(document))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         with pytest.raises(RuntimeFailure) as unbound:
@@ -203,6 +208,11 @@ def test_nvbench_rejects_unbound_sidecars_and_nonfinite_samples(tmp_path: Path) 
                 [PathSource(path=str(invalid), format="nvbench")],
                 {},
             )
+        with pytest.raises(RuntimeFailure) as hint_failure:
+            runtime.analyze(
+                "benchmark.summary", [PathSource(path=str(malformed_hint), format="nvbench")], {}
+            )
+        assert hint_failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
 

@@ -202,7 +202,7 @@ class NvbenchProvider:
             raise ProviderFailure("LIMIT_EXCEEDED", "NVBench JSON exceeds 64 MiB")
         try:
             document = json.loads(primary.read_bytes())
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", "NVBench JSON is invalid") from error
         root = _object(document, "NVBench document")
         meta = _object(root.get("meta", {}), "NVBench metadata")
@@ -245,6 +245,8 @@ class NvbenchProvider:
                 for summary_value in summaries:
                     summary = _object(summary_value, "NVBench summary")
                     hint = summary.get("hint")
+                    if hint is not None and not isinstance(hint, str):
+                        raise ProviderFailure("DECODE_FAILURE", "NVBench summary hint is invalid")
                     if isinstance(hint, str) and hint.startswith("file/") and hint not in _HINTS:
                         raise ProviderFailure(
                             "UNSUPPORTED_FORMAT", f"Unknown NVBench file hint: {hint}"
@@ -253,8 +255,8 @@ class NvbenchProvider:
                         continue
                     filename, count = _sidecar_reference(summary)
                     sidecar = _contained_sidecar(path, filename)
-                    unit = _HINTS[cast(str, hint)][0]
-                    series_name = _HINTS[cast(str, hint)][1]
+                    unit = _HINTS[hint][0]
+                    series_name = _HINTS[hint][1]
                     metric_name = f"{benchmark_name}.{series_name}"
                     benchmark_names.add(metric_name)
                     identity = {

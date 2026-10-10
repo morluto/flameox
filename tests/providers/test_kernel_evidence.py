@@ -99,6 +99,24 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path)
     assert not (tmp_path / ".flameox").exists()
 
 
+@pytest.mark.parametrize("baseline_value", [1e-308, -1e308])
+def test_kernel_comparison_rejects_unrepresentable_derived_values(
+    tmp_path: Path, baseline_value: float
+) -> None:
+    sources = []
+    for name, value in (("baseline", baseline_value), ("candidate", 1e308)):
+        artifact = tmp_path / f"{name}.json"
+        artifact.write_text(json.dumps(_kernel_document(value)))
+        sources.append(PathSource(path=str(artifact), format="kernel-validation"))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("kernel.compare", sources, {})
+        assert failure.value.code == "LIMIT_EXCEEDED"
+    finally:
+        runtime.close()
+
+
 def test_kernel_compare_requires_complete_semantic_identity(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
@@ -161,18 +179,33 @@ def test_kernel_validation_rejects_coerced_coverage_and_duplicate_metrics(
     duplicate_case = duplicate["cases"][0]  # type: ignore[index]
     duplicate_output = duplicate_case["outputs"][0]
     duplicate_output["metrics"].append(dict(duplicate_output["metrics"][0]))
+    invalid_status = _kernel_document(0.0)
+    invalid_status["status"] = []
+    invalid_case = _kernel_document(0.0)
+    invalid_case["cases"][0]["status"] = {}  # type: ignore[index]
+    invalid_comparator = _kernel_document(0.0)
+    invalid_comparator["cases"][0]["outputs"][0]["metrics"][0]["comparator"] = []  # type: ignore[index]
+    overflow = _kernel_document(10**400)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
-        for name, document in (("coverage", coverage), ("duplicate", duplicate)):
+        for name, document in (
+            ("coverage", coverage),
+            ("duplicate", duplicate),
+            ("status", invalid_status),
+            ("case", invalid_case),
+            ("comparator", invalid_comparator),
+            ("overflow", overflow),
+        ):
             artifact = tmp_path / f"{name}.json"
             artifact.write_text(json.dumps(document))
-            with pytest.raises(RuntimeFailure) as failure:
-                runtime.analyze(
-                    "kernel.validation",
-                    [PathSource(path=str(artifact), format="kernel-validation")],
-                    {},
-                )
-            assert failure.value.code == "DECODE_FAILURE"
+            source = PathSource(path=str(artifact), format="kernel-validation")
+            for capability, sources in (
+                ("kernel.validation", [source]),
+                ("kernel.compare", [source, source]),
+            ):
+                with pytest.raises(RuntimeFailure) as failure:
+                    runtime.analyze(capability, sources, {})
+                assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
 

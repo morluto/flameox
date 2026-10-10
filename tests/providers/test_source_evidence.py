@@ -92,6 +92,14 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
                                     }
                                 ],
                             },
+                            {
+                                "ruleId": "invalid-confidence",
+                                "message": {"text": "Invalid native confidence"},
+                                "properties": {"confidence": 10**400},
+                                "locations": [
+                                    {"physicalLocation": {"artifactLocation": {"uri": "src/a.py"}}}
+                                ],
+                            },
                         ],
                     }
                 ],
@@ -109,7 +117,8 @@ def test_sarif_candidates_are_scoped_to_project_paths(tmp_path: Path) -> None:
         runtime.close()
 
     assert result["provider"] == {"id": "sarif", "version": "2.1.0"}
-    assert result["blocks"][0]["values"]["result_count"] == 2
+    assert result["blocks"][0]["values"]["result_count"] == 3
+    assert result["blocks"][0]["values"]["invalid_count"] == 1
     assert result["blocks"][0]["values"]["excluded_count"] == 1
     assert result["blocks"][1]["rows"][0]["relative_path"] == "src/slow.py"
     assert not (tmp_path / ".flameox").exists()

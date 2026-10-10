@@ -327,8 +327,12 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
                 {},
             )
         assert oversized.value.code == "LIMIT_EXCEEDED"
-        for count in ("9" * 5_000, "\u00b2"):
-            profile.write_text(f"main;scan {count}\n")
+        for native in (
+            f"main;scan {'9' * 5_000}\n",
+            "main;scan \u00b2\n",
+            f"main;scan {'9' * 4_300}\n" * 2,
+        ):
+            profile.write_text(native)
             with pytest.raises(RuntimeFailure) as malformed:
                 runtime.analyze(
                     "cpu.hotspots",

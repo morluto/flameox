@@ -58,7 +58,7 @@ class KernelEvidenceProvider:
             value = json.loads(path.read_bytes())
         except ProviderFailure:
             raise
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure(
                 "DECODE_FAILURE", "Kernel validation document is invalid"
             ) from error
@@ -68,8 +68,7 @@ class KernelEvidenceProvider:
                 "UNSUPPORTED_FORMAT",
                 "Kernel validation schema must be flameox.kernel-validation.v2",
             )
-        if document.get("status") not in {"pass", "fail", "inconclusive", "unsupported"}:
-            raise ProviderFailure("DECODE_FAILURE", "Kernel validation status is invalid")
+        _status(document.get("status"), "Kernel validation status")
         cases = document.get("cases")
         if not isinstance(cases, list) or len(cases) > _MAX_CASES:
             raise ProviderFailure("LIMIT_EXCEEDED", "Kernel validation case count is invalid")
@@ -162,7 +161,9 @@ class KernelEvidenceProvider:
                     metric_status = _status(metric.get("status"), "metric status")
                     metric_name = _text(metric.get("name"), "metric name")
                     comparator = metric.get("comparator")
-                    if comparator not in {"<=", ">=", None}:
+                    if comparator is not None and (
+                        not isinstance(comparator, str) or comparator not in {"<=", ">="}
+                    ):
                         raise ProviderFailure(
                             "DECODE_FAILURE", "Kernel metric comparator is invalid"
                         )
@@ -305,6 +306,12 @@ class KernelEvidenceProvider:
                 if input_index == baseline_index:
                     continue
                 candidate = values[key]
+                delta = candidate - baseline
+                ratio = candidate / baseline if baseline else None
+                if not math.isfinite(delta) or (ratio is not None and not math.isfinite(ratio)):
+                    raise ProviderFailure(
+                        "LIMIT_EXCEEDED", "Kernel comparison exceeds finite numeric bounds"
+                    )
                 rows.append(
                     {
                         **identities[baseline_index][key],
@@ -312,8 +319,8 @@ class KernelEvidenceProvider:
                         "candidate_index": input_index,
                         "baseline_value": baseline,
                         "candidate_value": candidate,
-                        "delta": candidate - baseline,
-                        "ratio": candidate / baseline if baseline else None,
+                        "delta": delta,
+                        "ratio": ratio,
                         "baseline_status": statuses[baseline_index][key],
                         "candidate_status": statuses[input_index][key],
                     }
@@ -387,7 +394,7 @@ class KernelEvidenceProvider:
                             unavailable_count += 1
                             continue
                         row = _triton_row(event)
-                    except (json.JSONDecodeError, UnicodeDecodeError, ProviderFailure):
+                    except (ValueError, RecursionError, ProviderFailure):
                         skipped += 1
                         continue
                     observed += 1
@@ -479,7 +486,7 @@ def _triton_cache(path: Path, *, max_rows: int) -> ProviderAnalysis:
         raise ProviderFailure("LIMIT_EXCEEDED", "Triton cache exceeds 64 KiB")
     try:
         document = _object(json.loads(path.read_bytes()), "Triton cache")
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise ProviderFailure("DECODE_FAILURE", "Triton cache is unreadable") from error
     key = document.get("key")
     entries = document.get("configs_timings")
@@ -630,7 +637,8 @@ def _kernel_consistency_failures(document: Mapping[str, Any]) -> list[dict[str, 
                 threshold = _finite_or_none(metric.get("threshold"), "threshold")
                 value = _metric_value(metric.get("value"))
                 if (
-                    comparator in {"<=", ">="}
+                    isinstance(comparator, str)
+                    and comparator in {"<=", ">="}
                     and threshold is not None
                     and isinstance(value, int | float)
                     and not isinstance(value, bool)
@@ -680,15 +688,21 @@ def _digest(value: object, subject: str) -> str:
 
 
 def _status(value: object, subject: str) -> str:
-    if value not in {"pass", "fail", "inconclusive", "unsupported"}:
+    if not isinstance(value, str) or value not in {"pass", "fail", "inconclusive", "unsupported"}:
         raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid")
     return value
 
 
 def _finite(value: object, subject: str) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
+    if not isinstance(value, int | float) or isinstance(value, bool):
         raise ProviderFailure("DECODE_FAILURE", f"{subject} must be finite")
-    return float(value)
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ProviderFailure("DECODE_FAILURE", f"{subject} must be finite") from error
+    if not math.isfinite(result):
+        raise ProviderFailure("DECODE_FAILURE", f"{subject} must be finite")
+    return result
 
 
 def _finite_or_none(value: object, subject: str) -> float | None:

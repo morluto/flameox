@@ -14,11 +14,11 @@ from flameox.runtime_contracts import (
 )
 
 
-def _vllm_payload(*, throughput: float = 5.0) -> dict[str, object]:
+def _vllm_payload(*, throughput: float = 5.0, input_tokens: int = 20) -> dict[str, object]:
     return {
         "metrics": {
             "completed": 2,
-            "total_input": 20,
+            "total_input": input_tokens,
             "total_output": 8,
             "request_throughput": throughput,
             "request_goodput": throughput,
@@ -54,8 +54,8 @@ def _vllm_payload(*, throughput: float = 5.0) -> dict[str, object]:
 def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
-    baseline.write_text(json.dumps(_vllm_payload(throughput=5.0)))
-    candidate.write_text(json.dumps(_vllm_payload(throughput=10.0)))
+    baseline.write_text(json.dumps(_vllm_payload(throughput=5.0, input_tokens=2**53 + 1)))
+    candidate.write_text(json.dumps(_vllm_payload(throughput=10.0, input_tokens=2**53 + 1)))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
@@ -75,6 +75,11 @@ def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
         runtime.close()
 
     assert summary["provider"]["id"] == "vllm-benchmark"
+    assert next(
+        row["value"]
+        for row in summary["blocks"][1]["rows"]
+        if row["name"] == "vllm.total_input_tokens"
+    ) == str(2**53 + 1)
     assert "must not escape" not in json.dumps(summary)
     assert "private endpoint" not in json.dumps(summary)
     assert comparison["blocks"][1]["rows"][0]["ratio"] == 2.0
@@ -88,6 +93,55 @@ def test_vllm_summary_and_comparison_are_prompt_free(tmp_path: Path) -> None:
         "workload.num_prompts",
         "workload.request_rate",
     ]
+
+
+def test_inference_comparison_rejects_unrepresentable_derived_ratio(tmp_path: Path) -> None:
+    paths = [tmp_path / "baseline.json", tmp_path / "candidate.json"]
+    for path, value in zip(paths, (1e-308, 1e308), strict=True):
+        path.write_text(json.dumps(_vllm_payload(throughput=value)))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "inference.compare",
+                [PathSource(path=str(path), format="vllm-benchmark") for path in paths],
+                {},
+            )
+        assert failure.value.code == "LIMIT_EXCEEDED"
+        for path in paths:
+            assert runtime.analyze(
+                "inference.summary", [PathSource(path=str(path), format="vllm-benchmark")], {}
+            )["coverage"]["complete"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("format_name", ["vllm-benchmark", "sglang-benchmark"])
+def test_inference_rejects_unrepresentable_measured_values(
+    tmp_path: Path, format_name: str
+) -> None:
+    artifact = tmp_path / "metrics.json"
+    if format_name == "vllm-benchmark":
+        payload = _vllm_payload()
+        payload["metrics"]["percentiles_ttft_ms"] = [[95, 10**400]]  # type: ignore[index]
+    else:
+        payload = {
+            "duration": 1,
+            "completed": 1,
+            "total_input_tokens": 2,
+            "total_output_tokens": 1,
+            "request_throughput": 10**400,
+        }
+    artifact.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "inference.summary", [PathSource(path=str(artifact), format=format_name)], {}
+            )
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
 
 
 def test_inference_compare_rejects_known_differences_unless_explicit(tmp_path: Path) -> None:
@@ -164,7 +218,7 @@ def test_sglang_rejects_detailed_output_and_projects_scalars(tmp_path: Path) -> 
             {
                 "duration": 1.0,
                 "completed": 2,
-                "total_input_tokens": 8,
+                "total_input_tokens": 2**53 + 1,
                 "total_output_tokens": 4,
                 "request_throughput": 2.0,
                 "p95_ttft_ms": 9.0,
@@ -205,6 +259,11 @@ def test_sglang_rejects_detailed_output_and_projects_scalars(tmp_path: Path) -> 
     names = {row["name"] for row in result["blocks"][1]["rows"]}
     assert "sglang.p95_ttft_ms" in names
     assert "sglang.unknown_metric" not in names
+    assert next(
+        row["value"]
+        for row in result["blocks"][1]["rows"]
+        if row["name"] == "sglang.total_input_tokens"
+    ) == str(2**53 + 1)
     assert failure.value.code == "DECODE_FAILURE"
 
 
@@ -216,7 +275,7 @@ def test_mooncake_trace_is_streamed_without_sensitive_payloads(tmp_path: Path) -
             for row in (
                 {
                     "timestamp": 0,
-                    "input_length": 10,
+                    "input_length": 2**53 + 1,
                     "output_length": 2,
                     "hash_ids": [1, 2],
                     "messages": [{"content": "secret prompt"}],
@@ -243,6 +302,7 @@ def test_mooncake_trace_is_streamed_without_sensitive_payloads(tmp_path: Path) -
 
     assert result["blocks"][0]["values"]["request_count"] == 2
     assert result["blocks"][1]["rows"][0]["prefix_hash_count"] == 2
+    assert result["blocks"][1]["rows"][0]["input_length"] == str(2**53 + 1)
     assert "secret prompt" not in json.dumps(result)
     assert not (tmp_path / ".flameox").exists()
 

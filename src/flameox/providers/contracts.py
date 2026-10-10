@@ -57,7 +57,12 @@ def _canonical_value(value: Any) -> Any:
         return value
     if isinstance(value, int):
         if value < _MIN_CANONICAL_INTEGER or value > _MAX_CANONICAL_INTEGER:
-            return str(value)
+            try:
+                return str(value)
+            except ValueError as error:
+                raise ProviderFailure(
+                    "DECODE_FAILURE", "Provider integer exceeds the decimal conversion limit."
+                ) from error
         return value
     if isinstance(value, float):
         if math.isfinite(value):

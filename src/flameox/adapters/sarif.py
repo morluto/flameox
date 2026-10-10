@@ -510,8 +510,7 @@ def _integer(value: object) -> int | None:
 def _confidence(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
         return None
-    parsed = float(value)
-    return parsed if 0 <= parsed <= 1 else None
+    return float(value) if 0 <= value <= 1 else None
 
 
 def _normalize_result(

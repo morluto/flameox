@@ -4,13 +4,14 @@ import hashlib
 import json
 import math
 import statistics
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from flameox.canonical import canonical_bytes, sha256_id
+from flameox.canonical import digest_model, sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.providers.inference_comparison import assess_comparison, field_identities
 
@@ -51,13 +52,8 @@ class _VllmMetrics(_Model):
     @model_validator(mode="after")
     def numbers_are_finite(self) -> _VllmMetrics:
         for name, value in self:
-            values = value if isinstance(value, list) else [value]
-            for item in values:
-                members = item if isinstance(item, tuple) else [item]
-                if any(
-                    isinstance(member, float) and not math.isfinite(member) for member in members
-                ):
-                    raise ValueError(f"{name} must contain only finite numbers")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{name} must contain only finite numbers")
         for pairs in (
             self.percentiles_ttft_ms,
             self.percentiles_tpot_ms,
@@ -65,11 +61,7 @@ class _VllmMetrics(_Model):
             self.percentiles_e2el_ms,
         ):
             if any(
-                len(pair) != 2
-                or not math.isfinite(float(pair[0]))
-                or not math.isfinite(float(pair[1]))
-                or not 0 <= float(pair[0]) <= 100
-                or float(pair[1]) < 0
+                len(pair) != 2 or not 0 <= pair[0] <= 100 or not 0 <= pair[1] <= sys.float_info.max
                 for pair in pairs
             ):
                 raise ValueError("percentiles must contain a rank from 0 to 100 and a value >= 0")
@@ -103,7 +95,7 @@ def _observed_scalars(payload: Mapping[str, Any], names: Sequence[str]) -> dict[
         is_number = (
             isinstance(value, int | float)
             and not isinstance(value, bool)
-            and math.isfinite(float(value))
+            and (isinstance(value, int) or math.isfinite(value))
         )
         if is_text or is_number:
             observed[name] = value
@@ -111,6 +103,7 @@ def _observed_scalars(payload: Mapping[str, Any], names: Sequence[str]) -> dict[
 
 
 _SGLANG_REQUIRED = {"duration", "completed", "total_input_tokens", "total_output_tokens"}
+_SGLANG_COUNTS = {"completed", "num_prompts", "total_input_tokens", "total_output_tokens"}
 _SGLANG_SCALARS = {
     *_SGLANG_REQUIRED,
     "num_prompts",
@@ -180,7 +173,7 @@ class InferenceExportProvider:
             if not isinstance(payload, dict):
                 raise ValueError(f"{label} must be a JSON object")
             return payload
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", f"Invalid {label} export") from error
 
     @staticmethod
@@ -269,7 +262,7 @@ class InferenceExportProvider:
                 rows.append(
                     {
                         "name": name,
-                        "value": float(value),
+                        "value": value,
                         "unit": unit,
                         "aggregation": aggregation,
                     }
@@ -355,14 +348,15 @@ class InferenceExportProvider:
             if any(
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
-                or not math.isfinite(float(value))
-                or float(value) < 0
-                for value in selected.values()
+                or value < 0
+                or (name in _SGLANG_COUNTS and not isinstance(value, int))
+                or (name not in _SGLANG_COUNTS and not value <= sys.float_info.max)
+                for name, value in selected.items()
             ):
                 raise ValueError("SGLang metrics must be finite non-negative numbers")
             if "num_prompts" in selected and selected["completed"] > selected["num_prompts"]:
                 raise ValueError("SGLang completed count exceeds num_prompts")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", "Invalid aggregate SGLang export") from error
         rows = [self._sglang_row(name, selected[name]) for name in sorted(selected)]
         observed = _observed_scalars(
@@ -457,7 +451,7 @@ class InferenceExportProvider:
             )
         return {
             "name": f"sglang.{name}",
-            "value": float(value),
+            "value": value,
             "unit": unit,
             "aggregation": aggregation,
         }
@@ -473,7 +467,9 @@ class InferenceExportProvider:
         workload_digest = hashlib.sha256()
         try:
             with path.open("rb") as stream:
-                for line_index, raw in enumerate(stream):
+                for line_index, raw in enumerate(
+                    iter(lambda: stream.readline(_MOONCAKE_MAX_LINE_BYTES + 1), b"")
+                ):
                     if not raw.strip():
                         continue
                     if len(raw) > _MOONCAKE_MAX_LINE_BYTES:
@@ -491,19 +487,20 @@ class InferenceExportProvider:
                     max_input_length = max(max_input_length, int(row["input_length"]))
                     max_output_length = max(max_output_length, int(row["output_length"]))
                     workload_digest.update(
-                        canonical_bytes(
+                        digest_model(
                             [
                                 row["timestamp_ms"],
                                 row["input_length"],
                                 row["output_length"],
                                 row["prefix_hash_count"],
-                            ]
-                        )
+                            ],
+                            projection="flameox.mooncake.request/v1",
+                        ).encode("ascii")
                         + b"\n"
                     )
                     if len(rows) < max_rows:
                         rows.append(row)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", "Invalid Mooncake request trace") from error
         if observed == 0:
             raise ProviderFailure("DECODE_FAILURE", "Mooncake request trace is empty")
@@ -513,7 +510,7 @@ class InferenceExportProvider:
             limitations.append("Mooncake requests were truncated by the declared row bound.")
         return ProviderAnalysis(
             provider_id="mooncake-trace",
-            provider_version="request-trace-v1",
+            provider_version="request-trace-v2",
             blocks=[
                 {
                     "type": "metrics",
@@ -587,7 +584,13 @@ class InferenceExportProvider:
             raise ProviderFailure(
                 "INVALID_INPUT", f"Every input must expose the numeric metric {metric}"
             )
-        baseline = statistics.fmean(series[baseline_index])
+        try:
+            means = [statistics.fmean(values) for values in series]
+        except OverflowError as error:
+            raise ProviderFailure(
+                "LIMIT_EXCEEDED", "Inference comparison mean exceeds the finite numeric range"
+            ) from error
+        baseline = means[baseline_index]
         compatibility, identity_differences, identity_unavailable = assess_comparison(
             analyses, arguments
         )
@@ -595,7 +598,16 @@ class InferenceExportProvider:
         for index, values in enumerate(series):
             if index == baseline_index:
                 continue
-            candidate = statistics.fmean(values)
+            candidate = means[index]
+            ratio = candidate / baseline if baseline else None
+            if (
+                not math.isfinite(baseline)
+                or not math.isfinite(candidate)
+                or (ratio is not None and not math.isfinite(ratio))
+            ):
+                raise ProviderFailure(
+                    "LIMIT_EXCEEDED", "Inference comparison exceeds the finite numeric range"
+                )
             rows.append(
                 {
                     "metric": metric,
@@ -603,7 +615,7 @@ class InferenceExportProvider:
                     "candidate_index": index,
                     "baseline_mean": baseline,
                     "candidate_mean": candidate,
-                    "ratio": candidate / baseline if baseline else None,
+                    "ratio": ratio,
                     "baseline_samples": len(series[baseline_index]),
                     "candidate_samples": len(values),
                     "compatibility": compatibility,
@@ -658,5 +670,10 @@ class InferenceExportProvider:
                 continue
             value = row.get("value") if row.get("name") == metric else row.get(metric)
             if isinstance(value, int | float) and not isinstance(value, bool):
-                values.append(float(value))
+                try:
+                    values.append(float(value))
+                except OverflowError as error:
+                    raise ProviderFailure(
+                        "LIMIT_EXCEEDED", "Inference metric exceeds the finite numeric range"
+                    ) from error
         return values

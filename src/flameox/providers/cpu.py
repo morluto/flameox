@@ -266,7 +266,7 @@ def _read_speedscope(path: Path) -> tuple[list[dict[str, Any]], list[Any]]:
         raise ProviderFailure("LIMIT_EXCEEDED", "py-spy profile exceeds 64 MiB")
     try:
         document = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise ProviderFailure("DECODE_FAILURE", "py-spy Speedscope profile is invalid") from error
     root = _object(document, "Speedscope profile")
     shared = _object(root.get("shared"), "Speedscope shared data")
