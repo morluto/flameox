@@ -226,11 +226,13 @@ class _AggregationState:
                 """
             ).fetchall()
         ]
-        referenced = {frame_id for _metric, frame_id, *_values in aggregate_rows}
-        selected_frames = self.connection.execute(
-            "SELECT frame_id, function, file, line FROM frames ORDER BY frame_id"
-        )
-        selected_frame_rows = selected_frames.fetchall()
+        selected_frame_rows = self.connection.execute(
+            """
+            SELECT frame_id, function, file, line FROM frames
+            WHERE frame_id IN (SELECT frame_id FROM selected_aggregates)
+            ORDER BY frame_id
+            """
+        ).fetchall()
         frame_rows = [
             {
                 "frame_id": str(frame_id),
@@ -239,7 +241,6 @@ class _AggregationState:
                 "line": int(line),
             }
             for frame_id, function, file, line in selected_frame_rows
-            if frame_id in referenced
         ]
         assert frame_drop is not None
         assert aggregate_drop is not None

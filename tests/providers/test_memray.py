@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from flameox.runtime import AnalysisRuntime
@@ -11,6 +13,12 @@ from flameox.runtime_contracts import (
     CaptureTarget,
     PathSource,
     RequestLimits,
+)
+from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
+from flameox.workers.memray_contract import (
+    MEMRAY_WORKER,
+    MemrayExtractionLimits,
+    MemrayWorkerRequest,
 )
 
 
@@ -86,3 +94,41 @@ def test_direct_memray_capture_uses_typed_argv_and_preserves_native_output(
         }
 
     asyncio.run(exercise())
+
+
+@pytest.mark.process
+@pytest.mark.requires_memray
+def test_memray_worker_emits_only_frames_referenced_by_bounded_measurements(tmp_path: Path) -> None:
+    memray = pytest.importorskip("memray")
+    capture = tmp_path / "many-frames.bin"
+    allocators: list[Callable[[], bytearray]] = []
+    for index in range(100):
+        namespace: dict[str, object] = {}
+        exec(
+            compile("def allocate(): return bytearray(8192)", f"frame{index}.py", "exec"), namespace
+        )
+        allocator = namespace["allocate"]
+        assert callable(allocator)
+        allocators.append(allocator)
+    with memray.Tracker(str(capture)):
+        retained = [allocate() for allocate in allocators]
+    assert len(retained) == 100
+    request = MemrayWorkerRequest(
+        artifact_path=str(capture),
+        limits=MemrayExtractionLimits(
+            max_input_bytes=1 << 20,
+            max_provider_records=10_000,
+            max_frames=3,
+            max_stack_depth=100,
+            max_aggregate_rows=4,
+            max_output_bytes=1 << 20,
+        ),
+    )
+    harness = IsolatedWorkerHarness(WorkerRuntimeConfig(tmp_path, tmp_path, tmp_path))
+    with harness.run_typed_sync_session(MEMRAY_WORKER, request) as (result, job_root):
+        frames = pq.read_table(job_root / "frames.parquet").to_pylist()
+        measurements = pq.read_table(job_root / "frame_measurements.parquet").to_pylist()
+        assert 0 < len(frames) <= 3
+        assert 0 < len(measurements) <= 4
+        assert {row["frame_id"] for row in frames} == {row["frame_id"] for row in measurements}
+        assert result.coverage.frame_contributions_dropped > 0
