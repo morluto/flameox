@@ -29,7 +29,6 @@ import anyio
 import ijson
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
-from pydantic import TypeAdapter
 
 from flameox import __version__
 from flameox.adapters.json_preview import iter_json_rows
@@ -451,7 +450,7 @@ class AnalysisRuntime:
             )
         capability.validate_source_count(len(sources))
         selected_limits = limits.lowered_against(self.limits) if limits else self.limits
-        validated = TypeAdapter(capability.model).validate_python(arguments)
+        validated = capability.model.model_validate(arguments)
         for source_index, request_source in enumerate(sources):
             if isinstance(request_source, PathSource) and request_source.format not in (
                 None,
@@ -646,7 +645,7 @@ class AnalysisRuntime:
         self._cache_analysis(
             analysis_id,
             CachedAnalysis(
-                self._copy_result(validated_result),
+                validated_result,
                 resolved,
                 body,
                 analysis_sources=resolved,
@@ -743,9 +742,7 @@ class AnalysisRuntime:
         capture_arguments = self._capture_arguments(
             target.provider_id, target.capture_arguments, capability_id=capability_id
         )
-        analysis_arguments = TypeAdapter(capability.model).validate_python(
-            target.analysis_arguments
-        )
+        analysis_arguments = capability.model.model_validate(target.analysis_arguments)
         output_formats = set(self._capture_output_formats(target.provider_id))
         compatible_provider_ids = [
             contract.id for contract in compatible_capture_providers(capability)
@@ -1510,7 +1507,7 @@ class AnalysisRuntime:
         validated_result = AnalysisResult.model_validate(result).model_dump(
             mode="json", exclude_none=False
         )
-        cached.result = self._copy_result(validated_result)
+        cached.result = validated_result
         cached.manifest_body["coverage"] = self._copy_result(validated_result["coverage"])
         cached.manifest_body["limitations"] = list(validated_result["limitations"])
         return self._copy_result(validated_result)
