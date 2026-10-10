@@ -101,6 +101,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             command=sys.executable,
             args=["-m", "flameox", "mcp", "serve"],
             cwd=tmp_path,
+            env={"FLAMEOX_DATA_DIR": str(tmp_path / "store")},
         )
         artifact = tmp_path / "sample.json"
         artifact.write_text('[{"value":1},{"value":2},{"value":3}]')

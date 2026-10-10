@@ -13,6 +13,7 @@ from typing import Any
 import anyio
 import json5
 import pytest
+from click import unstyle
 from mcp import StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
@@ -114,9 +115,9 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
 
         assert malformed.returncode == 2
         assert malformed.stdout == ""
-        assert "Usage: flameox analyze" in malformed.stderr
-        assert "invalid JSON" in malformed.stderr
-        assert "Traceback" not in malformed.stderr
+        assert "Usage: flameox analyze" in unstyle(malformed.stderr)
+        assert "invalid JSON" in unstyle(malformed.stderr)
+        assert "Traceback" not in unstyle(malformed.stderr)
 
     continuation = base64.urlsafe_b64encode(b"[" * 10_000 + b"0" + b"]" * 10_000).decode()
     malformed_token = subprocess.run(
