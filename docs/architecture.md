@@ -57,7 +57,7 @@ durable SHA-256 identity derived from the canonical manifest body.
 - `providers/capture.py` owns provider-specific command construction and expected native outputs;
   `providers/availability.py` owns installation and workload requirements.
 - `repository.py` owns lazy repository creation, validation, publication,
-  source selection and layout, inventory queries, and immutable resource reads.
+  source selection and layout, inventory queries, and immutable evidence inspection.
 - `evidence_models.py` owns typed persisted document shapes and membership invariants;
   `source_files.py` owns shared native-source identities, hashing, and bounded copying.
 - `adapters/json_preview.py` owns the streaming JSON preview projection.

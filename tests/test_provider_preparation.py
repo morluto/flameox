@@ -8,6 +8,7 @@ from pathlib import Path
 import anyio
 import pytest
 from mcp import Client
+from mcp_types import TextContent
 
 from flameox.mcp.server import FlameoxServer
 from flameox.providers.preparation import PY_SPY_VERSION
@@ -20,6 +21,9 @@ def test_host_provider_preparation_reports_requirements_without_installing(tmp_p
             result = await client.call_tool("prepare_providers", {"provider_ids": ["xctrace"]})
             assert not result.is_error
             value = result.structured_content
+            inline = result.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == value
             assert value["preparation"]["status"] == "not_applicable"
             assert value["prepared_managed_providers"] == []
             assert value["external_requirements"][0]["provider_id"] == "xctrace"

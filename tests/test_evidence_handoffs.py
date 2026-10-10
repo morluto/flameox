@@ -9,7 +9,6 @@ from pathlib import Path
 import anyio
 import pytest
 from mcp import Client
-from mcp_types import TextResourceContents
 
 from flameox.canonical import canonical_bytes
 from flameox.mcp.server import FlameoxServer
@@ -341,9 +340,11 @@ def test_mcp_collector_failure_retains_profile_and_unknown_workload_status(
             assert execution["workload_returncode"] is None
             assert partial["capture"]["workload_status"] == "unknown"
             assert "not attributed to the workload" in partial["next_action"]["message"]
-            resource = await client.read_resource(partial["preserved"]["uri"])
-            assert isinstance(resource.contents[0], TextResourceContents)
-            projection = json.loads(resource.contents[0].text)
+            inspected = await client.call_tool(
+                "inspect_evidence", {"evidence_id": partial["preserved"]["evidence_id"]}
+            )
+            assert inspected.is_error is False
+            projection = inspected.structured_content
             texts: list[str] = []
             for artifact in projection["body"]["artifacts"]:
                 if artifact["format"] == "text":

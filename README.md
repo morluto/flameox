@@ -79,6 +79,10 @@ catalog with `flameox mcp inspect`; use `--capability CAPABILITY_ID` or `--tool 
 focused schemas and examples. The complete contract and current tool catalog are in
 [the interface guide](docs/interfaces.md).
 
+Tools return their full bounded results inline, including failures and recovery actions. Preserved
+evidence has a durable `evidence_id`; `inspect_evidence` returns its redacted metadata and replay
+sources inline.
+
 Capture takes argv, not a shell string. A direct target supplies an absolute working directory and
 bounded environment overrides. Results may include `next_page`; replay its named analysis tool
 and arguments unchanged. Capture continuations read collected artifacts and do not rerun the

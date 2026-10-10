@@ -32,7 +32,7 @@ Diagnostics retain at most 4,096 bytes per stream, lowered further to fit the
 request's provenance budget. Text uses UTF-8 replacement decoding; byte counts
 describe the original stream, not the encoded size of the decoded excerpt.
 Full streams have `output_streams` metadata; excerpts have `console_diagnostics`.
-The ordinary evidence resource exposes counts and completeness, not excerpt text.
+`inspect_evidence` exposes counts and completeness, not excerpt text.
 Failed captures with no native artifacts can still preserve their diagnostics,
 execution outcome, and analysis failure without creating placeholder log files.
 
@@ -83,12 +83,8 @@ querying or projecting it. A self-consistent manifest with a correctly recompute
 invalid nested request is repository corruption.
 
 The stored envelope adds `format_version` and `evidence_id`. The canonical manifest remains the
-local repository and CLI contract. MCP resources expose a separate redacted projection so durable
-provenance is not confused with agent-visible metadata:
-
-```text
-application/vnd.flameox.evidence-projection+json;version=1
-```
+local repository and CLI contract. The MCP `inspect_evidence` tool exposes a separate redacted
+projection inline so durable provenance is not confused with agent-visible metadata.
 
 The projection retains immutable identities, digests, capture and analysis status, coverage, and
 provider identity. It replaces capture requests with digests and bounded status fields and never
@@ -113,7 +109,7 @@ HEAD refs, commits, mutable indexes, catalog locks, trash manifests, or general
 GC. Startup may remove another staging owner only when its recorded process ID
 is provably dead.
 
-## Queries and resources
+## Queries and inspection
 
 `query_evidence` sorts the manifest inventory deterministically and computes an
 inventory digest before filtering. A continuation is bound to that inventory;
@@ -126,12 +122,11 @@ Cursor offsets are strict non-negative integers and must identify an item inside
 inventory. An offset at or beyond the inventory end is invalid rather than an empty successful
 page; an empty page therefore means that the valid remaining inventory contains no matches.
 
-`flameox://evidence/{evidence_id}` validates the canonical manifest and returns its redacted MCP
-projection. `flameox evidence show` remains the explicit local administrative view of the full
-canonical manifest.
-Missing or corrupt resources are MCP resource errors. Native payload bytes are
-not exposed through resources; their digest and role remain visible in the
-manifest.
+`inspect_evidence` validates the canonical manifest for an exact evidence ID and returns its
+redacted projection inline. `flameox evidence show` remains the explicit local administrative view
+of the full canonical manifest. Missing or corrupt evidence returns a structured tool failure.
+Native payload bytes remain local; their digest and source selector are visible in the projection.
+Evidence references contain IDs rather than resource URIs.
 
 Agent projections expose an opaque `source` accepted unchanged by analysis tools for each artifact,
 plus `logical_sources` for directory bundles and ordered `analysis_sources` for the original
@@ -143,8 +138,8 @@ with an ordered mapping for
 the original analysis inputs. Empty directories retain their metadata without inventing a native
 payload, and re-preserving a selected member retains its file identity. Readers validate membership,
 digests, sizes, and analysis mappings. Layouts and relative paths are required; readers never infer
-membership from role strings. Missing or ambiguous selectors point back to the evidence resource
-for enumeration.
+membership from role strings. Missing or ambiguous selectors identify the evidence ID for enumeration
+through `inspect_evidence`.
 
 Member paths are normalized relative POSIX paths, with no drive, root, backslash, or parent
 traversal. Members must be distinct and prefix-free: a bundle cannot contain both a file `a` and
@@ -152,7 +147,7 @@ another file `a/b`. Readers reject impossible layouts as repository corruption b
 
 Analysis first selects manifest metadata and admits the aggregate input and scratch budgets.
 Only then does it verify the selected payloads and materialize directory members. Unselected
-payloads and derived analysis data are not read by source selection; full evidence/resource reads
+payloads and derived analysis data are not read by source selection; full evidence/inspection reads
 still verify the complete bundle. Materialization uses bounded copies into session-owned staging
 and never writes more native bytes than admitted.
 

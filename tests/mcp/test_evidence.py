@@ -9,17 +9,16 @@ import anyio
 import pytest
 from coverage import CoverageData
 from mcp import Client
-from mcp.shared.exceptions import MCPError
-from mcp_types import TextContent, TextResourceContents
+from mcp_types import TextContent
 
 from flameox.mcp.server import FlameoxServer
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE, EvidenceRepository
+from flameox.repository import EvidenceRepository
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import MAX_ROWS
 
 
 @pytest.mark.process
-def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_path: Path) -> None:
+def test_mcp_terminal_provider_limit_is_visible_inline(tmp_path: Path) -> None:
     source = tmp_path / "module.py"
     source.write_text("\n" * (MAX_ROWS + 204))
     artifact = tmp_path / ".coverage"
@@ -45,12 +44,12 @@ def test_mcp_terminal_provider_limit_recommends_recovery_not_preservation(tmp_pa
 
         assert terminal is not None
         assert terminal.structured_content["truncation"]["reason"] == "provider_limit"
-        summary = terminal.content[0]
-        assert isinstance(summary, TextContent)
-        assert "no continuation is available" in summary.text
-        assert "narrow" in summary.text
-        assert "bounded evidence" in summary.text
-        assert "preserve" not in summary.text
+        inline = terminal.content[0]
+        assert isinstance(inline, TextContent)
+        value = json.loads(inline.text)
+        assert value == terminal.structured_content
+        assert value["next_page"] is None
+        assert value["coverage"]["complete"] is False
 
     anyio.run(exercise)
 
@@ -106,9 +105,9 @@ def test_mcp_keeps_complete_large_continuation_arguments(tmp_path: Path) -> None
         assert handoff["tool"] == "inspect_performance_candidates"
         assert handoff["arguments"]["include_paths"] == include_paths
         assert result.structured_content["truncation"]["reason"] == "row_limit"
-        summary = result.content[0]
-        assert isinstance(summary, TextContent)
-        assert "call next_page.tool with its exact arguments" in summary.text
+        inline = result.content[0]
+        assert isinstance(inline, TextContent)
+        assert json.loads(inline.text) == result.structured_content
 
     anyio.run(exercise)
 
@@ -202,9 +201,9 @@ def test_mcp_query_filters_providers_and_returns_exact_next_pages(tmp_path: Path
             assert next_page["arguments"]["provider_id"] == "direct"
             assert next_page["arguments"]["capability_id"] == "artifact.preview"
             assert next_page["arguments"]["page_size"] == 1
-            first_summary = direct_first.content[0]
-            assert isinstance(first_summary, TextContent)
-            assert "exact next_page arguments" in first_summary.text
+            inline = direct_first.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == direct_first.structured_content
 
             changed_filter = await client.call_tool(
                 "query_evidence",
@@ -236,7 +235,7 @@ def test_mcp_query_filters_providers_and_returns_exact_next_pages(tmp_path: Path
 
 
 @pytest.mark.integration
-def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> None:
+def test_analysis_preservation_query_inspection_and_restart(tmp_path: Path) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text('[{"value":1},{"value":2}]')
 
@@ -253,11 +252,13 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
             preserved = await client.call_tool("preserve_evidence", {"analysis_id": analysis_id})
             assert preserved.is_error is False
             evidence_id = preserved.structured_content["evidence_id"]
-            assert any(block.type == "resource_link" for block in preserved.content)
+            assert all(block.type == "text" for block in preserved.content)
+            assert "uri" not in preserved.structured_content
             queried = await client.call_tool("query_evidence", {"page_size": 10})
             assert queried.structured_content["evidence"][0]["evidence_id"] == evidence_id
-            resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
-            assert resource.contents[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
+            inspected = await client.call_tool("inspect_evidence", {"evidence_id": evidence_id})
+            assert inspected.is_error is False
+            assert inspected.structured_content["evidence_id"] == evidence_id
 
         async with Client(
             FlameoxServer(evidence_directory=tmp_path / ".flameox"), raise_exceptions=True
@@ -281,12 +282,14 @@ def test_analysis_preservation_query_resource_and_restart(tmp_path: Path) -> Non
                 "analysis_id alone cannot recover"
                 in expired.structured_content["next_action"]["message"]
             )
-            resource = await restarted.read_resource(f"flameox://evidence/{evidence_id}")
-            content = resource.contents[0]
-            assert isinstance(content, TextResourceContents)
+            inspected = await restarted.call_tool("inspect_evidence", {"evidence_id": evidence_id})
+            content = inspected.content[0]
+            assert isinstance(content, TextContent)
+            assert json.loads(content.text) == inspected.structured_content
             assert json.loads(content.text)["evidence_id"] == evidence_id
-            with pytest.raises(MCPError):
-                await restarted.read_resource(f"flameox://evidence/{'0' * 64}")
+            missing = await restarted.call_tool("inspect_evidence", {"evidence_id": "0" * 64})
+            assert missing.is_error is True
+            assert missing.structured_content["code"] == "MISSING_EVIDENCE"
 
     anyio.run(exercise)
 
@@ -316,6 +319,9 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
                 },
             )
             assert rescued.is_error is False
+            inline = rescued.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == rescued.structured_content
             assert not any(block.type == "resource_link" for block in rescued.content)
             assert rescued.structured_content["next_action"]["environment"] == {
                 "FLAMEOX_DATA_DIR": str(rescue)
@@ -331,7 +337,7 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
 
 
 @pytest.mark.integration
-def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> None:
+def test_mcp_evidence_inspection_redacts_capture_provenance(tmp_path: Path) -> None:
     secret_argument = "known-safe-argument-placeholder"
     secret_environment = "known-safe-environment-placeholder"
     secret_path = str(tmp_path.resolve())
@@ -357,9 +363,10 @@ def test_mcp_evidence_resource_redacts_capture_provenance(tmp_path: Path) -> Non
                 {"analysis_id": captured.structured_content["analysis_id"]},
             )
             evidence_id = preserved.structured_content["evidence_id"]
-            resource = await client.read_resource(f"flameox://evidence/{evidence_id}")
-            content = resource.contents[0]
-            assert isinstance(content, TextResourceContents)
+            inspected = await client.call_tool("inspect_evidence", {"evidence_id": evidence_id})
+            assert inspected.is_error is False
+            content = inspected.content[0]
+            assert isinstance(content, TextContent)
             projection = content.text
             assert secret_argument not in projection
             assert secret_environment not in projection

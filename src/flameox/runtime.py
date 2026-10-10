@@ -1247,23 +1247,20 @@ class AnalysisRuntime:
                     await progress(sequence_number, total, f"captured {case.name} block {block}")
 
             def finish_analysis() -> tuple[dict[str, Any], dict[str, Any] | None]:
-                effective_capability_id, selected_sources = self._capture_analysis_sources(
-                    capability_id, analysis_sources, captured
-                )
                 try:
-                    if not selected_sources:
+                    if not analysis_sources:
                         raise RuntimeFailure(
                             "EXECUTION_FAILURE",
                             "Capture produced no native artifacts for the requested analysis.",
                             details={"provider_id": target.provider_id},
                         )
                     result = self.analyze(
-                        effective_capability_id,
+                        capability_id,
                         [
                             PathSource(
                                 path=str(item.path), format=item.format, producer=item.producer
                             )
-                            for item in selected_sources
+                            for item in analysis_sources
                         ],
                         target.analysis_arguments,
                         limits=selected_limits,
@@ -1276,7 +1273,7 @@ class AnalysisRuntime:
                         experiment=experiment,
                         executions=executions,
                         captured=captured,
-                        analysis_sources=selected_sources,
+                        analysis_sources=analysis_sources,
                         limits=selected_limits,
                         failure=error,
                     )
@@ -1300,7 +1297,7 @@ class AnalysisRuntime:
                     )
                 cached.sources = captured
                 cached.analysis_source_indices = self._captured_source_indices(
-                    captured, selected_sources
+                    captured, analysis_sources
                 )
                 cached.manifest_body["capture_request"] = {
                     "target": target.model_dump(mode="json"),
@@ -1387,7 +1384,7 @@ class AnalysisRuntime:
         failure_body = {
             "code": failure.code,
             "message": failure.message,
-            "details": failure.details,
+            "details": {**failure.details, "analysis_source_count": len(analysis_sources)},
         }
         analysis_request = {
             "capability_id": capability_id,
@@ -1744,18 +1741,6 @@ class AnalysisRuntime:
         shutil.rmtree(directory)
 
     @staticmethod
-    def _capture_analysis_sources(
-        capability_id: str,
-        analysis_sources: list[NativeSource],
-        captured: list[NativeSource],
-    ) -> tuple[str, list[NativeSource]]:
-        if analysis_sources:
-            return capability_id, analysis_sources
-        return "artifact.preview", [
-            source for source in captured if source.role.endswith(("/stdout", "/stderr"))
-        ]
-
-    @staticmethod
     def _captured_source_indices(
         captured: list[NativeSource], analysis_sources: list[NativeSource]
     ) -> list[int]:
@@ -1860,7 +1845,7 @@ class AnalysisRuntime:
     def analyze_page(
         self,
         capability_id: str,
-        sources: list[Source],
+        sources: Sequence[Source],
         arguments: Mapping[str, Any],
         *,
         limits: RequestLimits | None = None,
@@ -2129,7 +2114,6 @@ class AnalysisRuntime:
     def _rescue_result(evidence_id: str, artifact_count: int, destination: Path) -> dict[str, Any]:
         return {
             "evidence_id": evidence_id,
-            "uri": f"flameox://evidence/{evidence_id}",
             "artifact_count": artifact_count,
             "rescue_destination": str(destination),
             "next_action": {
@@ -2315,7 +2299,7 @@ class AnalysisRuntime:
                     )
                 except RepositoryError as error:
                     failure = self._repository_failure(error)
-                    failure.details["resource_uri"] = f"flameox://evidence/{source.evidence_id}"
+                    failure.details["evidence_id"] = source.evidence_id
                     raise failure from error
                 total_size += selection.source.size_bytes
                 total_files += len(selection.members)

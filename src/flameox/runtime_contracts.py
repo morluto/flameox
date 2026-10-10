@@ -119,7 +119,7 @@ class EvidenceSource(StrictModel):
     )
     artifact_selector: str | None = Field(
         default=None,
-        description="Opaque artifact selector returned by the evidence resource; pass unchanged.",
+        description="Opaque artifact selector returned by inspect_evidence; pass unchanged.",
         pattern=LOWERCASE_SHA256_PATTERN,
     )
 
@@ -174,6 +174,7 @@ class PreviewArguments(StrictModel):
             "text fragments instead. Continuations advance in the same unit."
         ),
         ge=0,
+        le=MAX_SAFE_JSON_INTEGER,
     )
 
 
@@ -963,7 +964,10 @@ class Truncation(StrictModel):
 class AnalysisFailure(StrictModel):
     code: str
     message: str
-    details: dict[str, JsonValue]
+    details: dict[str, JsonValue] = Field(
+        description="Failure details, including analysis_source_count: the number of retained "
+        "native inputs available for reanalysis. Zero means a new capture is needed.",
+    )
 
 
 class AnalysisResult(StrictModel):

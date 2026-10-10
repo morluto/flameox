@@ -43,7 +43,6 @@ from flameox.source_files import (
 
 REPOSITORY_FORMAT = "3"
 EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence+json;version=3"
-AGENT_EVIDENCE_MEDIA_TYPE = "application/vnd.flameox.evidence-projection+json;version=1"
 
 
 class RepositoryError(RuntimeError):
@@ -189,7 +188,6 @@ class EvidenceRepository:
                     shutil.rmtree(stage)
         return {
             "evidence_id": evidence_id,
-            "uri": f"flameox://evidence/{evidence_id}",
             "artifact_count": len(artifact_refs),
         }
 
@@ -903,7 +901,6 @@ class EvidenceRepository:
         body = manifest.body
         return {
             "evidence_id": manifest.evidence_id,
-            "uri": f"flameox://evidence/{manifest.evidence_id}",
             "evidence_kind": body.evidence_kind,
             "capability_id": body.capability_id,
             "provider": body.provider.model_dump(mode="json"),

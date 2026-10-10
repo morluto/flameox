@@ -9,15 +9,14 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 import anyio
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from mcp import types
 from mcp.server import CacheHint, Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp_types import CallToolResult, ContentBlock, ResourceLink, TextContent
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from mcp_types import CallToolResult, TextContent
+from pydantic import BaseModel, JsonValue, ValidationError
 
 import flameox.providers.environment as provider_setup
 from flameox import __version__
@@ -26,6 +25,7 @@ from flameox.mcp.descriptions import SERVER_DESCRIPTION, SERVER_INSTRUCTIONS
 from flameox.mcp.request_contracts import (
     AnalysisArguments,
     CaptureArguments,
+    InspectEvidenceArguments,
     PrepareProvidersArguments,
     PreserveArguments,
     QueryArguments,
@@ -40,45 +40,33 @@ from flameox.mcp.result_contracts import (
     ToolFailureEnvelope,
     WaitAndRetryAction,
 )
-from flameox.mcp.tool_registry import (
-    bind_tool_contracts,
-)
+from flameox.mcp.tool_registry import tool_contracts
 from flameox.mcp.validation import normalize_schema_error, normalize_validation_error
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITY_BY_ID,
     CaptureTarget,
     RequestLimits,
     RuntimeFailure,
-    Source,
 )
 
 
-def _text_result(
+def _tool_result(
     value: Mapping[str, Any],
     *,
-    summary: str,
     is_error: bool = False,
-    resource: ResourceLink | None = None,
 ) -> CallToolResult:
-    content: list[ContentBlock] = [TextContent(type="text", text=summary)]
-    if resource is not None:
-        content.append(resource)
+    result = dict(value)
     return CallToolResult(
         is_error=is_error,
-        content=content,
-        structured_content=dict(value),
+        content=[TextContent(type="text", text=json.dumps(result, separators=(",", ":")))],
+        structured_content=result,
     )
 
 
 def _failure_result(value: ToolFailureEnvelope) -> CallToolResult:
-    field = ""
-    if value.field_path:
-        field = f" at {'.'.join(str(item) for item in value.field_path)}"
-    return _text_result(
+    return _tool_result(
         value.model_dump(mode="json"),
-        summary=f"{value.code}{field}: {value.message}",
         is_error=True,
     )
 
@@ -118,7 +106,7 @@ def _runtime_failure(
             next_action=retry_action,
             details=error.details,
         )
-        return _text_result(value.model_dump(mode="json"), summary=error.message)
+        return _tool_result(value.model_dump(mode="json"))
     if error.code == "UNAVAILABLE_CAPABILITY":
         value = RecoverableEnvelope(
             status="unavailable",
@@ -130,7 +118,7 @@ def _runtime_failure(
             else None,
             details=error.details,
         )
-        return _text_result(value.model_dump(mode="json"), summary=error.message)
+        return _tool_result(value.model_dump(mode="json"))
     accepted: list[str] | None = None
     field_path: list[str | int] | None = None
     for key in (
@@ -172,6 +160,8 @@ def _runtime_failure(
         field_path = ["sources", source_index, "format"]
     elif "accepted_provider_ids" in error.details:
         field_path = ["provider", "kind"]
+    elif isinstance(error.details.get("option"), str):
+        field_path = [error.details["option"]]
     next_action: AdjustRequestAction | OperatorAction | None
     if field_path is not None or accepted is not None:
         next_action = AdjustRequestAction(
@@ -230,54 +220,6 @@ def _workload_status(executions: list[dict[str, Any]]) -> str:
     return "unknown"
 
 
-def _resource_link(value: Mapping[str, Any]) -> ResourceLink | None:
-    preserved = value.get("preserved")
-    if not isinstance(preserved, Mapping):
-        return None
-    return ResourceLink(
-        type="resource_link",
-        uri=str(preserved["uri"]),
-        name=f"Evidence {preserved['evidence_id']}",
-        mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
-    )
-
-
-def _summary(value: Mapping[str, Any]) -> str:
-    status = value.get("status", "complete")
-    if "analysis_id" in value:
-        truncation = value.get("truncation")
-        coverage = value.get("coverage")
-        coverage_complete = isinstance(coverage, Mapping) and coverage.get("complete") is True
-        evidence_state = (
-            "partial" if status == "partial" else "complete" if coverage_complete else "bounded"
-        )
-        if value.get("next_page") is not None:
-            action = "call next_page.tool with its exact arguments; do not rerun capture"
-        elif isinstance(value.get("preserved"), Mapping):
-            action = "follow the returned evidence resource"
-        elif isinstance(truncation, Mapping) and truncation.get("reason") == "provider_limit":
-            action = "narrow the query or recapture; no continuation is available"
-        else:
-            action = "preserve the session analysis if durable evidence is needed"
-        return (
-            f"{value.get('capability_id')}: {evidence_state} evidence; "
-            f"analysis_id={value['analysis_id']}; "
-            f"next: {action}."
-        )
-    if "evidence" in value:
-        query_state = "partial" if value.get("next_page") is not None else "complete"
-        action = (
-            "call query_evidence with the exact next_page arguments"
-            if query_state == "partial"
-            else "query complete"
-        )
-        return (
-            f"Evidence query {query_state}; {len(cast(list[Any], value['evidence']))} row(s); "
-            f"next: {action}."
-        )
-    return f"Flameox operation {status}."
-
-
 class FlameoxServer(Server[AnalysisRuntime]):
     """SDK low-level server with small direct-inspection conveniences for tests and CLI."""
 
@@ -286,7 +228,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
     ) -> None:
         self._evidence_directory = evidence_directory
         self._limits = limits
-        self._tool_contracts = bind_tool_contracts(self._dispatch)
+        self._tool_contracts = tool_contracts()
         self._tool_contract_by_name = {item.name: item for item in self._tool_contracts}
         super().__init__(
             "flameox",
@@ -296,15 +238,9 @@ class FlameoxServer(Server[AnalysisRuntime]):
             lifespan=self._lifespan,
             cache_hints={
                 "tools/list": CacheHint(ttl_ms=3_600_000, scope="public"),
-                "resources/list": CacheHint(ttl_ms=3_600_000, scope="public"),
-                "resources/read": CacheHint(ttl_ms=86_400_000, scope="private"),
-                "resources/templates/list": CacheHint(ttl_ms=3_600_000, scope="public"),
             },
             on_list_tools=self._on_list_tools,
             on_call_tool=self._on_call_tool,
-            on_list_resources=self._on_list_resources,
-            on_list_resource_templates=self._on_list_resource_templates,
-            on_read_resource=self._on_read_resource,
         )
 
     @asynccontextmanager
@@ -320,34 +256,10 @@ class FlameoxServer(Server[AnalysisRuntime]):
     async def list_tools(self) -> list[types.Tool]:
         return [contract.project() for contract in self._tool_contracts]
 
-    async def list_resource_templates(self) -> list[types.ResourceTemplate]:
-        return [
-            types.ResourceTemplate(
-                name="immutable-evidence-manifest",
-                uri_template="flameox://evidence/{evidence_id}",
-                description="Redacted projection of an immutable Flameox evidence manifest.",
-                mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
-            )
-        ]
-
     async def _on_list_tools(
         self, _ctx: ServerRequestContext[AnalysisRuntime], _params: Any
     ) -> types.ListToolsResult:
-        return types.ListToolsResult(
-            tools=await self.list_tools(), ttl_ms=3_600_000, cache_scope="public"
-        )
-
-    async def _on_list_resources(
-        self, _ctx: ServerRequestContext[AnalysisRuntime], _params: Any
-    ) -> types.ListResourcesResult:
-        return types.ListResourcesResult(resources=[])
-
-    async def _on_list_resource_templates(
-        self, _ctx: ServerRequestContext[AnalysisRuntime], _params: Any
-    ) -> types.ListResourceTemplatesResult:
-        return types.ListResourceTemplatesResult(
-            resource_templates=await self.list_resource_templates()
-        )
+        return types.ListToolsResult(tools=await self.list_tools())
 
     async def _on_call_tool(
         self,
@@ -372,17 +284,18 @@ class FlameoxServer(Server[AnalysisRuntime]):
         except SchemaValidationError as error:
             return _failure_result(normalize_schema_error(error))
         try:
-            result = await contract.handler(request, ctx)
-            contract.output_model.model_validate(result.structured_content)
-            return result
-        except ValidationError as error:
-            if error.title == contract.output_model.__name__:
+            value = await self._dispatch(params.name, request, ctx)
+            try:
+                contract.output_model.model_validate(value)
+            except ValidationError:
                 return _failure_result(
                     ToolFailureEnvelope(
                         code="INTERNAL_CONTRACT_FAILURE",
                         message="Flameox produced a result that violated its public contract.",
                     )
                 )
+            return _tool_result(value)
+        except ValidationError as error:
             return _failure_result(normalize_validation_error(error))
         except RuntimeFailure as error:
             return _runtime_failure(error, tool=params.name, arguments=arguments)
@@ -417,7 +330,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
         name: str,
         request: BaseModel,
         ctx: ServerRequestContext[AnalysisRuntime],
-    ) -> CallToolResult:
+    ) -> dict[str, Any]:
         runtime = ctx.lifespan_context
         if name == "prepare_providers":
             prepare_args = cast(PrepareProvidersArguments, request)
@@ -460,28 +373,17 @@ class FlameoxServer(Server[AnalysisRuntime]):
                     for item in prepared.workload_requirements
                 ],
             }
-            action = "reconnect using the returned launcher" if next_action else "continue capture"
-            if prepared.external_requirements:
-                action += "; satisfy the listed external requirements; host readiness is unknown"
-            if prepared.workload_requirements:
-                action += "; satisfy the listed requirements in the workload interpreter"
-            return _text_result(
-                value,
-                summary=f"Provider preparation completed; next: {action}.",
-            )
+            return value
         if name in ANALYSIS_TOOLS.values():
             analysis_args = cast(AnalysisArguments, request)
             capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
             options = analysis_args.model_dump(include=set(capability.model.model_fields))
-            sources = TypeAdapter(list[Source]).validate_python(
-                [item.model_dump(mode="python") for item in analysis_args.sources]
-            )
             await ctx.session.report_progress(0.0, message=f"analyzing {capability.id}")
             value, next_request = await runtime.run_in_request(
                 partial(
                     runtime.analyze_page,
                     capability.id,
-                    sources,
+                    analysis_args.sources,
                     options,
                     limits=analysis_args.request_limits(),
                     continuation=analysis_args.continuation,
@@ -489,7 +391,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
             )
             value["status"] = "complete"
             _attach_next_page(value, next_request)
-            return _text_result(value, summary=_summary(value))
+            return value
         if name in CAPTURE_TOOLS.values():
             capture_args = cast(CaptureArguments, request)
             capability = CAPABILITY_BY_ID[CAPABILITY_BY_TOOL[name]]
@@ -527,7 +429,44 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 else "complete"
             )
             value["next_action"] = None
-            if value.get("analysis_failure") is not None:
+            analysis_failure = value.get("analysis_failure")
+            can_reanalyze = (
+                analysis_failure is not None
+                and analysis_failure["details"]["analysis_source_count"] > 0
+            )
+            if value["status"] == "partial" and value.get("preserved") is not None:
+                if analysis_failure is not None and not can_reanalyze:
+                    message = (
+                        "Inspect the preserved capture diagnostics. No native analysis inputs "
+                        "were retained; address the collector failure before a new capture."
+                    )
+                elif can_reanalyze:
+                    message = (
+                        "Inspect this preserved capture and its replay sources. "
+                        "Retry analysis after addressing the observed analysis failure; "
+                        "reanalysis does not rerun the workload or change its exit outcome."
+                    )
+                elif capture["workload_status"] == "failed":
+                    message = (
+                        "Inspect the preserved workload failure. "
+                        "Reanalysis does not change its exit outcome."
+                    )
+                else:
+                    message = (
+                        "Inspect the preserved collector or experiment failure. "
+                        "The failure was not attributed to the workload."
+                    )
+                value["next_action"] = CallToolAction(
+                    kind="call_tool",
+                    tool="inspect_evidence",
+                    arguments=cast(
+                        dict[str, JsonValue],
+                        {"evidence_id": value["preserved"]["evidence_id"]},
+                    ),
+                    then_retry=ANALYSIS_TOOLS[capability.id] if can_reanalyze else None,
+                    message=message,
+                ).model_dump(mode="json")
+            elif can_reanalyze:
                 value["next_action"] = PreserveThenAnalyzeAction(
                     kind="preserve_then_analyze",
                     preserve_arguments=cast(
@@ -541,21 +480,29 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 ).model_dump(mode="json")
             elif value["status"] == "partial":
                 workload_status = capture["workload_status"]
-                message = (
-                    "Preserve the observed workload failure for inspection. Reanalysis does "
-                    "not change its exit outcome; a new capture can observe target changes."
-                    if workload_status == "failed"
-                    else "Preserve the capture for inspection. The failure was not attributed "
-                    "to the workload; inspect the collector or experiment outcome before retrying."
-                )
+                if analysis_failure is not None:
+                    message = (
+                        "Preserve the capture diagnostics. No native analysis inputs were "
+                        "retained; address the collector failure before a new capture."
+                    )
+                elif workload_status == "failed":
+                    message = (
+                        "Preserve the observed workload failure for inspection. Reanalysis does "
+                        "not change its exit outcome; a new capture can observe target changes."
+                    )
+                else:
+                    message = (
+                        "Preserve the capture for inspection. The failure was not attributed "
+                        "to the workload; inspect the collector or experiment outcome "
+                        "before retrying."
+                    )
                 value["next_action"] = CallToolAction(
                     kind="call_tool",
                     tool="preserve_evidence",
                     arguments=cast(dict[str, JsonValue], {"analysis_id": value["analysis_id"]}),
                     message=message,
                 ).model_dump(mode="json")
-            link = _resource_link(value)
-            return _text_result(value, summary=_summary(value), resource=link)
+            return value
         if name == "preserve_evidence":
             preserve_args = cast(PreserveArguments, request)
             value, next_request = await runtime.run_in_request(
@@ -563,22 +510,7 @@ class FlameoxServer(Server[AnalysisRuntime]):
             )
             value["status"] = "complete"
             _attach_next_page(value, next_request)
-            link = ResourceLink(
-                type="resource_link",
-                uri=str(value["uri"]),
-                name=f"Evidence {value['evidence_id']}",
-                mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
-            )
-            action = (
-                "use this refreshed evidence-backed next_page"
-                if value.get("next_page") is not None
-                else "follow the returned evidence resource"
-            )
-            return _text_result(
-                value,
-                summary=(f"Evidence {value['evidence_id']} preserved; next: {action}."),
-                resource=link,
-            )
+            return value
         if name == "rescue_evidence":
             rescue_args = cast(RescueArguments, request)
             value, next_request = await runtime.run_in_request(
@@ -590,13 +522,14 @@ class FlameoxServer(Server[AnalysisRuntime]):
             )
             value["status"] = "complete"
             _attach_next_page(value, next_request)
-            return _text_result(
-                value,
-                summary=(
-                    f"Evidence {value['evidence_id']} rescued; next: restart or reconnect "
-                    "with the returned FLAMEOX_DATA_DIR."
-                ),
+            return value
+        if name == "inspect_evidence":
+            inspect_args = cast(InspectEvidenceArguments, request)
+            value = await runtime.run_in_request(
+                partial(runtime.read_evidence_agent_projection, inspect_args.evidence_id)
             )
+            value["status"] = "complete"
+            return value
         if name == "query_evidence":
             query_args = cast(QueryArguments, request)
             value = await runtime.run_in_request(
@@ -619,33 +552,8 @@ class FlameoxServer(Server[AnalysisRuntime]):
                 next_arguments = query_args.model_dump(mode="json")
                 next_arguments["cursor"] = continuation
                 value["next_page"] = {"tool": "query_evidence", "arguments": next_arguments}
-            return _text_result(value, summary=_summary(value))
+            return value
         raise RuntimeFailure("UNKNOWN_TOOL", f"Unknown Flameox tool: {name}")
-
-    async def _on_read_resource(
-        self,
-        ctx: ServerRequestContext[AnalysisRuntime],
-        params: types.ReadResourceRequestParams,
-    ) -> types.ReadResourceResult:
-        parsed = urlparse(params.uri)
-        evidence_id = parsed.path.removeprefix("/")
-        if parsed.scheme != "flameox" or parsed.netloc != "evidence" or not evidence_id:
-            raise FileNotFoundError("Unknown Flameox resource URI")
-        try:
-            manifest = await ctx.lifespan_context.run_in_request(
-                partial(ctx.lifespan_context.read_evidence_agent_projection, evidence_id)
-            )
-        except RuntimeFailure as error:
-            raise FileNotFoundError(f"{error.code}: {error.message}") from error
-        return types.ReadResourceResult(
-            contents=[
-                types.TextResourceContents(
-                    uri=params.uri,
-                    mime_type=AGENT_EVIDENCE_MEDIA_TYPE,
-                    text=json.dumps(manifest, sort_keys=True, separators=(",", ":")),
-                )
-            ]
-        )
 
 
 def run_server(*, limits: RequestLimits | None = None) -> None:

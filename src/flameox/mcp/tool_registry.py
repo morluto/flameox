@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any
 
 from jsonschema import Draft202012Validator
-from mcp.server import ServerRequestContext
-from mcp_types import CallToolResult, Tool, ToolAnnotations
+from mcp_types import Tool, ToolAnnotations
 from pydantic import BaseModel, RootModel
 
 from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
 from flameox.mcp.descriptions import TOOL_DESCRIPTIONS, analysis_description, capture_description
 from flameox.mcp.request_contracts import (
+    InspectEvidenceArguments,
     PrepareProvidersArguments,
     PreserveArguments,
     QueryArguments,
@@ -28,12 +26,12 @@ from flameox.mcp.request_contracts import (
 from flameox.mcp.result_contracts import (
     AnalysisOutcome,
     CaptureOutcome,
+    EvidenceInspectionOutcome,
     PreparationOutcome,
     PreservationOutcome,
     QueryOutcome,
     RescueOutcome,
 )
-from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import CAPABILITIES, Capability, compatible_capture_providers
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
@@ -55,7 +53,6 @@ class ToolContract:
     input_model: type[BaseModel]
     output_model: type[RootModel[Any]]
     annotations: ToolAnnotations
-    handler: Callable[[BaseModel, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]]
     input_schema: dict[str, Any] = field(init=False, repr=False, compare=False)
     input_validator: Draft202012Validator = field(init=False, repr=False, compare=False)
 
@@ -75,21 +72,16 @@ class ToolContract:
         )
 
 
-ToolDispatcher = Callable[
-    [str, BaseModel, ServerRequestContext[AnalysisRuntime]], Awaitable[CallToolResult]
-]
-
 TOOL_SPECS: tuple[tuple[str, type[BaseModel], type[RootModel[Any]], ToolAnnotations], ...] = (
     ("prepare_providers", PrepareProvidersArguments, PreparationOutcome, PREPARE),
     ("preserve_evidence", PreserveArguments, PreservationOutcome, PRESERVE),
     ("rescue_evidence", RescueArguments, RescueOutcome, PRESERVE),
     ("query_evidence", QueryArguments, QueryOutcome, READ_ONLY),
+    ("inspect_evidence", InspectEvidenceArguments, EvidenceInspectionOutcome, READ_ONLY),
 )
 
 
-def bind_tool_contracts(
-    dispatcher: ToolDispatcher,
-) -> tuple[ToolContract, ...]:
+def tool_contracts() -> tuple[ToolContract, ...]:
     lifecycle = tuple(
         ToolContract(
             name=name,
@@ -97,7 +89,6 @@ def bind_tool_contracts(
             input_model=input_model,
             output_model=output_model,
             annotations=annotations,
-            handler=partial(dispatcher, name),
         )
         for name, input_model, output_model, annotations in TOOL_SPECS
     )
@@ -108,7 +99,6 @@ def bind_tool_contracts(
             input_model=analysis_arguments(capability),
             output_model=AnalysisOutcome,
             annotations=READ_ONLY,
-            handler=partial(dispatcher, ANALYSIS_TOOLS[capability.id]),
         )
         for capability in CAPABILITIES
     )
@@ -119,7 +109,6 @@ def bind_tool_contracts(
             input_model=capture_arguments(capability),
             output_model=CaptureOutcome,
             annotations=CAPTURE,
-            handler=partial(dispatcher, CAPTURE_TOOLS[capability.id]),
         )
         for capability in CAPABILITIES
         if capability.id in CAPTURE_TOOLS

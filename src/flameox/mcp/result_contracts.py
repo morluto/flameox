@@ -13,6 +13,7 @@ from flameox.runtime_contracts import (
     LOWERCASE_SHA256_PATTERN,
     AnalysisResult,
     Coverage,
+    EvidenceSource,
     ProviderIdentity,
     StrictModel,
 )
@@ -39,12 +40,6 @@ class AdjustRequestAction(StrictModel):
     message: str
 
 
-class ConfigureEnvironmentAction(StrictModel):
-    kind: Literal["configure_environment"]
-    environment: dict[str, str] = Field(default_factory=dict)
-    message: str
-
-
 class WaitAndRetryAction(StrictModel):
     kind: Literal["wait_and_retry"]
     retry_after_ms: int | None = Field(default=None, ge=0)
@@ -66,7 +61,6 @@ NextAction = (
     CallToolAction
     | AdjustRequestAction
     | ReconnectAction
-    | ConfigureEnvironmentAction
     | WaitAndRetryAction
     | OperatorAction
     | PreserveThenAnalyzeAction
@@ -113,7 +107,6 @@ class ToolCallEnvelope(StrictModel):
 
 class EvidenceReferenceEnvelope(StrictModel):
     evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
-    uri: str
     artifact_count: int = Field(ge=0)
 
 
@@ -195,9 +188,17 @@ class RescueEnvelope(PreservationEnvelope):
     next_action: RescueActionEnvelope
 
 
+class EvidenceInspectionEnvelope(StrictModel):
+    status: Literal["complete"] = "complete"
+    format_version: str
+    evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
+    analysis_sources: list[EvidenceSource]
+    logical_sources: list[dict[str, JsonValue]]
+    body: dict[str, JsonValue]
+
+
 class EvidenceSummaryEnvelope(StrictModel):
     evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
-    uri: str
     evidence_kind: str
     capability_id: str
     provider: ProviderIdentity
@@ -250,3 +251,7 @@ class RescueOutcome(_ObjectOutcome):
 
 class QueryOutcome(_ObjectOutcome):
     root: QueryEnvelope | RecoverableEnvelope | ToolFailureEnvelope
+
+
+class EvidenceInspectionOutcome(_ObjectOutcome):
+    root: EvidenceInspectionEnvelope | RecoverableEnvelope | ToolFailureEnvelope

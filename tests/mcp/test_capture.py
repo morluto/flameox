@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -36,6 +37,9 @@ def test_mcp_unavailable_provider_names_preparation_and_capture_retry(
                     "provider": {"kind": "py-spy"},
                 },
             )
+            inline = unavailable.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == unavailable.structured_content
             assert unavailable.is_error is False
             assert unavailable.structured_content["status"] == "retryable"
             assert unavailable.structured_content["code"] == "UNAVAILABLE_CAPABILITY"
@@ -91,7 +95,7 @@ def test_mcp_oracle_failure_does_not_become_a_workload_failure(tmp_path: Path) -
 
 
 @pytest.mark.process
-def test_failed_capture_returns_full_provenance_once(tmp_path: Path) -> None:
+def test_failed_capture_returns_full_provenance_inline(tmp_path: Path) -> None:
     directory = tmp_path / "store"
     arguments = [f"native-argument-{index}:".ljust(16_384, "x") for index in range(8)]
 
@@ -115,9 +119,9 @@ def test_failed_capture_returns_full_provenance_once(tmp_path: Path) -> None:
             value = result.structured_content
             assert value is not None, result.content
             assert value["status"] == "partial"
-            summary = result.content[0]
-            assert isinstance(summary, TextContent)
-            assert "native-argument-" not in summary.text
+            inline = result.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == value
             assert value["capture"]["executions"][0]["argv"][3:] == arguments
             preserved = await client.call_tool(
                 "preserve_evidence", {"analysis_id": value["analysis_id"]}

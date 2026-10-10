@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import pytest
@@ -219,8 +219,22 @@ def test_capture_oracle_gets_full_workload_logs_but_keeps_its_own_diagnostics(
 
 @pytest.mark.process
 @pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("console_output", ["diagnostics", "full"])
+@pytest.mark.parametrize(
+    ("provider_id", "capability_id", "analysis_arguments", "missing_role"),
+    [
+        ("observations", "failures.summary", {}, "observations"),
+        ("benchmark-samples", "benchmark.scaling", {"input_dimension": "size"}, "benchmark"),
+    ],
+)
 def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
-    tmp_path: Path, preserve: bool
+    tmp_path: Path,
+    preserve: bool,
+    console_output: Literal["diagnostics", "full"],
+    provider_id: str,
+    capability_id: str,
+    analysis_arguments: dict[str, Any],
+    missing_role: str,
 ) -> None:
     workload = tmp_path / "missing_observations.py"
     workload.write_text(
@@ -236,9 +250,11 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
                 CaptureTarget(
                     argv=[sys.executable, str(workload)],
                     cwd=str(tmp_path),
-                    provider_id="observations",
+                    provider_id=provider_id,
+                    console_output=console_output,
+                    analysis_arguments=analysis_arguments,
                 ),
-                "failures.summary",
+                capability_id,
                 limits=RequestLimits(max_output_bytes=64 * 1024),
                 preserve=preserve,
             )
@@ -247,18 +263,25 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
 
     result = anyio.run(exercise)
     execution = result["capture"]["executions"][0]
+    assert result["capability_id"] == capability_id
     assert execution["status"] == "failed"
     assert result["analysis_failure"]["code"] == "EXECUTION_FAILURE"
+    assert result["analysis_failure"]["details"]["analysis_source_count"] == 0
     assert execution["returncode"] == 7
     assert execution["failure_code"] is None
-    assert execution["missing_artifact_roles"] == ["observations"]
-    diagnostics = execution["console_diagnostics"]
-    assert diagnostics["stdout_observed_bytes"] == len(b"failure-output")
-    assert diagnostics["stderr_observed_bytes"] == len(b"failure-error")
-    assert diagnostics["stdout"] == "failure-output"
-    assert diagnostics["stderr"] == "failure-error"
-    assert "analysis_failure" in result
-    assert result["inputs"] == []
+    assert execution["missing_artifact_roles"] == [missing_role]
+    if console_output == "diagnostics":
+        diagnostics = execution["console_diagnostics"]
+        assert diagnostics["stdout_observed_bytes"] == len(b"failure-output")
+        assert diagnostics["stderr_observed_bytes"] == len(b"failure-error")
+        assert diagnostics["stdout"] == "failure-output"
+        assert diagnostics["stderr"] == "failure-error"
+        assert result["inputs"] == []
+    else:
+        assert execution["output_streams"]["stdout_bytes"] == len(b"failure-output")
+        assert execution["output_streams"]["stderr_bytes"] == len(b"failure-error")
+        assert len(result["inputs"]) == 2
+        assert {item["format"] for item in result["inputs"]} == {"text"}
     if preserve:
         preserved = result["preserved"]
         assert isinstance(preserved, dict)
@@ -266,9 +289,18 @@ def test_missing_native_artifact_keeps_capture_diagnostics_for_recovery(
         reopened = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
         try:
             manifest = reopened.read_evidence(str(preserved["evidence_id"]))
+            assert manifest["body"]["analysis_request"]["inputs"] == []
+            assert manifest["body"]["source_layout"]["analysis_sources"] == []
             stored = manifest["body"]["capture_request"]["executions"][0]
-            assert stored["console_diagnostics"]["stdout"] == "failure-output"
-            assert stored["console_diagnostics"]["stderr"] == "failure-error"
+            if console_output == "diagnostics":
+                assert stored["console_diagnostics"]["stdout"] == "failure-output"
+                assert stored["console_diagnostics"]["stderr"] == "failure-error"
+            else:
+                payloads = [
+                    path.read_bytes()
+                    for path in (reopened.repository.root / "artifacts" / "sha256").rglob("payload")
+                ]
+                assert sorted(payloads) == [b"failure-error", b"failure-output"]
         finally:
             reopened.close()
     else:

@@ -8,7 +8,7 @@ provider behavior, or lifecycle state.
 The low-level Python MCP SDK server owns protocol initialization, framing, transports, progress,
 and MCP types. A declarative Flameox tool registry projects strict input and output schemas and
 dispatches thin handlers over the shared `AnalysisRuntime`; Flameox does not implement a custom MCP
-protocol. The catalog contains 26 named analysis tools, 20 named capture tools, and four lifecycle
+protocol. The catalog contains 26 named analysis tools, 20 named capture tools, and five lifecycle
 tools. Analysis tools are read-only and idempotent. Capture tools execute a typed argv and are
 annotated as effects; they never masquerade as reads. Lifecycle tools prepare providers or manage
 immutable evidence.
@@ -46,8 +46,9 @@ capture_failures_summary        capture_pytest_fixtures
 capture_coverage_summary        capture_artifact_preview
 ```
 
-The four lifecycle tools are `prepare_providers`, `preserve_evidence`, `rescue_evidence`, and
-`query_evidence`. There are no gateway tools, opaque capability selectors, or compatibility aliases.
+The five lifecycle tools are `prepare_providers`, `preserve_evidence`, `rescue_evidence`,
+`query_evidence`, and `inspect_evidence`. There are no gateway tools, opaque capability selectors,
+or compatibility aliases.
 `flameox mcp inspect` lists compact names and annotations; `--capability CAPABILITY_ID` returns
 that capability's direct analysis/capture examples, capability-field schema, and compatible
 provider-field schemas. `--tool TOOL_NAME` shows one exact MCP input/output schema, and `--full`
@@ -60,9 +61,9 @@ decoding.
 below an existing parent to a distinct new directory. It stages the normal immutable evidence
 format beside that destination, publishes it with a filesystem rename, and returns the
 `FLAMEOX_DATA_DIR` restart/reconnect handoff. It does not repair or modify the configured repository,
-change the active runtime store, release the session handle, or expose the alternate store through
-the active server's resource template. Repeating the same rescue request during the live session
-validates the published evidence and returns the original handoff. Publication follows ordinary
+change the active runtime store, release the session handle, or make the alternate store available to
+the active server. Repeating the same rescue request during the live session validates the published
+evidence and returns the original handoff. Publication follows ordinary
 local filesystem path semantics; Flameox does not impose a workspace or repository-root policy on
 the selected parent.
 
@@ -96,25 +97,27 @@ seed, metric, estimand, threshold, and an optional oracle. Experiment-capable re
 null. There is no separate execution-mode field. Experiment behavior and interpretation are defined
 in [investigations and evidence quality](investigations.md).
 
-Successful calls keep the complete validated result in `structuredContent`. Their text block is a
-short compatibility summary with the capability, completion or truncation state, session handle,
-and next action; it does not serialize the evidence tables a second time. Content-only clients can
-still identify the outcome and recovery path, while structured clients retain the authoritative
-bounded evidence. Preserved results also return a resource link.
+Every tool returns its complete bounded JSON result inline in a text block and keeps the same
+result in `structuredContent`. Content-only clients receive evidence rows, execution provenance,
+coverage, limitations, and exact continuation or recovery actions directly, without reading a
+separate manifest first. Preserved results return an evidence ID for later inspection or replay.
 
-Failures likewise use a short text summary and keep structured details in `structuredContent`.
+Failures likewise return their complete structured details inline and in `structuredContent`.
 Capture-complete failures are ordinary typed product states, not error-side-channel data. A
 `partial` result keeps its analysis handle, typed capture executions, aggregate and workload
-status, analysis failure, and executable preservation action at the top level. Workload failures
-remain observed evidence. `retryable` and `unavailable` are also composable non-error states;
+status, analysis failure, and executable recovery action at the top level. Already-preserved
+captures inspect their existing evidence directly; unpreserved captures offer preservation first.
+Recovery offers saved-input reanalysis only when native analysis inputs were retained. A failure's
+`details.analysis_source_count` distinguishes replayable inputs from diagnostics-only captures,
+which require fixing the collector before a new capture.
+Workload failures remain observed evidence. `retryable` and `unavailable` are also composable
+non-error states;
 invalid requests, terminal infrastructure failures, and failures with no trustworthy result set
 `isError=true`. Pages are selected by row count; complete rows, execution provenance, and
 continuation arguments are returned without a response-byte ceiling or a second compaction pass.
 
-On the 2026 protocol, SDK cache hints mark the static tool and resource-template catalogs as
-public for one hour. Content-addressed evidence reads are immutable and receive a 24-hour private
-hint so they are reusable within one caller's authorization context. Older negotiated protocol
-revisions omit these fields.
+On the 2026 protocol, SDK cache hints mark the static tool catalog as public for one hour.
+Older negotiated protocol revisions omit these fields.
 
 For analysis and capture results, `next_page` contains the exact named analysis tool and complete
 arguments for the next call. It includes ordered live path sources or preserved evidence sources,
@@ -175,16 +178,16 @@ tool because it is a typed implementation choice for one evidence question. Its 
 compatible provider kinds and their exact fields; admission rejects incompatible
 capability/provider pairs before execution.
 
-There is one resource template:
+`inspect_evidence` accepts an exact `evidence_id` and returns a validated, redacted projection of
+its canonical manifest inline. It includes ordered `analysis_sources`, logical source selectors,
+artifact identities, coverage, and capture/analysis status. Pass `analysis_sources` unchanged to a
+named analysis tool to replay native artifacts. The projection omits argv, environment values,
+working directories, and host paths. The local CLI `evidence show` command is the explicit
+full-provenance view. Missing or corrupt evidence uses the ordinary structured tool-failure contract.
 
-```text
-flameox://evidence/{evidence_id}
-```
-
-`resources/list` is empty. `resources/read` returns a redacted, digest-bound projection of the
-canonical manifest with its own versioned media type. It omits argv, environment values, working
-directories, and host paths. The local CLI `evidence show` command is the explicit full-provenance
-view. A missing resource is a protocol error.
+MCP exposes no resources, resource templates, evidence URIs, or resource-link content blocks.
+Clients that previously read an evidence URI should call `inspect_evidence` with its evidence ID.
+Preservation, rescue, and inventory results now return IDs without URI fields.
 
 Every tool advertises a compact output schema for its stable result envelope. Provider-specific
 metrics and rows remain open JSON values. Success uses structured content directly, without an
@@ -216,7 +219,7 @@ with its version command; preparation does not replace active imports.
 
 Managed IDs remain `aiperf`, `memray`, `otlp`, `perfetto`, `py-spy`, and `torch`. External host tools,
 drivers, permissions, and workload-interpreter requirements are reported separately and remain
-unverified by preparation. Both structured results and text summaries carry those handoffs. No
+unverified by preparation. Both structured results and inline text carry those handoffs. No
 system package manager or privilege elevation is invoked. Perfetto still requires an externally
 installed Trace Processor. The deadline defaults to 1,800 seconds and accepts 1 through 3,600;
 MCP preparation failures use bounded path-free diagnostics, while CLI setup retains local stderr.
@@ -270,9 +273,9 @@ Projection providers may expose a bounded prefix when their native reader cannot
 resume safely. Such results keep `coverage.complete=false`, identify
 `truncation.reason=provider_limit`, and do not emit a continuation after the last
 retrievable row. A continuation therefore always names a consumable next page;
-it never promises access beyond a provider's declared projection bound. MCP summaries direct that
-terminal case toward a narrower semantic query or a reduced recapture; preservation cannot recover
-rows the provider never returned.
+it never promises access beyond a provider's declared projection bound. Callers can narrow the
+semantic query or reduce a recapture in that terminal case; preservation cannot recover rows the
+provider never returned.
 
 CLI capture takes the target as a positional argv after `--`; unknown Flameox options before
 that separator are rejected. Paths are resolved and validated by the runtime, so missing or
@@ -336,7 +339,7 @@ collector, retains separate collector and workload executable SHA-256 identities
 the invoked collector. Exit ownership is declared by each invocation builder: self-reporting workloads retain
 their observed exit even when they use a provider other than `direct`. A usable profile does not
 prove workload success. When retained, preserved stdout, stderr, and profiles
-are individually selectable from the evidence resource.
+are individually selectable from `inspect_evidence`.
 The first declared case is the baseline. A case inherits the target argv when it omits `argv`, and
 its environment overrides the target environment. Each block randomizes case order from the
 declared seed. The semantic oracle runs after every successful capture in that case environment;

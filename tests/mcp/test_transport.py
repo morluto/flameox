@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -10,12 +11,12 @@ from jsonschema import Draft202012Validator
 from mcp import Client, StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
+from mcp_types import TextContent
 
 from flameox import __version__
 from flameox.mcp.catalog import ANALYSIS_TOOLS, CAPTURE_TOOLS
 from flameox.mcp.server import FlameoxServer
 from flameox.providers.cpu import CpuProfileProvider
-from flameox.repository import AGENT_EVIDENCE_MEDIA_TYPE
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_errors import DomainError, ErrorCode
 
@@ -64,6 +65,33 @@ def test_mcp_failures_classify_operations_without_exposing_private_diagnostics(
     anyio.run(exercise)
 
 
+@pytest.mark.integration
+def test_mcp_rejects_invalid_runtime_results_before_serialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def invalid_projection(_self: AnalysisRuntime, _evidence_id: str) -> dict[str, Any]:
+        return {
+            "format_version": "3",
+            "evidence_id": "0" * 64,
+            "analysis_sources": [],
+            "logical_sources": [],
+            "body": {"invalid": object()},
+        }
+
+    monkeypatch.setattr(AnalysisRuntime, "read_evidence_agent_projection", invalid_projection)
+
+    async def exercise() -> None:
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
+            result = await client.call_tool("inspect_evidence", {"evidence_id": "0" * 64})
+            assert result.is_error is True
+            assert result.structured_content["code"] == "INTERNAL_CONTRACT_FAILURE"
+            inline = result.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == result.structured_content
+
+    anyio.run(exercise)
+
+
 @pytest.mark.process
 @pytest.mark.serial
 @pytest.mark.e2e
@@ -86,8 +114,7 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
         async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
             initialized = await session.initialize()
             listed = await session.list_tools()
-            resources = await session.list_resources()
-            templates = await session.list_resource_templates()
+            assert initialized.capabilities.resources is None
             by_name = {tool.name: tool for tool in listed.tools}
 
             assert initialized.server_info.version == __version__
@@ -95,7 +122,13 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             expected = (
                 set(ANALYSIS_TOOLS.values())
                 | set(CAPTURE_TOOLS.values())
-                | {"prepare_providers", "preserve_evidence", "rescue_evidence", "query_evidence"}
+                | {
+                    "prepare_providers",
+                    "preserve_evidence",
+                    "rescue_evidence",
+                    "query_evidence",
+                    "inspect_evidence",
+                }
             )
             assert set(by_name) == expected
             assert not {"inspect_capabilities", "analyze", "capture_and_analyze"} & set(by_name)
@@ -118,6 +151,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert query_schema.is_valid(iso_query)
             queried = await session.call_tool("query_evidence", iso_query)
             await session.validate_tool_result("query_evidence", queried)
+            inline = queried.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == queried.structured_content
             assert queried.is_error is False
             timestamp_query = {"created_after": 0}
             assert not query_schema.is_valid(timestamp_query)
@@ -145,6 +181,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 {"sources": [{"path": str(artifact)}], "page_size": 2}
             )
             await session.validate_tool_result("preview_artifact", preview)
+            inline = preview.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == preview.structured_content
             assert preview.is_error is False
             previewed_values = [
                 row["value"] for row in preview.structured_content["blocks"][1]["rows"]
@@ -153,7 +192,14 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
 
             invalid_calls: tuple[tuple[str, dict[str, Any], list[str | int] | None], ...] = (
                 ("preview_artifact", {}, None),
+                ("inspect_evidence", {"evidence_id": "bad-id"}, ["evidence_id"]),
+                ("inspect_evidence", {"evidence_id": "0" * 64, "uri": "removed"}, ["uri"]),
                 ("preview_artifact", {"sources": []}, None),
+                (
+                    "preview_artifact",
+                    {"sources": [{"path": str(artifact)}], "offset": 2**53},
+                    ["offset"],
+                ),
                 (
                     "preview_artifact",
                     {"sources": [{"path": "/tmp/impossible\x00path"}]},
@@ -332,6 +378,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 ), (tool_name, arguments)
                 result = await session.call_tool(tool_name, arguments)
                 await session.validate_tool_result(tool_name, result)
+                inline = result.content[0]
+                assert isinstance(inline, TextContent)
+                assert json.loads(inline.text) == result.structured_content
                 assert result.is_error is True
                 assert result.structured_content["code"] == "INVALID_REQUEST"
                 if expected_field_path is not None:
@@ -372,6 +421,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             )
             captured = await session.call_tool("capture_artifact_preview", capture_arguments)
             await session.validate_tool_result("capture_artifact_preview", captured)
+            inline = captured.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == captured.structured_content
             assert captured.is_error is False
             assert marker.read_text().splitlines() == ["started"]
             assert captured.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
@@ -390,6 +442,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 {"analysis_id": captured.structured_content["analysis_id"]},
             )
             await session.validate_tool_result("preserve_evidence", preserved)
+            inline = preserved.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == preserved.structured_content
             assert preserved.is_error is False
             assert preserved.structured_content["next_page"] is not None
             assert (
@@ -418,6 +473,9 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 },
             )
             await session.validate_tool_result("capture_artifact_preview", failed)
+            inline = failed.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == failed.structured_content
             assert failed.structured_content["status"] == "partial"
             assert failed.structured_content["capture"]["workload_status"] == "failed"
             failed_page = failed.structured_content["next_page"]
@@ -428,10 +486,20 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert second.is_error is False
             assert second.structured_content["blocks"][1]["rows"][0]["text"] == "second row"
             assert marker.read_text().splitlines() == ["started", "started"]
-            assert resources.resources == []
-            assert [item.uri_template for item in templates.resource_templates] == [
-                "flameox://evidence/{evidence_id}"
-            ]
-            assert templates.resource_templates[0].mime_type == AGENT_EVIDENCE_MEDIA_TYPE
+            inspected = await session.call_tool(
+                "inspect_evidence", {"evidence_id": preserved.structured_content["evidence_id"]}
+            )
+            await session.validate_tool_result("inspect_evidence", inspected)
+            assert inspected.is_error is False
+            inline = inspected.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == inspected.structured_content
+            assert "uri" not in preserved.structured_content
+            replay = await session.call_tool(
+                "preview_artifact", {"sources": inspected.structured_content["analysis_sources"]}
+            )
+            assert replay.is_error is False
+            assert replay.structured_content["blocks"][1]["rows"][0]["text"] == "stdio capture"
+            assert marker.read_text().splitlines() == ["started", "started"]
 
     anyio.run(exercise)

@@ -640,9 +640,6 @@ def mcp_inspect(
         server = FlameoxServer()
         return {
             "tools": [item.model_dump(mode="json") for item in await server.list_tools()],
-            "resources": [
-                item.model_dump(mode="json") for item in await server.list_resource_templates()
-            ],
         }
 
     catalog = anyio.run(inspect_server)
@@ -675,14 +672,6 @@ def mcp_inspect(
             "tool_count": len(tools),
             "tools": tools,
             "capabilities": [capability_descriptor(capability) for capability in CAPABILITIES],
-            "resources": [
-                {
-                    "name": resource["name"],
-                    "uri_template": resource["uri_template"],
-                    "description": resource["description"],
-                }
-                for resource in catalog["resources"]
-            ],
         }
     else:
         catalog["tools"] = tools

@@ -57,7 +57,7 @@ the `ProcessCancelledError` output and cleanup receipt, including peak-RSS execu
 The outer thread wait must remain request-owned: `abandon_on_cancel=True` or raw
 `asyncio.Task.cancel()` is not a substitute for cancelling the owning AnyIO scope and joining
 cleanup. Arbitrary synchronous reader code is not made interruptible by this bridge.
-MCP analysis, preservation, query and resource reads use `AnalysisRuntime.run_in_request`.
+MCP analysis, preservation, query and evidence inspection use `AnalysisRuntime.run_in_request`.
 It serializes shared-state phases in a worker thread owned by an AnyIO task group;
 the group joins the worker before releasing state, including direct caller task
 cancellation. Capture admission, finalization, scratch accounting and cleanup use
@@ -141,8 +141,8 @@ downstream code does not discover malformed state through `KeyError` or `Attribu
 All work stays local. Manifests preserve explicit paths, provider identity,
 effective requests, digests, and execution provenance, so callers must consider
 whether those values are sensitive before preservation. Flameox does not upload
-artifacts, launch native viewers, or expose payload bytes through MCP resources.
-The ordinary MCP evidence resource is a structurally allowlisted projection: full argv,
+artifacts, launch native viewers, or expose native payload bytes through evidence inspection.
+The MCP `inspect_evidence` result is a structurally allowlisted projection: full argv,
 environment values, working directories, source paths, and scratch paths remain available only
 through explicit local canonical-manifest inspection.
 

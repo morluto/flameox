@@ -45,6 +45,10 @@ tools from that registry rather than hard-coding a count or a removed interface.
 A separate real stdio workflow starts with reduced server ceilings and verifies inherited defaults,
 pre-execution limit rejection, and exact preservation/replay of lower request limits. Schema
 regressions belong in the existing transport workflow, including numeric coercion and query bounds.
+The stdio workflow also checks inline JSON against structured results, evidence inspection by ID,
+and replay through returned source selectors. Restart, rescue, and provenance redaction workflows
+use `inspect_evidence`; MCP resource capabilities are absent. Fault injection verifies that malformed
+runtime results produce a typed contract failure before JSON serialization.
 
 ## Evidence and limits
 

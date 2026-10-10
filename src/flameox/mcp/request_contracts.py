@@ -227,6 +227,10 @@ class PrepareProvidersArguments(StrictModel):
     timeout_seconds: int = Field(default=1_800, ge=1, le=3_600)
 
 
+class InspectEvidenceArguments(StrictModel):
+    evidence_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
+
+
 class PreserveArguments(StrictModel):
     analysis_id: str = Field(pattern=LOWERCASE_SHA256_PATTERN)
 

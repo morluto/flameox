@@ -14,8 +14,9 @@ artifacts; capture experiments declare randomized cases, repetitions, a metric a
 inspect_performance_candidates reads SARIF rather than scanning source. Follow next_page.tool with
 next_page.arguments verbatim; pagination always reads existing evidence and never recaptures.
 Session analyses expire at shutdown or eviction: preserve_evidence publishes immutable evidence;
-query_evidence finds it later. Preservation refreshes next_page to immutable sources. Copy resource
-URIs verbatim. Partial, retryable and unavailable results are typed product states; follow
+query_evidence finds it later; inspect_evidence returns metadata and replay sources inline.
+Preservation refreshes next_page to immutable sources. Pass evidence IDs and source selectors
+verbatim. Partial, retryable and unavailable results are typed product states; follow
 next_action. Profiles locate exploratory evidence and do not prove causality or improvement."""
 
 TOOL_DESCRIPTIONS = {
@@ -26,7 +27,7 @@ TOOL_DESCRIPTIONS = {
     ),
     "preserve_evidence": (
         "Keep a live analysis beyond eviction or shutdown. Publish its native artifacts and "
-        "provenance as immutable evidence, returning an evidence ID, resource URI, and refreshed "
+        "provenance as immutable evidence, returning an evidence ID and refreshed "
         "next_page when available."
     ),
     "rescue_evidence": (
@@ -34,11 +35,15 @@ TOOL_DESCRIPTIONS = {
         "store. Publish into an explicit new evidence directory and return its restart handoff; "
         "the active store stays selected. Already-preserved captures use their immutable sources."
     ),
+    "inspect_evidence": (
+        "Read one preserved evidence ID. Returns validated, redacted manifest metadata and "
+        "ordered analysis_sources inline. Pass those sources unchanged to a named analysis tool "
+        "to replay the saved artifacts without recapturing. Native payload bytes stay local."
+    ),
     "query_evidence": (
         "Find preserved evidence after a session ends. Search immutable manifest metadata with "
-        "typed filters and rows, then read a returned resource URI or use its source selectors "
-        "with a named analysis tool. Reports inventory coverage and a next_page when more matches "
-        "exist."
+        "typed filters and rows, then call inspect_evidence for replay sources. "
+        "Reports inventory coverage and a next_page when more matches exist."
     ),
 }
 

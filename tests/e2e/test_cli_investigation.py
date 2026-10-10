@@ -13,7 +13,7 @@ import pytest
 from mcp import StdioServerParameters
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
-from mcp_types import TextResourceContents
+from mcp_types import TextContent
 
 pytestmark = [pytest.mark.e2e, pytest.mark.process]
 
@@ -292,9 +292,11 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
                 assert rejected.structured_content is not None
                 assert rejected.structured_content["code"] == "INVALID_REQUEST"
                 assert not marker.exists()
-            resource = await session.read_resource(f"flameox://evidence/{evidence_id}")
-            content = resource.contents[0]
-            assert isinstance(content, TextResourceContents)
+            inspected = await session.call_tool("inspect_evidence", {"evidence_id": evidence_id})
+            await session.validate_tool_result("inspect_evidence", inspected)
+            assert inspected.is_error is False
+            content = inspected.content[0]
+            assert isinstance(content, TextContent)
             projection = json.loads(content.text)
             assert str(tmp_path) not in content.text
             assert "capture_argv" not in content.text

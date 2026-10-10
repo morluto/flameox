@@ -8,7 +8,7 @@ from pathlib import Path
 import anyio
 import pytest
 from mcp import Client
-from mcp_types import ResourceLink, TextResourceContents
+from mcp_types import TextContent
 
 from flameox.mcp.server import FlameoxServer
 from flameox.runtime import AnalysisRuntime
@@ -48,6 +48,7 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
 
             assert result["analysis_failure"] is not None
             assert result["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
+            assert result["analysis_failure"]["details"]["analysis_source_count"] == 1
             assert result["capture"]["outcome"]["status"] == "succeeded"
             assert (tmp_path / "workload-runs.txt").read_text().splitlines() == ["run"]
 
@@ -81,8 +82,10 @@ def test_native_capture_survives_tight_analysis_limit_and_can_be_reanalyzed(
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("preserve", [False, True])
 def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
     tmp_path: Path,
+    preserve: bool,
 ) -> None:
     async def exercise() -> None:
         target = _coverage_target(tmp_path)
@@ -97,28 +100,50 @@ def test_mcp_native_analysis_failure_is_a_preservable_partial_result(
                 {
                     "target": {"argv": target.argv, "cwd": target.cwd},
                     "provider": {"kind": "coverage", **target.capture_arguments},
-                    "preserve": True,
+                    "preserve": preserve,
                 },
             )
 
             assert response.is_error is False
             partial = response.structured_content
             assert partial["status"] == "partial"
-            assert partial["next_action"]["kind"] == "preserve_then_analyze"
             assert partial["analysis_failure"]["code"] == "LIMIT_EXCEEDED"
             assert partial["analysis_id"]
-            preserved = partial["preserved"]
+            action = partial["next_action"]
+            if preserve:
+                preserved = partial["preserved"]
+                assert action["kind"] == "call_tool"
+                assert action["tool"] == "inspect_evidence"
+                assert action["arguments"] == {"evidence_id": preserved["evidence_id"]}
+                assert action["then_retry"] == "summarize_coverage"
+            else:
+                assert action["kind"] == "preserve_then_analyze"
+                saved = await client.call_tool("preserve_evidence", action["preserve_arguments"])
+                assert saved.is_error is False
+                preserved = saved.structured_content
             assert preserved["evidence_id"]
-            assert preserved["uri"]
-            links = [item for item in response.content if isinstance(item, ResourceLink)]
-            assert [item.uri for item in links] == [preserved["uri"]]
+            assert "uri" not in preserved
+            inline = response.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == partial
             assert (tmp_path / "workload-runs.txt").read_text().splitlines() == ["run"]
 
-            resource = await client.read_resource(preserved["uri"])
-            assert isinstance(resource.contents[0], TextResourceContents)
-            projection = json.loads(resource.contents[0].text)
+            inspected = await client.call_tool(
+                "inspect_evidence", {"evidence_id": preserved["evidence_id"]}
+            )
+            assert inspected.is_error is False
+            projection = inspected.structured_content
             assert len(projection["analysis_sources"]) == 1
             assert projection["body"]["analysis_request"]["failure"]["code"] == "LIMIT_EXCEEDED"
+
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as restarted:
+            retried = await restarted.call_tool(
+                "summarize_coverage", {"sources": projection["analysis_sources"]}
+            )
+            assert retried.is_error is False
+            assert retried.structured_content["analysis_failure"] is None
+            assert retried.structured_content["blocks"][0]["values"]["line_count"] >= 1
+            assert (tmp_path / "workload-runs.txt").read_text().splitlines() == ["run"]
 
     anyio.run(exercise)
 
@@ -140,24 +165,40 @@ def test_rejected_sparse_native_artifact_keeps_capture_failure_recoverable(
     )
 
     async def exercise() -> dict[str, object]:
-        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
-        try:
-            result = await runtime.capture_and_analyze(
-                CaptureTarget(
-                    argv=[sys.executable, str(workload)],
-                    cwd=str(tmp_path),
-                    provider_id="observations",
-                ),
-                "failures.summary",
-                limits=RequestLimits(max_output_bytes=1024),
-                preserve=preserve,
+        async with Client(FlameoxServer(evidence_directory=tmp_path / "store")) as client:
+            response = await client.call_tool(
+                "capture_failures_summary",
+                {
+                    "target": {"argv": [sys.executable, str(workload)], "cwd": str(tmp_path)},
+                    "provider": {"kind": "observations"},
+                    "limits": {"max_output_bytes": 1024},
+                    "preserve": preserve,
+                },
             )
-            preserved = result.get("preserved") or runtime.preserve_evidence(result["analysis_id"])
-            resource = runtime.read_evidence_agent_projection(preserved["evidence_id"])
+            assert not response.is_error
+            result = response.structured_content
+            assert result["analysis_failure"]["details"]["analysis_source_count"] == 0
+            action = result["next_action"]
+            assert action["kind"] == "call_tool"
+            assert action["then_retry"] is None
+            assert "before a new capture" in action["message"]
+            preserved = result.get("preserved")
+            if preserve:
+                assert action["tool"] == "inspect_evidence"
+            else:
+                assert action["tool"] == "preserve_evidence"
+                saved = await client.call_tool(action["tool"], action["arguments"])
+                assert not saved.is_error
+                preserved = saved.structured_content
+            assert preserved is not None
+            inspected = await client.call_tool(
+                "inspect_evidence", {"evidence_id": preserved["evidence_id"]}
+            )
+            assert not inspected.is_error
+            resource = inspected.structured_content
+            assert resource["analysis_sources"] == []
             assert resource["body"]["artifacts"] == []
-            return result
-        finally:
-            runtime.close()
+            return dict(result)
 
     result = anyio.run(exercise)
     execution = result["capture"]["executions"][0]  # type: ignore[index]
