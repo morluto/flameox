@@ -136,6 +136,8 @@ class ExecutableResolver:
                 resolved,
                 "The bound executable now resolves to a different target.",
             )
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise self._changed(resolved, "The bound executable is no longer a regular file.")
         if _identity(canonical_target, target_stat) != resolved.identity:
             raise self._changed(resolved, "The bound executable changed after planning.")
         return resolved
@@ -200,7 +202,12 @@ def _normalized_search_path(value: str | None, cwd: Path) -> tuple[str, tuple[Pa
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise DomainError(
+                ErrorCode.MISSING_OR_CHANGED_INPUT, "Executable target is not a regular file."
+            )
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return sha256_id(digest.hexdigest())

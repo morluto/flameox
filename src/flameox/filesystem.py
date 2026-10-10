@@ -109,7 +109,7 @@ class BoundedFileSystem:
         if os.name == "nt":
             return _open_windows_beneath(root, relative)
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        source_flags = os.O_RDONLY
+        source_flags = os.O_RDONLY | os.O_NONBLOCK
         for name in ("O_CLOEXEC", "O_NOFOLLOW"):
             directory_flags |= getattr(os, name, 0)
             source_flags |= getattr(os, name, 0)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,3 +82,45 @@ async def test_broker_rejects_an_executable_changed_after_binding(tmp_path: Path
 
     assert caught.value.code is ErrorCode.MISSING_OR_CHANGED_INPUT
     assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs require POSIX")
+@pytest.mark.parametrize("boundary", ["filesystem", "executable"])
+def test_special_files_are_rejected_without_blocking(tmp_path: Path, boundary: str) -> None:
+    script = """
+import os, shutil, sys
+from pathlib import Path
+from flameox.command_binding import ExecutableResolver
+from flameox.executable_models import ExecutableResolutionRequest, ExecutableTrustPolicy
+from flameox.filesystem import BoundedFileSystem
+from flameox.runtime_errors import DomainError, ErrorCode
+root = Path(sys.argv[1])
+path = root / 'native'
+if sys.argv[2] == 'executable':
+    shutil.copy2(sys.executable, path)
+    resolver = ExecutableResolver()
+    binding = resolver.resolve(ExecutableResolutionRequest(
+        token=str(path), cwd=root, environment={},
+        policy=ExecutableTrustPolicy.TRUSTED_HOST_TOOL))
+    path.unlink()
+os.mkfifo(path)
+try:
+    if sys.argv[2] == 'filesystem':
+        BoundedFileSystem((root,)).read_bytes(path, max_bytes=1024)
+    else:
+        resolver.revalidate(binding)
+except DomainError as error:
+    expected = (ErrorCode.EXECUTION_FAILURE if sys.argv[2] == 'filesystem'
+                else ErrorCode.MISSING_OR_CHANGED_INPUT)
+    assert error.code is expected
+else:
+    raise AssertionError('special file was accepted')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), boundary],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
