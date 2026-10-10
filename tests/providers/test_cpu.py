@@ -556,3 +556,42 @@ def test_py_spy_capture_executes_managed_tool_when_request_path_is_empty(
     assert manifest["body"]["capture_request"]["target"]["capture_arguments"] == {
         "subprocesses": subprocesses
     }
+
+
+@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+@pytest.mark.parametrize("weight", [2**53 + 1, 1e308])
+def test_speedscope_preserves_exact_counts_and_rejects_overflowed_totals(
+    tmp_path: Path, capability: str, weight: int | float
+) -> None:
+    profile = tmp_path / "weighted.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "root"}, {"name": "leaf"}]},
+                "profiles": [
+                    {
+                        "type": "sampled",
+                        "unit": "none",
+                        "samples": [[0, 1], [0, 1]],
+                        "weights": [weight, weight],
+                    }
+                ],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        if isinstance(weight, float):
+            with pytest.raises(RuntimeFailure) as caught:
+                runtime.analyze(capability, [PathSource(path=str(profile), format="py-spy")], {})
+            assert caught.value.code == "LIMIT_EXCEEDED"
+        else:
+            result = runtime.analyze(
+                capability, [PathSource(path=str(profile), format="py-spy")], {}
+            )
+            row = result["blocks"][1]["rows"][0]
+            assert row["self_weight" if capability == "cpu.hotspots" else "weight"] == str(
+                weight * 2
+            )
+    finally:
+        runtime.close()

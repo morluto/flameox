@@ -50,8 +50,8 @@ class CpuProfileProvider:
             if capability_id == "cpu.callers"
             else None
         )
-        self_weights: defaultdict[int, float] = defaultdict(float)
-        inclusive_weights: defaultdict[int, float] = defaultdict(float)
+        self_weights: defaultdict[int, int | float] = defaultdict(int)
+        inclusive_weights: defaultdict[int, int | float] = defaultdict(int)
         sample_count = 0
         unresolved_sample_count = 0
         weight_units: set[str] = set()
@@ -86,12 +86,21 @@ class CpuProfileProvider:
                     unresolved_sample_count += 1
                     continue
                 stack = [_frame_index(value, len(normalized_frames)) for value in stack_value]
-                weight = (
-                    1.0 if weights is None else _number(weights[sample_index], "sample weight")
-                ) * weight_scale
-                self_weights[stack[-1]] += weight
+                try:
+                    weight = (
+                        1 if weights is None else _number(weights[sample_index], "sample weight")
+                    ) * weight_scale
+                except OverflowError as error:
+                    raise ProviderFailure(
+                        "DECODE_FAILURE", "Speedscope weight is invalid"
+                    ) from error
+                if isinstance(weight, float) and not math.isfinite(weight):
+                    raise ProviderFailure("DECODE_FAILURE", "Speedscope weight is invalid")
+                self_weights[stack[-1]] = _sum_weights(self_weights[stack[-1]], weight)
                 for frame_index in set(stack):
-                    inclusive_weights[frame_index] += weight
+                    inclusive_weights[frame_index] = _sum_weights(
+                        inclusive_weights[frame_index], weight
+                    )
                 if callers is not None:
                     callers.add(profile_index, stack, weight)
         rows = [
@@ -103,7 +112,7 @@ class CpuProfileProvider:
             }
             for index in inclusive_weights
         ]
-        rows.sort(key=lambda row: (-float(row["self_weight"]), str(row["function"])))
+        rows.sort(key=lambda row: (-row["self_weight"], str(row["function"])))
         if not rows:
             raise ProviderFailure(
                 "DECODE_FAILURE", "Speedscope profile contains no resolved samples"
@@ -218,10 +227,10 @@ class _SampledCallers:
             or function.casefold()
             in f"{frame['file']}:{frame['line']}:{frame['function']}".casefold()
         }
-        self.weights: defaultdict[tuple[int, int, int], float] = defaultdict(float)
+        self.weights: defaultdict[tuple[int, int, int], int | float] = defaultdict(int)
         self.samples: defaultdict[tuple[int, int, int], int] = defaultdict(int)
 
-    def add(self, profile: int, stack: list[int], weight: float) -> None:
+    def add(self, profile: int, stack: list[int], weight: int | float) -> None:
         for caller, callee in set(pairwise(stack)):
             if self.direction == "callers":
                 matches = callee in self.matches
@@ -236,7 +245,7 @@ class _SampledCallers:
                 raise ProviderFailure(
                     "LIMIT_EXCEEDED", "Speedscope caller edge count exceeds the limit"
                 )
-            self.weights[key] += weight
+            self.weights[key] = _sum_weights(self.weights[key], weight)
             self.samples[key] += 1
 
     def rows(self, unit: str) -> list[dict[str, Any]]:
@@ -285,14 +294,14 @@ def _object(value: object, subject: str) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
-def _speedscope_weight_unit(value: object) -> tuple[str, float]:
+def _speedscope_weight_unit(value: object) -> tuple[str, int | float]:
     if value == "bytes":
         raise ProviderFailure(
             "UNSUPPORTED_FORMAT",
             "Byte-weighted Speedscope profiles are not CPU hotspot evidence",
         )
     if value == "none":
-        return "samples", 1.0
+        return "samples", 1
     if isinstance(value, str) and value in _SPEEDSCOPE_TIME_SCALES:
         return "seconds", _SPEEDSCOPE_TIME_SCALES[value]
     raise ProviderFailure("DECODE_FAILURE", "Speedscope weight unit is invalid")
@@ -318,13 +327,22 @@ def _frame_index(value: object, frame_count: int) -> int:
     return value
 
 
-def _number(value: object, subject: str) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool):
+def _number(value: object, subject: str) -> int | float:
+    if (
+        not isinstance(value, int | float)
+        or isinstance(value, bool)
+        or value < 0
+        or (isinstance(value, float) and not math.isfinite(value))
+    ):
         raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid")
+    return value
+
+
+def _sum_weights(left: int | float, right: int | float) -> int | float:
     try:
-        result = float(value)
+        result = left + right
     except OverflowError as error:
-        raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid") from error
-    if not math.isfinite(result) or result < 0:
-        raise ProviderFailure("DECODE_FAILURE", f"{subject} is invalid")
+        raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope weight total is too large") from error
+    if isinstance(result, float) and not math.isfinite(result):
+        raise ProviderFailure("LIMIT_EXCEEDED", "Speedscope weight total is too large")
     return result
