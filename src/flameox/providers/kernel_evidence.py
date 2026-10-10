@@ -575,12 +575,17 @@ def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(timings, list) or not timings or len(timings) > 32:
             raise ProviderFailure("DECODE_FAILURE", "Triton candidate timings are invalid")
         finite_timings = [_finite(value, "Triton timing") for value in timings]
+        try:
+            mean_ms = fmean(finite_timings)
+        except OverflowError:
+            scale = max(abs(value) for value in finite_timings)
+            mean_ms = fmean(value / scale for value in finite_timings) * scale
         normalized_candidates.append(
             {
                 "config_id": content_id(canonical_bytes(config)),
                 "config": config,
                 "timings_ms": finite_timings,
-                "mean_ms": fmean(finite_timings),
+                "mean_ms": mean_ms,
             }
         )
     winner = _json_object(event.get("winner"), "Triton winner")

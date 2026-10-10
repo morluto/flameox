@@ -327,6 +327,25 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> No
     assert winner["config"] == _triton_event()["winner"]
 
 
+@pytest.mark.parametrize("timing", [1e308, 1.7976931348623157e308])
+def test_triton_listener_means_remain_finite_when_timing_sums_overflow(
+    tmp_path: Path, timing: float
+) -> None:
+    artifact = tmp_path / "triton.jsonl"
+    event = _triton_event()
+    event["candidates"][0]["timings_ms"] = [timing, timing]  # type: ignore[index]
+    artifact.write_text(json.dumps(event) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+        )
+    finally:
+        runtime.close()
+    assert result["blocks"][1]["rows"][0]["candidates"][0]["mean_ms"] == timing
+    assert result["coverage"]["complete"]
+
+
 def test_triton_listener_counts_cover_events_beyond_the_returned_population(tmp_path: Path) -> None:
     artifact = tmp_path / "triton.jsonl"
     event = {**_triton_event(), "cache_hit": True, "duration_ms": None}
