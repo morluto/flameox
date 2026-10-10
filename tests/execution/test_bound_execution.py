@@ -165,3 +165,61 @@ else:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
+async def test_executable_symlink_loops_return_typed_failures_before_launch(tmp_path: Path) -> None:
+    from flameox.runtime import AnalysisRuntime
+    from flameox.runtime_contracts import CaptureTarget, RuntimeFailure
+
+    executable = tmp_path / "tool"
+    executable.symlink_to(sys.executable)
+    resolver = ExecutableResolver()
+    binding = resolver.require_host_tool(str(executable), cwd=tmp_path)
+    executable.unlink()
+    executable.symlink_to(executable)
+    with pytest.raises(DomainError) as changed:
+        await SubprocessBroker().run(
+            ExecutionRequest(
+                argv=(str(executable), "-c", "pass"),
+                executable_binding=binding,
+                cwd=tmp_path,
+                allowed_working_roots=(tmp_path,),
+            )
+        )
+    assert changed.value.code is ErrorCode.MISSING_OR_CHANGED_INPUT
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as admission:
+            await runtime.capture_and_analyze(
+                CaptureTarget(argv=[str(executable)], cwd=str(tmp_path), provider_id="direct"),
+                "artifact.preview",
+            )
+        assert admission.value.code == "EXECUTION_FAILURE"
+        assert str(tmp_path) not in admission.value.message
+        assert not (tmp_path / "store").exists()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink fixture")
+@pytest.mark.parametrize("boundary", ["cwd", "allowed_root"])
+async def test_working_directory_symlink_loops_return_typed_failures(
+    tmp_path: Path, boundary: str
+) -> None:
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    binding = ExecutableResolver().require_host_tool(sys.executable, cwd=tmp_path)
+    with pytest.raises(DomainError) as failure:
+        await SubprocessBroker().run(
+            ExecutionRequest(
+                argv=(sys.executable, "-c", "raise SystemExit('must not launch')"),
+                executable_binding=binding,
+                cwd=loop if boundary == "cwd" else tmp_path,
+                allowed_working_roots=(loop if boundary == "allowed_root" else tmp_path,),
+            )
+        )
+    assert failure.value.code is ErrorCode.INVALID_INPUT
+    assert str(tmp_path) not in failure.value.message

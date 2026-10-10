@@ -10,9 +10,7 @@ from flameox.models import ContractModel
 
 class ExecutableTrustPolicy(StrEnum):
     PROJECT_BOUND = "project_bound"
-    MANAGED_TOOL = "managed_tool"
     TRUSTED_HOST_TOOL = "trusted_host_tool"
-    EXACT_PATH = "exact_path"
 
 
 class ExecutableResolutionOrigin(StrEnum):

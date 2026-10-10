@@ -193,20 +193,12 @@ def _query(request: PerfettoWorkerRequest) -> PerfettoWorkerResult:
             count_rows = list(
                 processor.query(f"SELECT count(*) AS total FROM slice WHERE {predicate}")
             )
-            after_ts = request.after_ts
-            after_id = request.after_id
-            page_predicate = predicate
-            if after_ts is not None and after_id is not None:
-                page_predicate += (
-                    f" AND (ts > {int(str(after_ts)):d} OR "
-                    f"(ts = {int(str(after_ts)):d} AND id > {int(str(after_id)):d}))"
-                )
             rows = list(
                 processor.query(
                     "SELECT id, parent_id, "
                     "coalesce(nullif(name, ''), '<unnamed>') AS name, "
                     "category, ts, dur, track_id FROM slice WHERE "
-                    f"{page_predicate} ORDER BY ts, id LIMIT {limit + 1:d}"
+                    f"{predicate} ORDER BY ts, id LIMIT {limit + 1:d}"
                 )
             )
             return PerfettoWindowResult(

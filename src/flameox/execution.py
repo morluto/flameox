@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import signal
-import stat
 import threading
 import time
 from collections import deque
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, Annotated, Any, Literal, cast
+from typing import IO, Any, Literal, cast
 
 import anyio
 import psutil
@@ -120,11 +119,6 @@ class ExecutionRequest(ContractModel):
     )
     systemd_scope_unit: str | None = None
     resource_policy: ResourcePolicy | None = None
-    inherited_directory_fds: tuple[Annotated[int, Field(ge=0)], ...] = Field(
-        default=(),
-        exclude=True,
-        max_length=8,
-    )
 
     @field_validator("argv")
     @classmethod
@@ -146,21 +140,6 @@ class ExecutionRequest(ContractModel):
             str(binding.canonical_target),
         }:
             raise ValueError("argv[0] must identify the bound executable")
-        return self
-
-    @model_validator(mode="after")
-    def inherited_descriptors_are_unique_directories(self) -> ExecutionRequest:
-        if len(set(self.inherited_directory_fds)) != len(self.inherited_directory_fds):
-            raise ValueError("inherited directory descriptors must be unique")
-        if self.inherited_directory_fds and os.name != "posix":
-            raise ValueError("inherited directory descriptors require a POSIX subprocess")
-        for descriptor in self.inherited_directory_fds:
-            try:
-                metadata = os.fstat(descriptor)
-            except OSError as exc:
-                raise ValueError("inherited directory descriptor is not open") from exc
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ValueError("only directory descriptors can be inherited")
         return self
 
     @model_validator(mode="after")
@@ -378,10 +357,6 @@ class _OutputBudget:
         self.remaining -= byte_count
         if self.remaining < 0:
             raise _OutputLimitExceeded
-
-    @property
-    def exceeded(self) -> bool:
-        return self.remaining < 0
 
 
 @dataclass(slots=True)
@@ -647,7 +622,6 @@ class SubprocessBroker:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         start_new_session=os.name == "posix",
-                        pass_fds=request.inherited_directory_fds,
                     )
         except TimeoutError as exc:
             if output_sink is not None:
@@ -1372,7 +1346,6 @@ class SubprocessBroker:
         reader: asyncio.StreamReader,
         budget: _OutputBudget,
         *,
-        drain_on_limit: bool = False,
         diagnostic_limit: int | None = None,
         diagnostic_state: _DiagnosticOutputState | None = None,
         output: bytearray | None = None,
@@ -1408,11 +1381,7 @@ class SubprocessBroker:
                 )
                 output.extend(chunk[:preview])
                 if exceeded:
-                    if not drain_on_limit:
-                        raise _OutputLimitExceeded
-                    while await reader.read(64 * 1024):
-                        pass
-                    break
+                    raise _OutputLimitExceeded
             complete = True
         finally:
             if diagnostic_state is not None and name is not None:
@@ -1598,16 +1567,6 @@ class SubprocessBroker:
         if transport is not None:
             transport.close()
 
-    async def _collect_readers(
-        self,
-        stdout_task: asyncio.Task[bytes],
-        stderr_task: asyncio.Task[bytes],
-    ) -> tuple[bytes, bytes]:
-        values = await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        stdout = values[0] if isinstance(values[0], bytes) else b""
-        stderr = values[1] if isinstance(values[1], bytes) else b""
-        return stdout, stderr
-
     async def _collect_resource(
         self,
         task: asyncio.Task[RuntimeResourceSummary | None],
@@ -1624,15 +1583,21 @@ class SubprocessBroker:
         await asyncio.gather(task, return_exceptions=True)
 
     def _resolve_cwd(self, cwd: Path, allowed_roots: tuple[Path, ...]) -> Path:
-        resolved = cwd.resolve()
+        try:
+            resolved = cwd.resolve()
+            roots = tuple(root.resolve() for root in allowed_roots)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise DomainError(
+                ErrorCode.INVALID_INPUT, "Working directory or allowed root cannot be resolved."
+            ) from error
         if not resolved.is_dir():
             raise DomainError(
                 ErrorCode.INVALID_INPUT,
                 f"Working directory does not exist: {resolved}",
             )
-        for root in allowed_roots:
+        for root in roots:
             try:
-                resolved.relative_to(root.resolve())
+                resolved.relative_to(root)
                 return resolved
             except ValueError:
                 continue

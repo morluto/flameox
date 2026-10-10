@@ -23,8 +23,6 @@ class PerfettoWindowRequest(ContractModel):
     start_ns: int
     end_ns: int
     limit: Annotated[int, Field(gt=0, le=10_000)]
-    after_ts: int | None = None
-    after_id: int | None = None
 
 
 type PerfettoWorkerRequest = Annotated[

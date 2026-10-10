@@ -22,20 +22,16 @@ class ExecutableResolver:
     """Resolve, authorize, and identify the exact executable selected for a request."""
 
     def resolve(self, request: ExecutableResolutionRequest) -> ResolvedExecutable:
-        cwd = request.cwd.resolve(strict=True)
+        try:
+            cwd = request.cwd.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise self._refused(
+                request.token, "Executable working directory cannot be resolved."
+            ) from error
         if not cwd.is_dir():
             raise self._refused(request.token, "Executable resolution cwd is not a directory.")
 
         path_like = _is_path_like(request.token)
-        if (
-            request.policy is ExecutableTrustPolicy.EXACT_PATH
-            and not Path(request.token).is_absolute()
-        ):
-            raise self._refused(
-                request.token,
-                "Exact-path executable policy requires an absolute path.",
-            )
-
         matched_path_entry: Path | None = None
         if path_like:
             candidate = Path(request.token)
@@ -61,7 +57,7 @@ class ExecutableResolver:
         try:
             canonical_target = invocation_path.resolve(strict=True)
             target_stat = canonical_target.stat()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise self._refused(
                 request.token,
                 "Executable target is missing or cannot be resolved.",
@@ -70,7 +66,10 @@ class ExecutableResolver:
             raise self._refused(request.token, "Executable target is not a runnable regular file.")
 
         decision = self._authorize(request, canonical_target)
-        identity = _identity(canonical_target, target_stat)
+        try:
+            identity = _identity(canonical_target, target_stat)
+        except OSError as error:
+            raise self._refused(request.token, "Executable target cannot be read.") from error
         return ResolvedExecutable(
             requested_token=request.token,
             invocation_path=invocation_path,
@@ -89,7 +88,7 @@ class ExecutableResolver:
         environment: dict[str, str] | None = None,
     ) -> ResolvedExecutable | None:
         """Resolve an optional host tool through the same authoritative binding path."""
-        working_directory = (cwd or Path.cwd()).resolve()
+        working_directory = cwd or Path.cwd()
         selected_environment = dict(os.environ if environment is None else environment)
         try:
             return self.resolve(
@@ -129,7 +128,7 @@ class ExecutableResolver:
         try:
             canonical_target = resolved.invocation_path.resolve(strict=True)
             target_stat = canonical_target.stat()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise self._changed(resolved, "The bound executable is no longer available.") from exc
         if canonical_target != resolved.canonical_target:
             raise self._changed(
@@ -138,7 +137,11 @@ class ExecutableResolver:
             )
         if not stat.S_ISREG(target_stat.st_mode):
             raise self._changed(resolved, "The bound executable is no longer a regular file.")
-        if _identity(canonical_target, target_stat) != resolved.identity:
+        try:
+            current_identity = _identity(canonical_target, target_stat)
+        except OSError as error:
+            raise self._changed(resolved, "The bound executable cannot be read.") from error
+        if current_identity != resolved.identity:
             raise self._changed(resolved, "The bound executable changed after planning.")
         return resolved
 
@@ -150,7 +153,12 @@ class ExecutableResolver:
         if request.policy is ExecutableTrustPolicy.TRUSTED_HOST_TOOL:
             return ExecutablePolicyDecision(policy=request.policy, allowed=True)
 
-        roots = tuple(root.resolve(strict=True) for root in request.allowed_roots)
+        try:
+            roots = tuple(root.resolve(strict=True) for root in request.allowed_roots)
+        except (OSError, RuntimeError) as error:
+            raise self._refused(
+                request.token, "Executable authorization roots cannot be resolved."
+            ) from error
         for root in roots:
             try:
                 canonical_target.relative_to(root)
