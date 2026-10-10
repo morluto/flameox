@@ -2,6 +2,11 @@
 
 All notable changes to flameox are documented in this file.
 
+## [0.2.10] - 2026-10-10
+
+### Documentation
+
+- Trim agent guidance and remove migration notes
 ## [0.2.9] - 2026-10-10
 
 ### Bug Fixes
