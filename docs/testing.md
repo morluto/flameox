@@ -183,3 +183,27 @@ surrogate replacement remains a documented decoding limitation.
 Existing execution and trace-window workflows cover removal of unused descriptor transfer,
 executable policies, reader branches, and alternate Perfetto pagination fields. These fixtures
 establish contract behavior, not compatibility with every installed vendor collector.
+
+Setup's installed CLI workflow exercises base and optional-provider releases with successful
+verification, absent uvx, version mismatch, resolver failure, excessive output, and timeout.
+The timeout shim forks a child and proves it cannot finish after setup reports failure.
+Directory-source workflows reject unreadable nested directories during admission and preservation;
+this permission proof requires a non-root POSIX user. Mooncake comparisons distinguish prefix reuse
+patterns without exposing native hashes. pstats workflows reject unresolved callers before filtering.
+
+Runtime workflows tolerate real subprocess churn in live scratch directories. Projection-cache tests
+use real reader file identities with a controlled provider result to verify reuse, replacement,
+unavailability, and continuation invalidation for Perfetto and Nsight Compute; native decoder
+execution remains covered by the optional/vendor workflows above. The optional PATH CLI advisory
+has real process proofs for version differences, output bounds, and descendant cleanup on timeout.
+
+Native reader workflows replace admitted text, JSON, JSONL, CSV, Parquet, and decoder files with
+FIFOs under an outer process deadline. Format parsers use regular-file streams at their actual
+opens; bounded whole-document reads retain each format's byte ceiling. External reader tests cover
+both direct and symlink launchers. Removed profiles fail through the typed runtime boundary.
+Resource-policy tests delete a temporary file during observation and prove that the workload exits
+normally, alongside existing proofs for actual growth-limit enforcement.
+
+Empty-source workflows distinguish file and directory identities in analysis caches and preserved
+layouts. Replacing either kind after decoding or before preservation fails with changed-input
+diagnostics; previously preserved evidence remains readable independently of its original input.
