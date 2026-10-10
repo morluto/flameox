@@ -404,6 +404,24 @@ class EvidenceRepository:
             selected = candidates[0]
         if selected is None:
             raise RepositoryError("MISSING_EVIDENCE", "The requested evidence source is absent.")
+        return self._source_selection(manifest, selected)
+
+    def recover_sources(self, evidence_id: str) -> list[EvidenceSelection]:
+        """Verify a known preserved bundle for rescue without trusting store metadata.
+
+        Only a live session's recorded publication ID uses this recovery path. The
+        manifest, derived data, native artifacts, and symlink boundaries still validate.
+        """
+        self._validate_id(evidence_id)
+        manifest = self._validate_evidence(self._evidence_path(evidence_id))
+        return [
+            self._source_selection(manifest, source)
+            for source in manifest.body.source_layout.sources
+        ]
+
+    def _source_selection(
+        self, manifest: EvidenceManifest, selected: LogicalSource
+    ) -> EvidenceSelection:
         paths = selected.relative_paths
         members = []
         for position, index in enumerate(selected.artifact_indices):
@@ -424,7 +442,7 @@ class EvidenceRepository:
                     ),
                 )
             )
-        return EvidenceSelection(evidence_id, selected, tuple(members))
+        return EvidenceSelection(manifest.evidence_id, selected, tuple(members))
 
     def verify_source(self, selection: EvidenceSelection) -> None:
         for _, source in selection.members:

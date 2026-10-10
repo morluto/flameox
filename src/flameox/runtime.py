@@ -1874,7 +1874,12 @@ class AnalysisRuntime:
         )
         return result, self.next_analysis_request(result)
 
-    def next_analysis_request(self, result: Mapping[str, Any]) -> dict[str, Any] | None:
+    def next_analysis_request(
+        self,
+        result: Mapping[str, Any],
+        *,
+        preserved_sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         """Return the complete replayable request for a result's next evidence page."""
 
         continuation = result.get("continuation")
@@ -1885,7 +1890,9 @@ class AnalysisRuntime:
         if cached is None:
             return None
         preserved = cached.preserved
-        if isinstance(preserved, Mapping):
+        if preserved_sources is not None:
+            sources = preserved_sources
+        elif isinstance(preserved, Mapping):
             projection = self.read_evidence_agent_projection(str(preserved["evidence_id"]))
             sources = projection["analysis_sources"]
         else:
@@ -1940,10 +1947,13 @@ class AnalysisRuntime:
             )
         protected = self._protected_sources.copy()
         try:
-            if cached is not None and cached.preserved is not None:
-                self._protected_sources.update(source.path for source in cached.sources)
-                cached = replace(cached, sources=self._preserved_rescue_sources(cached))
-            result = self._rescue_to_destination(selected, cached=cached, previous=previous)
+            if previous is not None:
+                result = self._rescue_to_destination(selected, cached=None, previous=previous)
+            else:
+                if cached is not None and cached.preserved is not None:
+                    self._protected_sources.update(source.path for source in cached.sources)
+                    cached = replace(cached, sources=self._preserved_rescue_sources(cached))
+                result = self._rescue_to_destination(selected, cached=cached, previous=None)
         except RepositoryError as exc:
             raise self._repository_failure(
                 exc,
@@ -1968,17 +1978,10 @@ class AnalysisRuntime:
         """Recover publication sources without imposing analysis-reader cardinality or limits."""
         assert cached.preserved is not None
         evidence_id = str(cached.preserved["evidence_id"])
-        projection = self.read_evidence_agent_projection(evidence_id)
         try:
-            selections = [
-                self.repository.select_source(
-                    evidence_id, selector=item["source"]["artifact_selector"], role=None
-                )
-                for item in projection["logical_sources"]
-            ]
+            selections = self.repository.recover_sources(evidence_id)
             needed: dict[Path, EvidenceSelection] = {}
             for selection in selections:
-                self.repository.verify_source(selection)
                 if selection.source.is_directory:
                     path = self._evidence_destination(selection)
                     self._protected_sources.add(path)
@@ -2006,12 +2009,11 @@ class AnalysisRuntime:
         cached = self.analyses.get(analysis_id)
         if cached is None:
             return rescued, None
-        next_request = self.next_analysis_request(cached.result)
-        if next_request is not None:
-            alternate = EvidenceRepository(Path(rescued["rescue_destination"]), self.session_id)
-            projection = alternate.read_agent_projection(str(rescued["evidence_id"]))
-            next_request["sources"] = projection["analysis_sources"]
-        return rescued, next_request
+        alternate = EvidenceRepository(Path(rescued["rescue_destination"]), self.session_id)
+        projection = alternate.read_agent_projection(str(rescued["evidence_id"]))
+        return rescued, self.next_analysis_request(
+            cached.result, preserved_sources=projection["analysis_sources"]
+        )
 
     def _rescue_destination(self, destination: str) -> Path:
         supplied = Path(destination).expanduser()

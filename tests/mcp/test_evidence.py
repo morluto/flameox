@@ -112,7 +112,8 @@ def test_mcp_keeps_complete_large_continuation_arguments(tmp_path: Path) -> None
     anyio.run(exercise)
 
 
-def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["unpreserved", "corrupt_metadata", "corrupt_payload"])
+def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path, mode: str) -> None:
     store = tmp_path / "store"
     rescue = tmp_path / "rescue"
 
@@ -128,8 +129,26 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
                     },
                     "provider": {"kind": "direct"},
                     "page_size": 1,
+                    "preserve": mode != "unpreserved",
                 },
             )
+            if mode == "corrupt_metadata":
+                (store / "repository.json").write_text("{}")
+            elif mode == "corrupt_payload":
+                payload = next((store / "artifacts").rglob("payload"))
+                native = payload.read_bytes()
+                payload.write_bytes(b"corrupt")
+                rejected = await client.call_tool(
+                    "rescue_evidence",
+                    {
+                        "analysis_id": captured.structured_content["analysis_id"],
+                        "destination": str(rescue),
+                    },
+                )
+                assert rejected.is_error
+                assert rejected.structured_content["code"] == "REPOSITORY_CORRUPTION"
+                assert not rescue.exists()
+                payload.write_bytes(native)
             rescued = await client.call_tool(
                 "rescue_evidence",
                 {
@@ -137,7 +156,18 @@ def test_mcp_rescue_returns_a_restart_safe_next_page(tmp_path: Path) -> None:
                     "destination": str(rescue),
                 },
             )
+            assert rescued.is_error is False
             next_page = rescued.structured_content["next_page"]
+            (store / "repository.json").unlink(missing_ok=True)
+            repeated = await client.call_tool(
+                "rescue_evidence",
+                {
+                    "analysis_id": captured.structured_content["analysis_id"],
+                    "destination": str(rescue),
+                },
+            )
+            assert repeated.is_error is False
+            assert repeated.structured_content == rescued.structured_content
 
         async with Client(
             FlameoxServer(evidence_directory=rescue), raise_exceptions=True

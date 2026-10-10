@@ -162,7 +162,11 @@ resolved directory locally without reading or initializing the repository. Resto
 store from a known-good backup, or select a distinct empty store with `FLAMEOX_DATA_DIR` and
 restart/reconnect. Before restarting a live process that still owns needed session evidence, call
 `rescue_evidence` with that analysis handle and the distinct empty store. Rescue uses normal bounded,
-validated, atomic evidence publication without changing the active configured repository. Switching
+validated, atomic evidence publication without changing the active configured repository. A live
+session can also rescue an already-preserved bundle whose store metadata becomes unusable: its
+recorded evidence ID pins the independently verified manifest, derived data, and native artifacts.
+Corrupt bundle contents still fail closed. Repeated rescues validate the destination without
+requiring the original store. Switching
 stores does not recover evidence that was not preserved or rescued. Do not delete existing data or
 synthesize replacement metadata.
 
