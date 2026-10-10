@@ -7,7 +7,7 @@ from statistics import fmean
 from typing import Any
 
 from flameox.benchmark_samples import benchmark_series_identity
-from flameox.canonical import canonical_bytes
+from flameox.canonical import canonical_identity_bytes
 from flameox.providers.contracts import ProviderAnalysis
 
 
@@ -80,7 +80,7 @@ def scaling_projection(
         dimensions = row.get("dimensions")
         raw_input = dimensions.get(input_dimension) if isinstance(dimensions, Mapping) else None
         identity = benchmark_series_identity(row, input_dimension=input_dimension)
-        key = canonical_bytes(identity)
+        key = canonical_identity_bytes(identity)
         identities[key] = identity
         point = _positive_measurement_mean(raw_input, row)
         if point is None:

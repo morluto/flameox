@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from flameox.canonical import canonical_bytes
+from flameox.canonical import canonical_identity_bytes
 from flameox.providers.benchmark_comparison import AggregateSeries, compare_series
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -200,7 +200,12 @@ class NvbenchProvider:
                         "unit": unit,
                         "dimensions": _state_dimensions(state),
                     }
-                    key = canonical_bytes(identity)
+                    try:
+                        key = canonical_identity_bytes(identity)
+                    except ValueError as error:
+                        raise ProviderFailure(
+                            "DECODE_FAILURE", "NVBench state identity is invalid"
+                        ) from error
                     _previous_identity, total, seen = series.get(key, (identity, 0.0, 0))
                     for row in _sidecar_rows(
                         sidecar,

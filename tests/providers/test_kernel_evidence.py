@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -282,9 +283,19 @@ def test_kernel_validation_defaults_omitted_coverage_to_incomplete(tmp_path: Pat
     assert result["blocks"][0]["values"]["coverage_complete"] is False
 
 
-def test_kernel_validation_marks_producer_contradictions_inconclusive(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["finite", "infinite_pass", "infinite_fail"])
+def test_kernel_validation_marks_producer_contradictions_inconclusive(
+    tmp_path: Path, kind: str
+) -> None:
     artifact = tmp_path / "contradictory.json"
-    document = _kernel_document(10.0)
+    document = _kernel_document(10.0, status="fail" if kind == "infinite_fail" else "pass")
+    if kind != "finite":
+        native: Any = document
+        metric = native["cases"][0]["outputs"][0]["metrics"][0]
+        metric["name"] = "psnr"
+        metric["value"] = {"kind": "positive_infinity", "reason": "zero_mse_exact_agreement"}
+        metric["comparator"] = ">=" if kind == "infinite_fail" else "<="
+        metric["threshold"] = 30
     artifact.write_text(json.dumps(document))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
@@ -298,7 +309,7 @@ def test_kernel_validation_marks_producer_contradictions_inconclusive(tmp_path: 
 
     metrics = result["blocks"][0]["values"]
     assert metrics["status"] == "inconclusive"
-    assert metrics["producer_status"] == "pass"
+    assert metrics["producer_status"] == ("fail" if kind == "infinite_fail" else "pass")
     assert metrics["consistency_failure_count"] == 1
     assert metrics["consistency_failures"][0]["rule"] == "numeric_comparator"
 

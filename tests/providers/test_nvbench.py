@@ -19,6 +19,7 @@ def _bundle(
     *,
     elements: int = 65_536,
     state_name: str | None = None,
+    type_config_index: int | None = None,
 ) -> Path:
     root.mkdir()
     sidecar = root / "results.json-bin" / "0.bin"
@@ -42,6 +43,7 @@ def _bundle(
                                 if state_name is not None
                                 else f"elements={elements}",
                                 "device": 0,
+                                "type_config_index": type_config_index,
                                 "is_skipped": False,
                                 "summaries": [
                                     {
@@ -71,9 +73,12 @@ def _bundle(
     return root
 
 
-def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path: Path) -> None:
-    baseline = _bundle(tmp_path / "baseline", [0.004, 0.006])
-    candidate = _bundle(tmp_path / "candidate", [0.002, 0.003])
+@pytest.mark.parametrize("type_config_index", [None, 2**63 + 42])
+def test_nvbench_directory_preserves_native_sample_values_and_compares(
+    tmp_path: Path, type_config_index: int | None
+) -> None:
+    baseline = _bundle(tmp_path / "baseline", [0.004, 0.006], type_config_index=type_config_index)
+    candidate = _bundle(tmp_path / "candidate", [0.002, 0.003], type_config_index=type_config_index)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
@@ -91,6 +96,14 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path:
         )
         preserved = runtime.preserve_evidence(summary["analysis_id"])
         manifest = runtime.read_evidence(preserved["evidence_id"])
+        scaling = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(baseline), format="nvbench")],
+            {"input_dimension": "elements"},
+        )
+        assert scaling["blocks"][1]["rows"][0]["dimensions"]["type_config_index"] == (
+            str(type_config_index) if type_config_index is not None else None
+        )
     finally:
         runtime.close()
 
@@ -290,5 +303,23 @@ def test_nvbench_checks_size_bounds_before_decimal_conversion(tmp_path: Path, co
                 "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
             )
             assert summary["blocks"][0]["values"]["measurement_count"] == 2
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("index", [float("nan"), float("inf")])
+def test_nvbench_rejects_nonfinite_state_identity(tmp_path: Path, index: float) -> None:
+    bundle = _bundle(tmp_path / "bundle", [1.0])
+    primary = bundle / "results.json"
+    document = json.loads(primary.read_text())
+    document["benchmarks"][0]["states"][0]["type_config_index"] = index
+    primary.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "benchmark.summary", [PathSource(path=str(bundle), format="nvbench")], {}
+            )
+        assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()

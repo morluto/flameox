@@ -642,6 +642,8 @@ def _kernel_consistency_failures(document: Mapping[str, Any]) -> list[dict[str, 
                 comparator = metric.get("comparator")
                 threshold = _finite_or_none(metric.get("threshold"), "threshold")
                 value = _metric_value(metric.get("value"))
+                if value == "positive_infinity":
+                    value = math.inf
                 if (
                     isinstance(comparator, str)
                     and comparator in {"<=", ">="}

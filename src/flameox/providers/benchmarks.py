@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from flameox.benchmark_samples import benchmark_series_identity
-from flameox.canonical import canonical_bytes
+from flameox.canonical import canonical_identity_bytes
 from flameox.providers.benchmark_comparison import AggregateSeries, compare_series
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -269,7 +269,7 @@ class BenchmarkProvider:
                     and not isinstance(count, bool)
                     and count > 0
                 ):
-                    key = canonical_bytes(identity)
+                    key = canonical_identity_bytes(identity)
                     _identity, total, prior_count = values.get(key, (identity, 0.0, 0))
                     try:
                         aggregate_total = total + float(value)
