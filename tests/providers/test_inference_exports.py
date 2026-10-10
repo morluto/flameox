@@ -631,25 +631,36 @@ def test_inference_line_bounds_apply_before_whitespace_skipping(
     if format_name == "aiperf":
         pytest.importorskip("aiperf")
         native = {
-            "metadata": {"session_num": 0, "was_cancelled": False},
+            "metadata": {
+                "session_num": 0,
+                "was_cancelled": False,
+                "request_start_ns": 1,
+                "request_end_ns": 2,
+                "worker_id": "worker-0",
+                "record_processor_id": "processor-0",
+                "benchmark_phase": "profiling",
+            },
             "metrics": {},
             "error": {"type": "TimeoutError", "message": "timeout"},
         }
     else:
         native = {"timestamp": 0, "input_length": 1, "output_length": 1}
     artifact = tmp_path / "native.jsonl"
-    artifact.write_text(prefix + " " * (line_limit + 1) + json.dumps(native) + "\n")
+    artifact.write_text(json.dumps(native) + "\n")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
     try:
+        sources = [
+            PathSource(
+                path=str(artifact), format="aiperf" if format_name == "aiperf" else "mooncake-trace"
+            )
+        ]
+        admitted = runtime.analyze("inference.summary", sources, {})
+        assert admitted["blocks"][1]["rows"][0]["line_index"] == 0
+        artifact.write_text(prefix + " " * (line_limit + 1) + json.dumps(native) + "\n")
         with pytest.raises(RuntimeFailure) as failure:
             runtime.analyze(
                 "inference.summary",
-                [
-                    PathSource(
-                        path=str(artifact),
-                        format="aiperf" if format_name == "aiperf" else "mooncake-trace",
-                    )
-                ],
+                sources,
                 {},
             )
         assert failure.value.code == "DECODE_FAILURE"
