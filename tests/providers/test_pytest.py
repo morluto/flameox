@@ -552,6 +552,13 @@ def test_pytest_fixture_projection_aggregates_workers_and_preserves_incomplete_r
             "invocation_id": "gw1:1",
             "nodeid": "",
         },
+        {
+            "event": "test_phase",
+            "phase": "teardown",
+            "outcome": "failed",
+            "worker_id": "gw1",
+            "nodeid": "test_other_worker",
+        },
         {"event": "interrupted"},
     ]
     events.write_text("\n".join(json.dumps(event) for event in fixture_events) + "\n")

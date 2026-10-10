@@ -103,6 +103,7 @@ class ReliabilityProvider:
             invocation[f"{phase}_duration_ns"] = duration
             invocation[f"{phase}_outcome"] = str(event["outcome"])
 
+        failed_teardown_workers = {worker for worker, _nodeid in teardown_failures}
         aggregate_values: dict[tuple[str, str], dict[str, Any]] = {}
         worker_work: dict[str, int] = defaultdict(int)
         invocation_rows: list[dict[str, Any]] = []
@@ -117,10 +118,7 @@ class ReliabilityProvider:
                 (str(invocation["worker_id"]), str(invocation["nodeid"])) in teardown_failures
                 or (
                     str(invocation["scope"]) != "function"
-                    and any(
-                        worker_id == str(invocation["worker_id"])
-                        for worker_id, _nodeid in teardown_failures
-                    )
+                    and str(invocation["worker_id"]) in failed_teardown_workers
                 )
             )
             complete = (
