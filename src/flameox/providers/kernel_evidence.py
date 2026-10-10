@@ -7,7 +7,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, cast
 
-from flameox.canonical import canonical_bytes, content_id
+from flameox.canonical import canonical_identity_bytes, content_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.source_files import directory_files
 
@@ -134,7 +134,7 @@ class KernelEvidenceProvider:
                     raise ProviderFailure(
                         "LIMIT_EXCEEDED", "Kernel failure witness count is invalid"
                     )
-                output_identity = canonical_bytes(
+                output_identity = canonical_identity_bytes(
                     {"name": output_name, "dtype": output_dtype, "shape": shape}
                 )
                 if output_identity in seen_outputs:
@@ -170,7 +170,7 @@ class KernelEvidenceProvider:
                     threshold = _finite_or_none(metric.get("threshold"), "threshold")
                     unit = _text(metric.get("unit"), "metric unit")
                     value = _metric_value(metric.get("value"))
-                    metric_identity = canonical_bytes(
+                    metric_identity = canonical_identity_bytes(
                         {
                             "name": metric_name,
                             "comparator": comparator,
@@ -288,7 +288,7 @@ class KernelEvidenceProvider:
                     continue
                 value = row["value"]
                 if isinstance(value, int | float) and not isinstance(value, bool):
-                    key = canonical_bytes(identity)
+                    key = canonical_identity_bytes(identity)
                     values[key] = float(value)
                     members[key] = identity
                     state[key] = str(row["metric_status"])
@@ -496,7 +496,7 @@ def _triton_cache(path: Path, *, max_rows: int) -> ProviderAnalysis:
     if not isinstance(entries, list) or not 1 <= len(entries) <= _MAX_TRITON_CANDIDATES:
         raise ProviderFailure("DECODE_FAILURE", "Triton cache candidates are invalid")
     try:
-        key_digest = content_id(canonical_bytes(key))
+        key_digest = content_id(canonical_identity_bytes(key))
     except (ValueError, TypeError) as error:
         raise ProviderFailure("DECODE_FAILURE", "Triton cache key is invalid") from error
     rows: list[dict[str, Any]] = []
@@ -523,7 +523,7 @@ def _triton_cache(path: Path, *, max_rows: int) -> ProviderAnalysis:
             {
                 "candidate_index": index,
                 "config": config,
-                "config_id": content_id(canonical_bytes(config)),
+                "config_id": content_id(canonical_identity_bytes(config)),
                 "timing_values": [
                     "positive_infinity" if isinstance(value, float) and math.isinf(value) else value
                     for value in timings
@@ -582,14 +582,14 @@ def _triton_row(event: Mapping[str, Any]) -> dict[str, Any]:
             mean_ms = fmean(value / scale for value in finite_timings) * scale
         normalized_candidates.append(
             {
-                "config_id": content_id(canonical_bytes(config)),
+                "config_id": content_id(canonical_identity_bytes(config)),
                 "config": config,
                 "timings_ms": finite_timings,
                 "mean_ms": mean_ms,
             }
         )
     winner = _json_object(event.get("winner"), "Triton winner")
-    winner_id = content_id(canonical_bytes(winner))
+    winner_id = content_id(canonical_identity_bytes(winner))
     if winner_id not in {str(item["config_id"]) for item in normalized_candidates}:
         raise ProviderFailure("DECODE_FAILURE", "Triton winner is absent from candidates")
     cache_hit = event.get("cache_hit")

@@ -69,11 +69,14 @@ def _triton_event() -> dict[str, object]:
     }
 
 
-def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path) -> None:
+@pytest.mark.parametrize("seed", [42, 2**63 + 42])
+def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path, seed: int) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
-    baseline.write_text(json.dumps(_kernel_document(0.0001)))
-    candidate.write_text(json.dumps(_kernel_document(0.0002)))
+    for path, value in ((baseline, 0.0001), (candidate, 0.0002)):
+        document = _kernel_document(value)
+        document["cases"][0]["seed"] = seed  # type: ignore[index]
+        path.write_text(json.dumps(document))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         summary = runtime.analyze(
@@ -96,6 +99,7 @@ def test_kernel_validation_summary_and_comparison_use_typed_rows(tmp_path: Path)
     assert summary["blocks"][0]["values"]["status"] == "pass"
     assert summary["blocks"][1]["rows"][0]["evidence_kind"] == "measurement"
     assert comparison["blocks"][1]["rows"][0]["ratio"] == 2.0
+    assert comparison["blocks"][1]["rows"][0]["seed"] == (seed if seed == 42 else str(seed))
     assert not (tmp_path / ".flameox").exists()
 
 
@@ -117,15 +121,29 @@ def test_kernel_comparison_rejects_unrepresentable_derived_values(
         runtime.close()
 
 
-def test_kernel_compare_requires_complete_semantic_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("difference", ["output", "wide_integer_type", "reserved_integer_tag"])
+def test_kernel_compare_requires_complete_semantic_identity(
+    tmp_path: Path, difference: str
+) -> None:
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
-    baseline.write_text(json.dumps(_kernel_document(0.0001)))
+    original = _kernel_document(0.0001)
     changed = _kernel_document(0.0002)
-    changed_output = changed["cases"][0]["outputs"][0]  # type: ignore[index]
-    changed_output["shape"] = [1_024]
-    changed_output["dtype"] = "int8"
-    changed_output["metrics"][0]["unit"] = "percent"
+    if difference == "output":
+        changed_output = changed["cases"][0]["outputs"][0]  # type: ignore[index]
+        changed_output["shape"] = [1_024]
+        changed_output["dtype"] = "int8"
+        changed_output["metrics"][0]["unit"] = "percent"
+    else:
+        wide_integer = 2**63 + 42
+        original["cases"][0]["dimensions"] = {"size": wide_integer}  # type: ignore[index]
+        distinct: object = (
+            str(wide_integer)
+            if difference == "wide_integer_type"
+            else {"$flameox.integer": str(wide_integer)}
+        )
+        changed["cases"][0]["dimensions"] = {"size": distinct}  # type: ignore[index]
+    baseline.write_text(json.dumps(original))
     candidate.write_text(json.dumps(changed))
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
@@ -304,9 +322,12 @@ def test_kernel_validation_marks_producer_contradictions_inconclusive(tmp_path: 
     assert compared_metrics["consistency_failures"][0]["input_index"] == 1
 
 
-def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("block", [256, 2**63 + 42])
+def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path, block: int) -> None:
     artifact = tmp_path / "triton.jsonl"
-    artifact.write_text(json.dumps(_triton_event()) + "\n")
+    event = _triton_event()
+    event["winner"]["kwargs"]["BLOCK"] = block  # type: ignore[index]
+    artifact.write_text(json.dumps(event) + "\n")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
@@ -324,7 +345,8 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> No
     winner = next(
         item for item in row["candidates"] if item["config_id"] == row["winner_config_id"]
     )
-    assert winner["config"] == _triton_event()["winner"]
+    event["winner"]["kwargs"]["BLOCK"] = block if block == 256 else str(block)  # type: ignore[index]
+    assert winner["config"] == event["winner"]
 
 
 @pytest.mark.parametrize("timing", [1e308, 1.7976931348623157e308])
@@ -449,14 +471,16 @@ def test_triton_listener_enforces_native_limits_before_semantic_filtering(
         runtime.close()
 
 
+@pytest.mark.parametrize("key_value", [256, 2**63 + 42])
 def test_native_triton_cache_preserves_quantiles_and_derives_lexicographic_winner(
     tmp_path: Path,
+    key_value: int,
 ) -> None:
     artifact = tmp_path / "scatter.autotune.json"
     artifact.write_text(
         json.dumps(
             {
-                "key": [256, "torch.bfloat16"],
+                "key": [key_value, "torch.bfloat16"],
                 "configs_timings": [
                     [{"kwargs": {"BLOCK_D": 128}}, [1, 0.9, 9]],
                     [{"kwargs": {"BLOCK_D": 256}}, [2, 0.1, 2]],

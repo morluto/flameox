@@ -21,6 +21,11 @@ def sha256_id(hex_digest: str) -> str:
     return f"sha256:{hex_digest}"
 
 
+def canonical_identity_bytes(value: object) -> bytes:
+    """Encode identity keys losslessly, retaining ordinary I-JSON bytes and ordering."""
+    return canonical_bytes(_normalize_wide_integers(value))
+
+
 def content_id(data: bytes) -> str:
     """Hash bytes into the canonical SHA-256 content-identifier format."""
     return sha256_id(hashlib.sha256(data).hexdigest())
@@ -50,5 +55,9 @@ def _normalize_wide_integers(value: Any) -> Any:
     if isinstance(value, list):
         return [_normalize_wide_integers(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _normalize_wide_integers(item) for key, item in value.items()}
+        normalized = {str(key): _normalize_wide_integers(item) for key, item in value.items()}
+        if "$flameox.integer" in normalized or "$flameox.object" in normalized:
+            # Native objects cannot impersonate the integer or escaped-object tags.
+            return {"$flameox.object": [[key, normalized[key]] for key in sorted(normalized)]}
+        return normalized
     return value

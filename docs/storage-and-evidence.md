@@ -70,6 +70,13 @@ manifest layout binds their relative paths. An `EvidenceSource` rebuilds such a
 bundle only in session scratch, so NVBench and similar directory formats remain
 reanalyzable without introducing a mutable repository checkout.
 
+Derived identity keys retain wide native integers using typed decimal tags,
+without rounding them or conflating them with strings. Native JSON objects that
+contain the reserved integer or object tag keys are escaped, so they cannot
+impersonate those encodings. Ordinary I-JSON identity bytes remain unchanged;
+canonical persisted manifests and native artifact hashes use their existing
+representations.
+
 When an analysis composes independently preserved bundles, their source-local artifact roles may
 legitimately collide, including a bundle composed with one of its own members. Publication checks
 both logical and expanded artifact roles. If either collides, it assigns deterministic
