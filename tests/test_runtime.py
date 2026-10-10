@@ -399,6 +399,95 @@ def test_experiment_runs_bounded_cases_and_semantic_oracle(tmp_path: Path) -> No
     anyio.run(exercise)
 
 
+@pytest.mark.parametrize(
+    "document", ["a,a\n1,2\n", "a,b\n1\n", "a,b\n1,2,3\n", "a\n" + "x" * 200_000]
+)
+def test_preview_rejects_lossy_or_oversized_csv(tmp_path: Path, document: str) -> None:
+    artifact = tmp_path / "invalid.csv"
+    artifact.write_text(document)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("format_name", ["json", "jsonl", "csv", "parquet"])
+def test_preview_preserves_native_fields_that_collide_with_provenance(
+    tmp_path: Path, format_name: str
+) -> None:
+    import hashlib
+
+    row = {"input_sha256": "native field", "value": "native value"}
+    artifact = tmp_path / f"native.{format_name}"
+    if format_name == "parquet":
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.Table.from_pylist([row]), artifact)
+    elif format_name == "csv":
+        artifact.write_text("input_sha256,value\nnative field,native value\n")
+    else:
+        artifact.write_text(json.dumps([row] if format_name == "json" else row))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        observed = result["blocks"][1]["rows"][0]
+        assert observed["input_sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+        assert observed["value"] == row
+    finally:
+        runtime.close()
+
+
+def test_preview_preserves_native_section_field(tmp_path: Path) -> None:
+    artifact = tmp_path / "native.json"
+    artifact.write_text(json.dumps({"actual": [{"section": "native", "answer": 42}]}))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        row = result["blocks"][1]["rows"][0]
+        assert row["section"] == "actual"
+        assert row["value"] == {"section": "native", "answer": 42}
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "format_name,native,expected",
+    [
+        (format_name, native, expected)
+        for format_name in ("json", "jsonl")
+        for native, expected in (
+            (str(2**53 + 42), str(2**53 + 42)),
+            ("NaN", "NaN"),
+            ("1e400", "Infinity"),
+        )
+    ]
+    + [("jsonl", '"\\ud800"', None)],
+)
+def test_preview_native_values_stay_preservable_or_fail_with_typed_error(
+    tmp_path: Path, format_name: str, native: str, expected: str | None
+) -> None:
+    artifact = tmp_path / f"native.{format_name}"
+    document = '{"value":' + native + "}"
+    artifact.write_text("[" + document + "]" if format_name == "json" else document + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        if expected is None or (format_name == "json" and native in {"NaN", "1e400"}):
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            assert failure.value.code == "DECODE_FAILURE"
+        else:
+            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            assert result["blocks"][1]["rows"][0]["value"] == expected
+            reference = runtime.preserve_evidence(result["analysis_id"])
+            assert runtime.read_evidence(reference["evidence_id"])
+    finally:
+        runtime.close()
+
+
 @pytest.mark.process
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixture")
 def test_experiment_retains_completed_capture_when_later_executable_changes(tmp_path: Path) -> None:

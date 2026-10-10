@@ -50,6 +50,8 @@ def iter_json_rows(path: Path) -> Iterator[dict[str, Any]]:
                 first = next(events)
                 if first[0] == "start_array":
                     for row in _array_rows(events):
+                        if "section" in row:
+                            row = {"value": row}
                         yield {"section": key, **row}
                 elif first[0] == "start_map":
                     for _ in _value_events(events, first):

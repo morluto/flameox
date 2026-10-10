@@ -43,14 +43,15 @@ def canonical_provider_projection(analysis: ProviderAnalysis | None) -> Provider
     return ProviderAnalysis(
         provider_id=_canonical_text(analysis.provider_id),
         provider_version=_canonical_text(analysis.provider_version),
-        blocks=_canonical_value(analysis.blocks),
+        blocks=canonical_result_value(analysis.blocks),
         rows_observed=analysis.rows_observed,
         complete=analysis.complete,
         limitations=[_canonical_text(item) for item in analysis.limitations],
     )
 
 
-def _canonical_value(value: Any) -> Any:
+def canonical_result_value(value: Any) -> Any:
+    """Project native values into the canonical JSON domain used by evidence results."""
     if isinstance(value, str):
         return _canonical_text(value)
     if isinstance(value, bool) or value is None:
@@ -71,9 +72,11 @@ def _canonical_value(value: Any) -> Any:
             return "NaN"
         return "Infinity" if value > 0 else "-Infinity"
     if isinstance(value, list):
-        return [_canonical_value(item) for item in value]
+        return [canonical_result_value(item) for item in value]
     if isinstance(value, dict):
-        return {_canonical_text(str(key)): _canonical_value(item) for key, item in value.items()}
+        return {
+            _canonical_text(str(key)): canonical_result_value(item) for key, item in value.items()
+        }
     return _canonical_text(str(value))
 
 

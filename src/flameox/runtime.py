@@ -62,6 +62,7 @@ from flameox.providers.contracts import (
     ProviderAnalysis,
     ProviderFailure,
     canonical_provider_projection,
+    canonical_result_value,
 )
 from flameox.providers.cpu import CpuProfileProvider
 from flameox.providers.inference_exports import InferenceExportProvider
@@ -548,7 +549,14 @@ class AnalysisRuntime:
                     selected_limits.max_rows,
                     text_fragment_chars=text_fragment_chars,
                 )
-            except (ijson.JSONError, OSError, ValueError, RecursionError) as error:
+            except (
+                ijson.JSONError,
+                csv.Error,
+                OSError,
+                ValueError,
+                RecursionError,
+                ProviderFailure,
+            ) as error:
                 raise RuntimeFailure(
                     "DECODE_FAILURE", "Artifact preview could not decode the input."
                 ) from error
@@ -2526,7 +2534,9 @@ class AnalysisRuntime:
             )
             for row in source_rows:
                 if observed >= offset and len(rows) < limit:
-                    normalized = json.loads(json.dumps(row, default=str))
+                    normalized = canonical_result_value(row)
+                    if "input_sha256" in normalized:
+                        normalized = {"value": normalized}
                     rows.append({**normalized, "input_sha256": source.sha256})
                 observed += 1
                 if observed >= offset + limit + 1:
@@ -3036,7 +3046,14 @@ class AnalysisRuntime:
                 yield from (dict(row) for row in batch.to_pylist())
         elif format_name == "csv":
             with path.open(newline="", encoding="utf-8", errors="replace") as stream:
-                yield from (dict(row) for row in csv.DictReader(stream))
+                reader = csv.DictReader(stream)
+                headers = reader.fieldnames or []
+                if len(headers) != len(set(headers)):
+                    raise ValueError("CSV headers must be distinct")
+                for row in reader:
+                    if None in row or any(value is None for value in row.values()):
+                        raise ValueError("CSV row does not match its headers")
+                    yield dict(row)
         elif format_name == "jsonl":
             with path.open(encoding="utf-8") as stream:
                 for line in stream:
