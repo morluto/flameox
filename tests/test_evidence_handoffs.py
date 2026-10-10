@@ -226,6 +226,52 @@ def test_preview_offset_is_a_logical_row(tmp_path: Path) -> None:
         runtime.close()
 
 
+@pytest.mark.integration
+def test_mutating_page_handoffs_cannot_change_replay_or_preserved_provenance(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "lines.txt"
+    artifact.write_text("one\ntwo\nthree\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        first, handoff = runtime.analyze_page(
+            "artifact.preview",
+            [PathSource(path=str(artifact))],
+            {},
+            limits=RequestLimits(max_rows=1),
+        )
+        assert handoff is not None
+        handoff["limits"]["max_rows"] = 999
+        handoff["options"]["offset"] = 2
+        handoff["sources"][0]["path"] = str(tmp_path / "absent")
+        replay = runtime.next_analysis_request(first)
+        assert replay is not None
+        assert replay["limits"]["max_rows"] == 1
+        assert replay["options"]["offset"] == 0
+        second = runtime.analyze(
+            replay["capability_id"],
+            [PathSource.model_validate(item) for item in replay["sources"]],
+            replay["options"],
+            limits=RequestLimits.model_validate(replay["limits"]),
+            continuation=replay["continuation"],
+        )
+        assert [row["text"] for row in second["blocks"][1]["rows"]] == ["two"]
+        preserved, refreshed = runtime.preserve_evidence_page(first["analysis_id"])
+        assert refreshed is not None
+        refreshed["limits"]["max_rows"] = 500
+        refreshed["options"]["offset"] = 1
+        manifest = runtime.read_evidence(preserved["evidence_id"])
+        request = manifest["body"]["analysis_request"]
+        assert request["limits"]["max_rows"] == 1
+        assert request["arguments"]["offset"] == 0
+        again = runtime.next_analysis_request(first)
+        assert again is not None
+        assert again["limits"]["max_rows"] == 1
+        assert again["options"]["offset"] == 0
+    finally:
+        runtime.close()
+
+
 @pytest.mark.process
 @pytest.mark.parametrize("inline", [False, True])
 def test_preserved_capture_continuation_uses_discovered_sources(

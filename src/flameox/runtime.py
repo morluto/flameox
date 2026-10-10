@@ -1904,13 +1904,15 @@ class AnalysisRuntime:
                 for item in (cached.analysis_sources or cached.sources)
             ]
         analysis_request = cached.manifest_body["analysis_request"]
-        return {
-            "capability_id": cached.manifest_body["capability_id"],
-            "sources": sources,
-            "options": analysis_request["arguments"],
-            "limits": analysis_request["limits"],
-            "continuation": continuation,
-        }
+        return self._copy_result(
+            {
+                "capability_id": cached.manifest_body["capability_id"],
+                "sources": sources,
+                "options": analysis_request["arguments"],
+                "limits": analysis_request["limits"],
+                "continuation": continuation,
+            }
+        )
 
     def preflight_rescue_destination(self, destination: str) -> str:
         """Validate a new rescue store before an expensive request begins."""
