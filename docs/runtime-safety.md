@@ -42,8 +42,7 @@ termination, not a fabricated exit code.
 
 No-deadline execution passes `None` to the standard
 [`asyncio.timeout_at`](https://docs.python.org/3.12/library/asyncio-task.html#asyncio.timeout_at)
-context rather than substituting a distant deadline. The observed-process backend
-likewise skips deadline comparisons when no budget was selected. Cleanup grace
+context rather than substituting a distant deadline. Cleanup grace
 periods and reader-settlement bounds remain finite; they are not workload budgets.
 
 Writable-root growth checks account for the pre-launch baseline and perform a final persistent-output
@@ -53,7 +52,7 @@ quota. RSS remains unavailable when the process exits without a sample.
 Synchronous adapters running in an AnyIO worker thread return broker execution to the
 originating request's event loop and cancellation scope. They do not create a second event loop
 for that subprocess. Scope cancellation settles the child before the adapter unwinds and retains
-the `ProcessCancelledError` output and cleanup receipt, including peak-RSS execution.
+the `ProcessCancelledError` output and cleanup receipt.
 The outer thread wait must remain request-owned: `abandon_on_cancel=True` or raw
 `asyncio.Task.cancel()` is not a substitute for cancelling the owning AnyIO scope and joining
 cleanup. Arbitrary synchronous reader code is not made interruptible by this bridge.

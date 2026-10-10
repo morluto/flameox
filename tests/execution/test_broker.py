@@ -45,9 +45,8 @@ def request(tmp_path: Path, *arguments: str, **overrides: object) -> ExecutionRe
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("observation", [None, "child_peak_rss"])
 async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt(
-    tmp_path: Path, observation: str | None
+    tmp_path: Path,
 ) -> None:
     pid_path = tmp_path / "bridge.pid"
     receipts: list[ProcessCancelledError] = []
@@ -56,7 +55,6 @@ async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt
         "-c",
         "import os, pathlib, time; print('before cancellation', flush=True); "
         "pathlib.Path('bridge.pid').write_text(str(os.getpid())); time.sleep(30)",
-        observation=observation,
         timeout_seconds=3,
     )
 
@@ -85,9 +83,8 @@ async def test_sync_worker_bridge_cancellation_settles_child_and_retains_receipt
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("observation", [None, "child_peak_rss"])
 async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_pipes(
-    tmp_path: Path, observation: str | None
+    tmp_path: Path,
 ) -> None:
     child_pid_path = tmp_path / "child.pid"
     code = (
@@ -104,7 +101,6 @@ async def test_cancellation_preserves_raw_output_without_waiting_for_inherited_p
                 code,
                 str(child_pid_path),
                 timeout_seconds=None,
-                observation=observation,
             )
         )
     )
@@ -178,32 +174,6 @@ async def test_broker_bounds_stdin_transfer_when_child_does_not_read(tmp_path: P
     assert error.value.process.cleanup_complete is True
 
 
-def test_observed_run_preserves_streams_exit_status_and_peak_rss(tmp_path: Path) -> None:
-    outcome = SubprocessBroker().run_sync(
-        request(
-            tmp_path,
-            "-c",
-            (
-                "import sys; value = bytearray(2_000_000); "
-                "print('observed stdout', flush=True); "
-                "print('observed stderr', file=sys.stderr, flush=True); "
-                "raise SystemExit(7)"
-            ),
-            observation="child_peak_rss",
-        )
-    )
-
-    assert outcome.stdout == b"observed stdout\n"
-    assert outcome.stderr == b"observed stderr\n"
-    assert outcome.process.termination == ExitedProcessTermination(exit_code=7)
-    assert outcome.process.peak_rss_bytes is not None
-    assert any(item.snapshot_phase == "running" for item in outcome.process_observations)
-    assert any(item.snapshot_phase == "post_root_exit" for item in outcome.process_observations)
-    assert outcome.peak_rss_backend == (
-        "wait4_ru_maxrss" if hasattr(os, "wait4") else "psutil_polling"
-    )
-
-
 @pytest.mark.anyio
 async def test_output_limit_interrupts_a_slow_resource_observer(tmp_path: Path) -> None:
     with anyio.fail_after(5), pytest.raises(ProcessExecutionError) as error:
@@ -213,7 +183,6 @@ async def test_output_limit_interrupts_a_slow_resource_observer(tmp_path: Path) 
                 "-c",
                 "import sys,time; time.sleep(0.1); "
                 "sys.stdout.write('x' * 100_000); sys.stdout.flush(); time.sleep(30)",
-                observation="child_peak_rss",
                 max_output_bytes=1_000,
                 timeout_seconds=None,
                 resource_policy=ResourcePolicy(
@@ -232,49 +201,7 @@ async def test_output_limit_interrupts_a_slow_resource_observer(tmp_path: Path) 
     assert error.value.stderr == b""
 
 
-def test_observed_timeout_cleans_up_the_process_group(tmp_path: Path) -> None:
-    pid_path = tmp_path / "observed.pid"
-    code = (
-        "import pathlib, subprocess, sys, time; "
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "time.sleep(30)"
-    )
-
-    with pytest.raises(DomainError) as error:
-        SubprocessBroker().run_sync(
-            request(
-                tmp_path,
-                "-c",
-                code,
-                str(pid_path),
-                observation="child_peak_rss",
-                timeout_seconds=2,
-            )
-        )
-
-    assert error.value.code is ErrorCode.EXECUTION_TIMEOUT
-    details = error.value.details["process"]
-    assert isinstance(details, dict)
-    assert details["cleanup_complete"] is True
-    observations = error.value.details["process_observations"]
-    assert isinstance(observations, list)
-    assert {item["snapshot_phase"] for item in observations} >= {
-        "pre_cleanup",
-        "post_cleanup",
-    }
-    assert all(
-        not set(item).intersection(
-            {"cmdline", "environment", "cwd", "exe", "open_files", "connections"}
-        )
-        for item in observations
-    )
-    assert pid_path.is_file()
-    child_pid = int(pid_path.read_text())
-    assert not process_is_alive(child_pid)
-
-
-def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -> None:
+def test_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -> None:
     pid_path = tmp_path / "observed-parent-exit.pid"
     code = (
         "import pathlib, subprocess, sys; "
@@ -282,9 +209,7 @@ def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid))"
     )
 
-    outcome = SubprocessBroker().run_sync(
-        request(tmp_path, "-c", code, str(pid_path), observation="child_peak_rss")
-    )
+    outcome = SubprocessBroker().run_sync(request(tmp_path, "-c", code, str(pid_path)))
 
     assert outcome.process.termination == ExitedProcessTermination(exit_code=0)
     assert pid_path.is_file()
@@ -293,7 +218,7 @@ def test_observed_run_cleans_up_descendants_after_parent_exits(tmp_path: Path) -
 
 
 @pytest.mark.anyio
-async def test_observed_no_deadline_cancellation_keeps_cleanup_contract(tmp_path: Path) -> None:
+async def test_no_deadline_cancellation_keeps_cleanup_contract(tmp_path: Path) -> None:
     pid_path = tmp_path / "observed.pid"
     with anyio.fail_after(5), anyio.CancelScope() as scope:
 
@@ -312,7 +237,6 @@ async def test_observed_no_deadline_cancellation_keeps_cleanup_contract(tmp_path
                         "pathlib.Path('observed.pid').write_text(str(os.getpid())); "
                         "time.sleep(60)",
                         timeout_seconds=None,
-                        observation="child_peak_rss",
                     )
                 )
     assert cancelled.value.process.cancellation_cause is ProcessCancellationCause.CALLER_CANCELLED

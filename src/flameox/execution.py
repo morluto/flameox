@@ -5,8 +5,6 @@ import os
 import shutil
 import signal
 import stat
-import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -120,7 +118,6 @@ class ExecutionRequest(ContractModel):
         exclude=True,
         description="Internal owner root containing output_directory.",
     )
-    observation: Literal["child_peak_rss"] | None = None
     systemd_scope_unit: str | None = None
     resource_policy: ResourcePolicy | None = None
     inherited_directory_fds: tuple[Annotated[int, Field(ge=0)], ...] = Field(
@@ -170,12 +167,8 @@ class ExecutionRequest(ContractModel):
     def validate_output_directory(self) -> ExecutionRequest:
         if self.diagnostic_bytes is not None and self.output_directory is not None:
             raise ValueError("diagnostic_bytes cannot be combined with output_directory")
-        if self.diagnostic_bytes is not None and self.observation == "child_peak_rss":
-            raise ValueError("diagnostic_bytes is unsupported with child_peak_rss observation")
         if self.output_directory is None:
             return self
-        if self.observation == "child_peak_rss":
-            raise ValueError("output_directory is unsupported with child_peak_rss observation")
         if not self.output_directory.is_absolute() or "\x00" in str(self.output_directory):
             raise ValueError("output_directory must be an absolute path without NUL")
         output_directory = self.output_directory.resolve(strict=False)
@@ -210,7 +203,6 @@ class ExecutionOutcome:
     resolved_executable: Path
     containment: ProcessContainment
     executable_binding: ResolvedExecutable
-    peak_rss_backend: str | None = None
     process_observations: tuple[ProcessObservation, ...] = ()
     output_sink: OutputSink | None = None
     diagnostic_output: DiagnosticOutput | None = None
@@ -378,14 +370,6 @@ class _ResourcePolicyExceeded(Exception):
         self.cause = cause
 
 
-@dataclass(frozen=True, slots=True)
-class _ObservedWait:
-    returncode: int
-    peak_rss_bytes: int | None
-    peak_rss_backend: str
-    cancellation_cause: ProcessCancellationCause | None = None
-
-
 @dataclass(slots=True)
 class _OutputBudget:
     remaining: int
@@ -530,104 +514,8 @@ class _AsyncOutputSink:
         return result
 
 
-@dataclass(slots=True)
-class _ObservedOutput:
-    """Incrementally collect observed-process output under one shared budget."""
-
-    _remaining: int
-    _stdout: bytearray
-    _stderr: bytearray
-    _lock: threading.Lock
-    _limit_exceeded: threading.Event
-    _io_failed: threading.Event
-    _stop: threading.Event
-
-    def __init__(self, max_output_bytes: int) -> None:
-        self._remaining = max_output_bytes
-        self._stdout = bytearray()
-        self._stderr = bytearray()
-        self._lock = threading.Lock()
-        self._limit_exceeded = threading.Event()
-        self._io_failed = threading.Event()
-        self._stop = threading.Event()
-
-    def read_stdout(self, stream: IO[bytes]) -> None:
-        self._read(stream, self._stdout)
-
-    def read_stderr(self, stream: IO[bytes]) -> None:
-        self._read(stream, self._stderr)
-
-    def _read(self, stream: IO[bytes], destination: bytearray) -> None:
-        try:
-            descriptor = stream.fileno()
-            os.set_blocking(descriptor, False)
-            while not self._stop.is_set():
-                try:
-                    chunk = os.read(descriptor, 64 * 1024)
-                except (BlockingIOError, InterruptedError):
-                    self._stop.wait(0.005)
-                    continue
-                if not chunk:
-                    return
-                with self._lock:
-                    retained = min(len(chunk), self._remaining)
-                    destination.extend(chunk[:retained])
-                    self._remaining -= retained
-                    if retained < len(chunk):
-                        self._limit_exceeded.set()
-                        self._stop.set()
-                        return
-        except (_OutputSinkFailure, OSError, ValueError):
-            if not self._stop.is_set():
-                self._io_failed.set()
-                self._stop.set()
-            return
-        finally:
-            with suppress(OSError, ValueError):
-                stream.close()
-
-    @property
-    def limit_exceeded(self) -> bool:
-        return self._limit_exceeded.is_set()
-
-    @property
-    def io_failed(self) -> bool:
-        return self._io_failed.is_set()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def write_stdin(self, stream: IO[bytes], stdin_bytes: bytes) -> None:
-        try:
-            descriptor = stream.fileno()
-            os.set_blocking(descriptor, False)
-            content = memoryview(stdin_bytes)
-            offset = 0
-            while offset < len(content) and not self._stop.is_set():
-                try:
-                    written = os.write(descriptor, content[offset:])
-                except (BlockingIOError, InterruptedError):
-                    self._stop.wait(0.005)
-                    continue
-                if written == 0:
-                    self._stop.wait(0.005)
-                    continue
-                offset += written
-        except (BrokenPipeError, OSError, ValueError):
-            return
-        finally:
-            with suppress(OSError, ValueError):
-                stream.close()
-
-    def collect(self) -> tuple[bytes, bytes]:
-        with self._lock:
-            return bytes(self._stdout), bytes(self._stderr)
-
-
 class SubprocessBroker:
     _MAX_OBSERVED_PROCESSES = 10_000
-    _OBSERVED_IO_JOIN_SECONDS = 0.25
-    _OBSERVED_IO_STOP_SECONDS = 0.05
 
     def run_sync(
         self,
@@ -645,39 +533,6 @@ class SubprocessBroker:
             pass
         else:
             return self._run_from_anyio_worker(request, on_started, on_cleanup)
-
-        if request.observation == "child_peak_rss":
-            if on_started is not None or on_cleanup is not None:
-                raise DomainError(
-                    ErrorCode.INVALID_INPUT,
-                    "Child peak-RSS observation does not support async lifecycle callbacks.",
-                )
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return self._run_observed_sync(request)
-
-            observed_result: list[ExecutionOutcome] = []
-            observed_failure: list[BaseException] = []
-
-            def observe_in_thread() -> None:
-                try:
-                    observed_result.append(self._run_observed_sync(request))
-                except BaseException as exc:
-                    observed_failure.append(exc)
-
-            thread = threading.Thread(
-                target=observe_in_thread,
-                name="flameox-observed-subprocess",
-                daemon=True,
-            )
-            thread.start()
-            thread.join()
-            if observed_failure:
-                raise observed_failure[0]
-            if not observed_result:
-                raise RuntimeError("observed subprocess did not return an outcome")
-            return observed_result[0]
 
         async def execute() -> ExecutionOutcome:
             return await self.run(request, on_started=on_started, on_cleanup=on_cleanup)
@@ -736,9 +591,6 @@ class SubprocessBroker:
         on_started: Callable[[int], Awaitable[None]] | None = None,
         on_cleanup: Callable[[bool], Awaitable[None]] | None = None,
     ) -> ExecutionOutcome:
-        if request.observation == "child_peak_rss":
-            return await self._run_observed_async(request, on_started, on_cleanup)
-
         cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
         environment = self._build_environment(request)
         binding = self._bound_executable(request)
@@ -909,9 +761,12 @@ class SubprocessBroker:
                 observed_identities = self._observation_identities(process_observations)
 
                 async def wait_for_exit() -> int:
-                    returncode = await process.wait()
+                    await self._wait_root_exit(process)
                     stop_observation.set()
-                    return returncode
+                    if not await self._terminate(process, request, tracked_descendants):
+                        raise OSError("Descendant cleanup did not complete")
+                    assert process.returncode is not None
+                    return process.returncode
 
                 results = await asyncio.gather(
                     asyncio.shield(stdout_task),
@@ -1093,37 +948,6 @@ class SubprocessBroker:
         if on_cleanup is not None:
             await asyncio.shield(on_cleanup(cleanup_complete))
         return cleanup_complete
-
-    async def _run_observed_async(
-        self,
-        request: ExecutionRequest,
-        on_started: Callable[[int], Awaitable[None]] | None,
-        on_cleanup: Callable[[bool], Awaitable[None]] | None,
-    ) -> ExecutionOutcome:
-        if on_started is not None:
-            raise DomainError(
-                ErrorCode.INVALID_INPUT,
-                "Child peak-RSS observation does not support an on_started callback.",
-            )
-        cancellation = threading.Event()
-        observation = asyncio.create_task(
-            asyncio.to_thread(self._run_observed_sync, request, cancellation)
-        )
-        try:
-            return await asyncio.shield(observation)
-        except asyncio.CancelledError:
-            cancellation.set()
-            with anyio.CancelScope(shield=True):
-                outcome = await observation
-                if on_cleanup is not None:
-                    await on_cleanup(outcome.process.cleanup_complete is True)
-            raise ProcessCancelledError(
-                process=outcome.process,
-                process_observations=outcome.process_observations,
-                stdout=outcome.stdout,
-                stderr=outcome.stderr,
-                output_sink=outcome.output_sink,
-            ) from None
 
     def _snapshot_processes(
         self,
@@ -1334,335 +1158,6 @@ class SubprocessBroker:
             failures=tuple(sorted(set(failures))),
         )
 
-    def _run_observed_sync(
-        self,
-        request: ExecutionRequest,
-        cancellation: threading.Event | None = None,
-    ) -> ExecutionOutcome:
-        """Run a workload while retaining wait4's child-observation semantics.
-
-        The normal async path cannot use ``wait4`` because the event loop's child
-        watcher owns ``waitpid``.  This explicit path keeps spawning, output capture,
-        timeout, and group cleanup inside the broker while reaping the child itself.
-        """
-
-        cwd = self._resolve_cwd(request.cwd, request.allowed_working_roots)
-        environment = self._build_environment(request)
-        binding = self._bound_executable(request)
-        executable = binding.invocation_path
-        argv = (str(executable), *request.argv[1:])
-        started = time.monotonic_ns()
-        process: subprocess.Popen[bytes] | None = None
-        process_observations: list[ProcessObservation] = []
-        cleanup_complete = True
-        output = _ObservedOutput(request.max_output_bytes)
-        reader_threads: tuple[threading.Thread, ...] = ()
-        stdin_thread: threading.Thread | None = None
-        deadline = (
-            None if request.timeout_seconds is None else time.monotonic() + request.timeout_seconds
-        )
-        try:
-            process = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=environment,
-                stdin=(subprocess.PIPE if request.stdin_bytes is not None else subprocess.DEVNULL),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=os.name == "posix",
-                pass_fds=request.inherited_directory_fds,
-            )
-            assert process.stdout is not None
-            assert process.stderr is not None
-            reader_threads = (
-                threading.Thread(
-                    target=output.read_stdout,
-                    args=(process.stdout,),
-                    name="flameox-observed-stdout",
-                    daemon=True,
-                ),
-                threading.Thread(
-                    target=output.read_stderr,
-                    args=(process.stderr,),
-                    name="flameox-observed-stderr",
-                    daemon=True,
-                ),
-            )
-            for thread in reader_threads:
-                thread.start()
-            if request.stdin_bytes is not None:
-                assert process.stdin is not None
-                stdin_thread = threading.Thread(
-                    target=output.write_stdin,
-                    args=(process.stdin, request.stdin_bytes),
-                    name="flameox-observed-stdin",
-                    daemon=True,
-                )
-                stdin_thread.start()
-
-            process_observations.extend(
-                self._snapshot_processes(
-                    process.pid,
-                    ProcessSnapshotPhase.RUNNING,
-                    True,
-                    None,
-                    None,
-                    deadline=deadline,
-                )
-            )
-            observed = self._wait_observed(
-                process,
-                deadline=deadline,
-                output=output,
-                cancellation=cancellation,
-                observations=process_observations,
-            )
-            cleanup_complete = self._terminate_observed_group(process, force=True)
-            self._join_observed_io(output, reader_threads, stdin_thread)
-            stdout, stderr = output.collect()
-        except BaseException:
-            if process is not None and process.poll() is None:
-                cleanup_complete = self._terminate_observed_group(process, force=True)
-                self._reap_observed(process)
-            self._join_observed_io(output, reader_threads, stdin_thread)
-            raise
-
-        finished = time.monotonic_ns()
-        process_observations.extend(
-            self._snapshot_known_processes(
-                self._observation_identities(process_observations),
-                ProcessSnapshotPhase.POST_ROOT_EXIT,
-                False,
-                None,
-                None,
-            )
-        )
-        if observed.cancellation_cause is ProcessCancellationCause.IO_FAILURE or output.io_failed:
-            io_process = ProcessResult(
-                termination=process_termination_from_returncode(observed.returncode),
-                wall_time_ns=finished - started,
-                cancellation_cause=ProcessCancellationCause.IO_FAILURE,
-                cleanup_complete=cleanup_complete,
-            )
-            raise ProcessExecutionError(
-                ErrorCode.EXECUTION_FAILURE,
-                "Process output could not be drained safely.",
-                process=io_process,
-                process_observations=tuple(process_observations),
-            )
-        if (
-            observed.cancellation_cause is ProcessCancellationCause.OUTPUT_LIMIT
-            or output.limit_exceeded
-        ):
-            output_process = ProcessResult(
-                termination=process_termination_from_returncode(observed.returncode),
-                wall_time_ns=finished - started,
-                cancellation_cause=ProcessCancellationCause.OUTPUT_LIMIT,
-                cleanup_complete=cleanup_complete,
-                stdout=stdout.decode(errors="replace"),
-                stderr=stderr.decode(errors="replace"),
-            )
-            raise ProcessExecutionError(
-                ErrorCode.LIMIT_EXCEEDED,
-                f"Process output exceeded {request.max_output_bytes} bytes.",
-                process=output_process,
-                process_observations=tuple(process_observations),
-                stdout=stdout,
-                stderr=stderr,
-            )
-        if observed.cancellation_cause is ProcessCancellationCause.TIMEOUT:
-            timeout_process = ProcessResult(
-                termination=process_termination_from_returncode(observed.returncode),
-                wall_time_ns=finished - started,
-                cancellation_cause=ProcessCancellationCause.TIMEOUT,
-                cleanup_complete=cleanup_complete,
-                peak_rss_bytes=observed.peak_rss_bytes,
-                stdout=stdout.decode(errors="replace"),
-                stderr=stderr.decode(errors="replace"),
-            )
-            raise ProcessExecutionError(
-                ErrorCode.EXECUTION_TIMEOUT,
-                f"Process exceeded {request.timeout_seconds} seconds.",
-                process=timeout_process,
-                process_observations=tuple(process_observations),
-                retryable=True,
-            )
-
-        process_result = ProcessResult(
-            termination=process_termination_from_returncode(observed.returncode),
-            wall_time_ns=finished - started,
-            cancellation_cause=observed.cancellation_cause,
-            cleanup_complete=cleanup_complete,
-            peak_rss_bytes=observed.peak_rss_bytes,
-        )
-        return ExecutionOutcome(
-            process=process_result,
-            stdout=stdout,
-            stderr=stderr,
-            resolved_executable=executable,
-            executable_binding=binding,
-            containment=(
-                ProcessContainment.PROCESS_GROUP
-                if os.name == "posix"
-                else ProcessContainment.PROCESS
-            ),
-            peak_rss_backend=observed.peak_rss_backend,
-            process_observations=tuple(process_observations),
-        )
-
-    def _wait_observed(
-        self,
-        process: subprocess.Popen[bytes],
-        *,
-        deadline: float | None,
-        output: _ObservedOutput,
-        cancellation: threading.Event | None,
-        observations: list[ProcessObservation],
-    ) -> _ObservedWait:
-        terminating: ProcessCancellationCause | None = None
-        wait4 = getattr(os, "wait4", None)
-        if wait4 is not None:
-            while True:
-                if terminating is None:
-                    if cancellation is not None and cancellation.is_set():
-                        terminating = ProcessCancellationCause.CALLER_CANCELLED
-                        self._terminate_observed_with_observation(process, observations, force=True)
-                    elif output.limit_exceeded:
-                        terminating = ProcessCancellationCause.OUTPUT_LIMIT
-                        self._terminate_observed_with_observation(process, observations, force=True)
-                    elif output.io_failed:
-                        terminating = ProcessCancellationCause.IO_FAILURE
-                        self._terminate_observed_with_observation(process, observations, force=True)
-                    elif deadline is not None and time.monotonic() >= deadline:
-                        terminating = ProcessCancellationCause.TIMEOUT
-                        self._terminate_observed_with_observation(process, observations, force=True)
-                waited_pid, status, usage = wait4(process.pid, os.WNOHANG)
-                if waited_pid == process.pid:
-                    process.returncode = os.waitstatus_to_exitcode(status)
-                    peak_rss = int(usage.ru_maxrss)
-                    if sys.platform != "darwin":
-                        peak_rss *= 1024
-                    return _ObservedWait(
-                        returncode=process.returncode,
-                        peak_rss_bytes=peak_rss or None,
-                        peak_rss_backend="wait4_ru_maxrss",
-                        cancellation_cause=terminating,
-                    )
-                time.sleep(0.005)
-
-        peak = 0
-        while process.poll() is None:
-            peak = max(peak, self._observed_peak_rss(process.pid))
-            if terminating is None:
-                if cancellation is not None and cancellation.is_set():
-                    terminating = ProcessCancellationCause.CALLER_CANCELLED
-                    self._terminate_observed_with_observation(process, observations, force=True)
-                elif output.limit_exceeded:
-                    terminating = ProcessCancellationCause.OUTPUT_LIMIT
-                    self._terminate_observed_with_observation(process, observations, force=True)
-                elif output.io_failed:
-                    terminating = ProcessCancellationCause.IO_FAILURE
-                    self._terminate_observed_with_observation(process, observations, force=True)
-                elif deadline is not None and time.monotonic() >= deadline:
-                    terminating = ProcessCancellationCause.TIMEOUT
-                    self._terminate_observed_with_observation(process, observations, force=True)
-            time.sleep(0.005)
-        peak = max(peak, self._observed_peak_rss(process.pid))
-        return _ObservedWait(
-            returncode=process.returncode if process.returncode is not None else 0,
-            peak_rss_bytes=peak or None,
-            peak_rss_backend="psutil_polling",
-            cancellation_cause=terminating,
-        )
-
-    def _terminate_observed_with_observation(
-        self,
-        process: subprocess.Popen[bytes],
-        observations: list[ProcessObservation],
-        *,
-        force: bool,
-    ) -> bool:
-        observations.extend(
-            self._snapshot_processes(
-                process.pid,
-                ProcessSnapshotPhase.PRE_CLEANUP,
-                True,
-                "terminate",
-                None,
-            )
-        )
-        identities = self._observation_identities(observations)
-        cleanup_complete = self._terminate_observed_group(process, force=force)
-        observations.extend(
-            self._snapshot_known_processes(
-                identities,
-                ProcessSnapshotPhase.POST_CLEANUP,
-                False,
-                "terminate",
-                str(cleanup_complete),
-            )
-        )
-        return cleanup_complete
-
-    def _observed_peak_rss(self, pid: int) -> int:
-        peak = 0
-        try:
-            processes, _truncated = self._enumerate_processes(pid, time.monotonic() + 0.5)
-            peak = sum(
-                process.memory_info().rss for process, _source in processes if process.is_running()
-            )
-        except (psutil.Error, OSError):
-            pass
-        return peak
-
-    def _terminate_observed_group(
-        self,
-        process: subprocess.Popen[bytes],
-        *,
-        force: bool,
-    ) -> bool:
-        if os.name == "posix":
-            try:
-                self._signal_observed_group(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return True
-            if force:
-                time.sleep(0.05)
-                with suppress(ProcessLookupError):
-                    self._signal_observed_group(process.pid, signal.SIGKILL)
-            return True
-
-        if process.returncode is not None:
-            return True
-        if process.poll() is None:
-            process.terminate()
-            if force:
-                time.sleep(0.05)
-                if process.poll() is None:
-                    process.kill()
-        return True
-
-    @staticmethod
-    def _signal_observed_group(group_id: int, requested_signal: signal.Signals) -> None:
-        try:
-            os.killpg(group_id, requested_signal)
-        except PermissionError:
-            # Darwin can return EPERM for a group whose last members are zombies.
-            # Do not reap the root here: wait4 still owns the native RSS measurement.
-            for pid in psutil.pids():
-                try:
-                    if os.getpgid(pid) != group_id:
-                        continue
-                    if psutil.Process(pid).status() not in (
-                        psutil.STATUS_ZOMBIE,
-                        psutil.STATUS_DEAD,
-                    ):
-                        raise
-                except (ProcessLookupError, psutil.NoSuchProcess):
-                    continue
-            # Every remaining member is dead; a denied signal to a live member
-            # or an unreadable process still propagates instead of claiming cleanup.
-
     async def _write_stdin(
         self,
         stream: asyncio.StreamWriter,
@@ -1677,32 +1172,6 @@ class SubprocessBroker:
             stream.close()
             with suppress(Exception):
                 await stream.wait_closed()
-
-    def _join_observed_io(
-        self,
-        output: _ObservedOutput,
-        reader_threads: tuple[threading.Thread, ...],
-        stdin_thread: threading.Thread | None,
-    ) -> None:
-        threads = (*reader_threads, *([stdin_thread] if stdin_thread is not None else []))
-        deadline = time.monotonic() + self._OBSERVED_IO_JOIN_SECONDS
-        for thread in threads:
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        output.stop()
-        stop_deadline = time.monotonic() + self._OBSERVED_IO_STOP_SECONDS
-        for thread in threads:
-            if thread.is_alive():
-                thread.join(timeout=max(0.0, stop_deadline - time.monotonic()))
-
-    def _reap_observed(self, process: subprocess.Popen[bytes]) -> None:
-        if process.returncode is not None:
-            return
-        wait4 = getattr(os, "wait4", None)
-        if wait4 is not None:
-            _, status, _ = wait4(process.pid, 0)
-            process.returncode = os.waitstatus_to_exitcode(status)
-        else:
-            process.wait()
 
     async def _observe_resources(
         self,
@@ -1967,6 +1436,9 @@ class SubprocessBroker:
             with suppress(psutil.Error):
                 descendant.terminate()
         if process.returncode is not None:
+            if os.name == "posix":
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
             return await self._finish_descendant_cleanup(descendants)
         scope_stopped = True
         if request.systemd_scope_unit is not None:
