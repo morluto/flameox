@@ -174,6 +174,67 @@ def test_repository_rejects_symlinked_evidence_data(tmp_path: Path, member: str)
         runtime.close()
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_first_preservation_creates_missing_data_directory_ancestors(
+    tmp_path: Path, nested: bool
+) -> None:
+    store = tmp_path / "missing" / "parent" / "store" if nested else tmp_path / "store"
+    artifact = tmp_path / "native.txt"
+    artifact.write_text("native evidence")
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        assert not store.exists()
+        preserved = runtime.preserve_evidence(result["analysis_id"])
+        assert (
+            runtime.read_evidence(preserved["evidence_id"])["body"]["evidence_kind"] == "analysis"
+        )
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "relative", ["artifacts", "artifacts/sha256", "evidence", "evidence/sha256", ".staging"]
+)
+def test_initialization_rejects_symlinked_layout_before_writing(
+    tmp_path: Path, relative: str
+) -> None:
+    store = tmp_path / "store"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    selected = store / relative
+    selected.parent.mkdir(parents=True, exist_ok=True)
+    selected.symlink_to(outside, target_is_directory=True)
+    artifact = tmp_path / "native.txt"
+    artifact.write_text("native")
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preserve_evidence(result["analysis_id"])
+        assert failure.value.code == "REPOSITORY_CORRUPTION"
+        assert list(outside.iterdir()) == []
+        assert not (store / "repository.json").exists()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("owner", ["999999999999999999999-owner", "²-owner"])
+def test_cleanup_retains_staging_with_unverifiable_process_identity(
+    tmp_path: Path, owner: str
+) -> None:
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        runtime.repository.initialize()
+        path = runtime.repository.root / ".staging" / owner
+        path.mkdir()
+        (path / "keep").write_text("unverifiable owner")
+        runtime.repository.cleanup_abandoned_staging()
+        assert (path / "keep").read_text() == "unverifiable owner"
+    finally:
+        runtime.close()
+
+
 def test_repository_rejects_self_consistent_manifest_with_invalid_body_shape(
     tmp_path: Path,
 ) -> None:

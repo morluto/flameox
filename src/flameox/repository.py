@@ -122,6 +122,24 @@ class EvidenceRepository:
         return False
 
     def initialize(self) -> None:
+        directories = [
+            self.root / relative
+            for relative in (
+                "",
+                "artifacts",
+                "artifacts/sha256",
+                "evidence",
+                "evidence/sha256",
+                ".staging",
+                f".staging/{self.session_id}",
+            )
+        ]
+        for path in directories:
+            self._assert_no_symlink_path(path)
+            if os.path.lexists(path) and not path.is_dir():
+                raise RepositoryError(
+                    "REPOSITORY_CORRUPTION", "Repository paths must be directories."
+                )
         metadata_path = self.root / "repository.json"
         if metadata_path.is_file():
             self._validate_repository()
@@ -134,17 +152,11 @@ class EvidenceRepository:
                 "REPOSITORY_CORRUPTION",
                 "repository.json is missing from an existing evidence repository.",
             )
-        if self.root.is_symlink() or (self.root.exists() and not self.root.is_dir()):
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "The Flameox data path must be a directory."
-            )
-        self.root.mkdir(mode=0o700, exist_ok=True)
-        for relative in (
-            "artifacts/sha256",
-            "evidence/sha256",
-            f".staging/{self.session_id}",
-        ):
-            (self.root / relative).mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for path in directories:
+            self._assert_no_symlink_path(path)
+            path.mkdir(exist_ok=True)
+            self._assert_no_symlink_path(path)
         metadata = {
             "format_version": REPOSITORY_FORMAT,
             "created_at": datetime.now(UTC).isoformat(),
@@ -687,7 +699,7 @@ class EvidenceRepository:
                 os.kill(int(pid_text), 0)
             except ProcessLookupError:
                 shutil.rmtree(owner)
-            except (PermissionError, OSError):
+            except (PermissionError, OSError, ValueError, OverflowError):
                 continue
 
     def _publish_artifact(self, artifact: NativeSource) -> dict[str, Any]:
