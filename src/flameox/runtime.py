@@ -123,6 +123,7 @@ MAX_SESSION_PROJECTION_BYTES = 16 * 1024 * 1024
 MAX_SESSION_RESCUES = 64
 MAX_SESSION_SCRATCH_BYTES = 1024**3
 MAX_SESSION_SCRATCH_FILES = 8192
+MINIMUM_FREE_STORAGE_BYTES = 64 * 1024 * 1024
 _EXPIRED_ANALYSIS_REMEDIATION = (
     "Use query_evidence to find preserved evidence and reanalyze it, or rerun the original "
     "analysis or capture from its source artifacts. The analysis_id alone cannot recover "
@@ -161,6 +162,7 @@ class BoundCapture:
     invocation: CaptureInvocation
     collector_binding: ResolvedExecutable
     workload_binding: ResolvedExecutable
+    oracle_binding: ResolvedExecutable | None
 
 
 class AnalysisRuntime:
@@ -923,8 +925,9 @@ class AnalysisRuntime:
                             remediation=(SYSTEM_PROVIDER_GUIDANCE[target.provider_id],),
                         )
                     self.dependencies.verify_capture_binding(target.provider_id, collector_binding)
+                    oracle_binding = None
                     if experiment is not None and experiment.semantic_oracle is not None:
-                        self._require_host_tool(
+                        oracle_binding = self._require_host_tool(
                             experiment.semantic_oracle[0],
                             cwd=cwd,
                             environment={**os.environ, **environment},
@@ -940,6 +943,7 @@ class AnalysisRuntime:
                             invocation,
                             collector_binding,
                             workload_binding,
+                            oracle_binding,
                         )
                     )
                     pending_executions.append(
@@ -1003,34 +1007,37 @@ class AnalysisRuntime:
                 argv, environment, directory = item.argv, item.environment, item.directory
                 invocation = item.invocation
                 binding = item.collector_binding
-                self._revalidate_executable(item.workload_binding)
-                request = ExecutionRequest(
-                    argv=invocation.argv,
-                    executable_binding=binding,
-                    cwd=cwd,
-                    environment_allowlist=("PATH",),
-                    environment_overrides=invocation.environment,
-                    allowed_working_roots=(cwd,),
-                    timeout_seconds=target.budget.timeout_seconds,
-                    max_output_bytes=selected_limits.max_output_bytes,
-                    diagnostic_bytes=None if full_output else diagnostic_bytes,
-                    output_directory=request_scratch / f"console-{sequence_number:04d}"
-                    if full_output
-                    else None,
-                    output_root=request_scratch if full_output else None,
-                    resource_policy=await self.run_in_request(
-                        partial(
-                            self._capture_resource_policy,
-                            selected_limits,
-                            budget=target.budget,
-                            writable_root=directory,
-                        )
-                    ),
-                )
                 failure_code: str | None = None
+                receipt: ExecutionOutcome | ProcessExecutionError | None = None
+                process = None
+                containment = "broker"
                 try:
+                    self._revalidate_executable(item.workload_binding)
+                    request = ExecutionRequest(
+                        argv=invocation.argv,
+                        executable_binding=binding,
+                        cwd=cwd,
+                        environment_allowlist=("PATH",),
+                        environment_overrides=invocation.environment,
+                        allowed_working_roots=(cwd,),
+                        timeout_seconds=target.budget.timeout_seconds,
+                        max_output_bytes=selected_limits.max_output_bytes,
+                        diagnostic_bytes=None if full_output else diagnostic_bytes,
+                        output_directory=request_scratch / f"console-{sequence_number:04d}"
+                        if full_output
+                        else None,
+                        output_root=request_scratch if full_output else None,
+                        resource_policy=await self.run_in_request(
+                            partial(
+                                self._capture_resource_policy,
+                                selected_limits,
+                                budget=target.budget,
+                                writable_root=directory,
+                            )
+                        ),
+                    )
                     outcome = await self.broker.run(request)
-                    receipt: ExecutionOutcome | ProcessExecutionError = outcome
+                    receipt = outcome
                     process = outcome.process
                     containment = outcome.containment.value
                 except ProcessExecutionError as error:
@@ -1038,14 +1045,21 @@ class AnalysisRuntime:
                     process = error.process
                     containment = "broker"
                     failure_code = error.code.value
-                output_sources, console_metadata = await self.run_in_request(
-                    partial(
-                        self._capture_console_output,
-                        receipt,
-                        provider_id=target.provider_id,
-                        role_prefix=f"capture-{sequence_number:04d}/",
+                except (DomainError, RuntimeFailure) as error:
+                    if not executions:
+                        raise
+                    failure_code = str(error.code)
+                output_sources: list[NativeSource] = []
+                console_metadata: dict[str, Any] = {}
+                if receipt is not None:
+                    output_sources, console_metadata = await self.run_in_request(
+                        partial(
+                            self._capture_console_output,
+                            receipt,
+                            provider_id=target.provider_id,
+                            role_prefix=f"capture-{sequence_number:04d}/",
+                        )
                     )
-                )
                 captured.extend(output_sources)
                 if target.provider_id == "direct":
                     analysis_sources.extend(output_sources)
@@ -1114,8 +1128,7 @@ class AnalysisRuntime:
                         )
                         captured.append(captured_native)
                         analysis_sources.append(captured_native)
-                termination = process.termination
-                exit_code = getattr(termination, "exit_code", None)
+                exit_code = getattr(process.termination, "exit_code", None) if process else None
                 status = "succeeded" if exit_code == 0 and failure_code is None else "failed"
                 if status == "succeeded" and missing_artifact_roles:
                     status = "failed"
@@ -1135,53 +1148,63 @@ class AnalysisRuntime:
                         SEMANTIC_ORACLE_STDOUT_ENV: str(output_sources[0].path),
                         SEMANTIC_ORACLE_STDERR_ENV: str(output_sources[1].path),
                     }
-                    oracle_binding = self._require_host_tool(
-                        oracle_argv[0],
-                        cwd=cwd,
-                        environment={**os.environ, **oracle_environment},
-                    )
-                    oracle_request = ExecutionRequest(
-                        argv=tuple(oracle_argv),
-                        executable_binding=oracle_binding,
-                        cwd=cwd,
-                        environment_allowlist=("PATH",),
-                        environment_overrides=oracle_environment,
-                        allowed_working_roots=(cwd,),
-                        timeout_seconds=target.budget.timeout_seconds,
-                        max_output_bytes=selected_limits.max_output_bytes,
-                        diagnostic_bytes=None if full_oracle_output else diagnostic_bytes,
-                        output_directory=request_scratch / f"oracle-console-{sequence_number:04d}"
-                        if full_oracle_output
-                        else None,
-                        output_root=request_scratch if full_oracle_output else None,
-                        resource_policy=await self.run_in_request(
-                            partial(
-                                self._capture_resource_policy,
-                                selected_limits,
-                                budget=target.budget,
-                                writable_root=directory,
-                            )
-                        ),
-                    )
+                    oracle_binding = item.oracle_binding
+                    assert oracle_binding is not None
+                    oracle_process = None
+                    oracle_receipt: ExecutionOutcome | ProcessExecutionError | None = None
+                    oracle_failure_code: str | None = None
                     try:
+                        oracle_request = ExecutionRequest(
+                            argv=tuple(oracle_argv),
+                            executable_binding=oracle_binding,
+                            cwd=cwd,
+                            environment_allowlist=("PATH",),
+                            environment_overrides=oracle_environment,
+                            allowed_working_roots=(cwd,),
+                            timeout_seconds=target.budget.timeout_seconds,
+                            max_output_bytes=selected_limits.max_output_bytes,
+                            diagnostic_bytes=None if full_oracle_output else diagnostic_bytes,
+                            output_directory=request_scratch
+                            / f"oracle-console-{sequence_number:04d}"
+                            if full_oracle_output
+                            else None,
+                            output_root=request_scratch if full_oracle_output else None,
+                            resource_policy=await self.run_in_request(
+                                partial(
+                                    self._capture_resource_policy,
+                                    selected_limits,
+                                    budget=target.budget,
+                                    writable_root=directory,
+                                )
+                            ),
+                        )
                         oracle_outcome = await self.broker.run(oracle_request)
-                        oracle_receipt: ExecutionOutcome | ProcessExecutionError = oracle_outcome
+                        oracle_receipt = oracle_outcome
                         oracle_process = oracle_outcome.process
-                        oracle_failure_code: str | None = None
                     except ProcessExecutionError as error:
                         oracle_receipt = error
                         oracle_process = error.process
                         oracle_failure_code = error.code.value
-                    oracle_exit_code = getattr(oracle_process.termination, "exit_code", None)
-                    oracle_sources, oracle_metadata = await self.run_in_request(
-                        partial(
-                            self._capture_console_output,
-                            oracle_receipt,
-                            provider_id=target.provider_id,
-                            role_prefix=f"capture-{sequence_number:04d}/oracle_",
+                    except (DomainError, RuntimeFailure) as error:
+                        oracle_failure_code = (
+                            error.code.value if isinstance(error, DomainError) else error.code
                         )
+                    oracle_metadata: dict[str, Any] = {}
+                    if oracle_receipt is not None:
+                        oracle_sources, oracle_metadata = await self.run_in_request(
+                            partial(
+                                self._capture_console_output,
+                                oracle_receipt,
+                                provider_id=target.provider_id,
+                                role_prefix=f"capture-{sequence_number:04d}/oracle_",
+                            )
+                        )
+                        captured.extend(oracle_sources)
+                    oracle_exit_code = (
+                        getattr(oracle_process.termination, "exit_code", None)
+                        if oracle_process is not None
+                        else None
                     )
-                    captured.extend(oracle_sources)
                     oracle = {
                         "argv": oracle_argv,
                         "returncode": oracle_exit_code,
@@ -1191,7 +1214,9 @@ class AnalysisRuntime:
                         "failure_code": oracle_failure_code,
                         "limit": self._terminated_limit(
                             oracle_process, selected_limits, target.budget
-                        ),
+                        )
+                        if oracle_process is not None
+                        else None,
                         **oracle_metadata,
                     }
                 await self.run_in_request(
@@ -1225,9 +1250,11 @@ class AnalysisRuntime:
                         "missing_artifact_roles": missing_artifact_roles,
                         "artifact_rejections": artifact_rejections,
                         "semantic_oracle": oracle,
-                        "wall_time_ns": process.wall_time_ns,
+                        "wall_time_ns": process.wall_time_ns if process else None,
                         "containment": containment,
-                        "limit": self._terminated_limit(process, selected_limits, target.budget),
+                        "limit": self._terminated_limit(process, selected_limits, target.budget)
+                        if process
+                        else None,
                     }
                 )
                 self._check_capture_provenance_capacity(
@@ -1252,7 +1279,10 @@ class AnalysisRuntime:
                         capability_id,
                         [
                             PathSource(
-                                path=str(item.path), format=item.format, producer=item.producer
+                                path=str(item.path),
+                                format=item.format,
+                                producer=item.producer,
+                                expected_sha256=item.sha256,
                             )
                             for item in analysis_sources
                         ],
@@ -1508,6 +1538,7 @@ class AnalysisRuntime:
             mode="json", exclude_none=False
         )
         cached.result = validated_result
+        cached.manifest_body["evidence_kind"] = "capture"
         cached.manifest_body["coverage"] = self._copy_result(validated_result["coverage"])
         cached.manifest_body["limitations"] = list(validated_result["limitations"])
         return self._copy_result(validated_result)
@@ -2172,7 +2203,8 @@ class AnalysisRuntime:
                 "ceiling. A higher server ceiling requires restart or reconnect with --limits."
             )
         elif cause.value == "storage_reserve_exceeded":
-            configured = resources.minimum_free_bytes if resources is not None else None
+            configured = MINIMUM_FREE_STORAGE_BYTES
+            observed = resources.minimum_free_bytes if resources is not None else None
             unit = "bytes_free"
             recovery = "Free storage before retrying; do not lower the reserve blindly."
         else:
@@ -2761,7 +2793,7 @@ class AnalysisRuntime:
                 filesystem_path=self.scratch,
                 staging_root=self.scratch,
                 writable_roots=(conversion_root,),
-                minimum_free_bytes=64 * 1024 * 1024,
+                minimum_free_bytes=MINIMUM_FREE_STORAGE_BYTES,
                 maximum_rss_bytes=limits.max_memory_bytes,
                 maximum_writable_growth_bytes=limits.max_output_bytes,
             ),
@@ -2885,7 +2917,7 @@ class AnalysisRuntime:
                 filesystem_path=self.scratch,
                 staging_root=self.scratch,
                 writable_roots=(conversion_root,),
-                minimum_free_bytes=64 * 1024 * 1024,
+                minimum_free_bytes=MINIMUM_FREE_STORAGE_BYTES,
                 maximum_rss_bytes=limits.max_memory_bytes,
                 maximum_writable_growth_bytes=limits.max_output_bytes,
             ),
@@ -2946,7 +2978,7 @@ class AnalysisRuntime:
                 filesystem_path=self.scratch,
                 staging_root=self.scratch,
                 writable_roots=(conversion_root,),
-                minimum_free_bytes=64 * 1024 * 1024,
+                minimum_free_bytes=MINIMUM_FREE_STORAGE_BYTES,
                 maximum_rss_bytes=limits.max_memory_bytes,
                 maximum_writable_growth_bytes=limits.max_output_bytes,
             ),
@@ -2979,7 +3011,7 @@ class AnalysisRuntime:
         return ResourcePolicy(
             filesystem_path=self.scratch,
             writable_roots=(writable_root,),
-            minimum_free_bytes=64 * 1024 * 1024,
+            minimum_free_bytes=MINIMUM_FREE_STORAGE_BYTES,
             maximum_rss_bytes=budget.max_memory_bytes,
             max_observed_files=remaining_files,
             maximum_writable_growth_bytes=limits.max_output_bytes,
