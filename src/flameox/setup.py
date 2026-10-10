@@ -390,11 +390,10 @@ def _json_plan(
     if isinstance(existing, dict) and all(
         existing.get(key) == value for key, value in entry.items()
     ):
-        action: Literal["create", "update", "already_current"] = "already_current"
-    else:
-        action = "update" if existing is not None else "create"
-        section["flameox"] = {**existing, **entry} if isinstance(existing, dict) else entry
-    if path.suffix == ".jsonc" and source is not None and action != "already_current":
+        return source, source or "", "already_current"
+    action: Literal["create", "update"] = "update" if existing is not None else "create"
+    section["flameox"] = {**existing, **entry} if isinstance(existing, dict) else entry
+    if path.suffix == ".jsonc" and source is not None:
         content = _jsonc_update_mcp_entry(source, section_name, section["flameox"])
     else:
         content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"

@@ -38,8 +38,12 @@ def test_setup_preserves_existing_client_configuration_and_is_idempotent(
     assert updated["mcpServers"]["other"] == {"command": "other"}
     assert "flameox" in updated["mcpServers"]
 
+    custom_format = json.dumps(updated, separators=(",", ":"))
+    config.write_text(custom_format)
     repeated = plan_client_setup([SetupClient.CURSOR], [], home=tmp_path)[0]
+    assert repeated.content == custom_format
     assert apply_client_setup([repeated])[0].action == "already_current"
+    assert config.read_text() == custom_format
 
 
 def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Path) -> None:
