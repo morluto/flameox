@@ -33,7 +33,7 @@ containment must not be silently promoted to complete evidence.
 
 ## Experiments
 
-MCP capture tools run the target once by default. Capabilities whose analysis intentionally composes
+MCP capture tools run the target once by default. Operations whose analysis intentionally composes
 multiple artifacts also accept an optional top-level `experiment` design. Single-artifact analyses
 do not advertise that field and reject experiments before a target starts. The
 CLI accepts the same `ExperimentDesign` object through `capture --experiment JSON` when the chosen
@@ -42,7 +42,7 @@ threshold, and an optional semantic oracle. Cases are bounded and execute throug
 as a single capture.
 
 For GPU kernel work, the agent normally compiles and edits with its native coding tools, records
-correctness through `inspect_kernel_validation` and `compare_kernel_validation` analysis, checks hazards with a
+correctness through `inspect_kernel_validation` and `compare_kernel_validation` analysis, checks hazards with an
 `inspect_sanitizer_failures` capture, measures representative baseline/candidate cases with a
 `summarize_benchmarks` experiment, and profiles only the remaining uncertainty with `inspect_gpu_launches` or
 `inspect_gpu_kernel_metrics`. Flameox preserves the verification evidence;
@@ -56,7 +56,7 @@ Failed or oracle-invalid pairs are excluded and
 reported as limitations; fewer than three eligible pairs produce a descriptive
 estimate without a confidence interval. `point_estimate_classification` describes only the
 observed estimate against the practical margin, with `decision_basis=descriptive_point_estimate`
-on the experiment metrics block. It replaces the ambiguous `decision` field. `within_threshold`
+on the experiment metrics block. `within_threshold`
 does not establish equivalence; a wide interval may still span material improvement and regression.
 The deterministic percentile interval is reported separately and is not a calibrated equivalence
 test. Semantic correctness still requires the declared oracle.
@@ -157,9 +157,3 @@ internal consistency. Structurally ambiguous documents, including duplicate sema
 are rejected. Status or comparator contradictions remain visible as bounded consistency failures and
 make the derived summary inconclusive; producer statuses and native JSON remain unchanged. Cases with
 no outputs still produce case evidence rows.
-
-Comparison handlers accumulate member identities in dictionaries and test each
-incoming identity directly against existing keys. They must not rebuild the
-accumulated key set for every member. Large derived tables belong in immutable
-evidence data files; request-local DuckDB may aggregate them without becoming an
-authority.

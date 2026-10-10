@@ -2,7 +2,11 @@
 
 Flameox is a process-lifespan operation runtime with an optional immutable
 evidence repository. It is not a workspace application and has no mutable
-control plane.
+control plane. It coordinates maintained measurement and replay tools rather than replacing
+profilers, providing hosted observability, or offering arbitrary commands, SQL, or source edits.
+A feature belongs when it improves trustworthy collection, preservation, cross-evidence comparison,
+experimental validity, or bounded drill-down. Custom measurement or replay machinery is justified
+only when maintained tools cannot meet the evidence, safety, or reproducibility contract.
 
 ## Authority map
 

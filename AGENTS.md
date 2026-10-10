@@ -1,138 +1,48 @@
-# Repository Guidelines
+# Working on Flameox
 
-## Product Direction
+Flameox is a local runtime-evidence layer for coding agents. It coordinates maintained
+measurement tools, extracts bounded evidence, and optionally preserves native artifacts and
+provenance. The agent owns hypotheses and conclusions. There is no workspace initialization
+or named workload configuration: callers supply exact artifact paths or typed capture targets.
 
-flameox is a permanently local evidence layer for coding agents investigating
-performance, memory, execution, concurrency, and reliability. It coordinates
-existing measurement tools, preserves native artifacts and provenance, extracts
-bounded evidence, and compares runs and experiments. The agent forms hypotheses
-and chooses experiments; conclusions must remain inspectable and falsifiable.
+## Constraints that affect implementation
 
-A typical investigation moves through:
+- Keep CLI and MCP thin over `AnalysisRuntime` and the operation registry. Public fields,
+  bounds, and descriptions belong in canonical runtime models; transport schemas derive from
+  them. Expose named task-shaped tools, without search/execute gateways or aliases.
+- Preserve native bytes, provenance, failed attempts, and experiment structure. Keep observed,
+  derived, and inferred claims distinct; profiles alone do not prove improvement or correctness.
+- Keep work request-owned and scratch ephemeral. Durable evidence uses content-addressed
+  artifacts and immutable authoritative manifests. DuckDB is ephemeral only; Flameox never
+  creates or imports SQLite, though upstream packages may read their native formats internally.
+- Capture takes validated argv, cwd, environment, provider fields, and request-lowerable limits.
+  It runs trusted local programs; process bounds are not a sandbox.
+- Continuations read saved inputs without rerunning workloads. Session handles and durable
+  evidence have different lifetimes; preserve exact continuation and recovery handoffs.
 
-```text
-symptom → capture or import → bounded evidence → hypothesis
-        → discriminating experiment → supported, refuted, or inconclusive finding
-```
+## Find the relevant contract
 
-flameox is not a profiler, a generic bug finder, a hosted observability service,
-an unrestricted command or SQL gateway, or an arbitrary source-code modification
-system. Agents pass exact artifact paths or typed direct targets; there is no
-workspace initialization or named workload configuration.
-A feature belongs when it improves trustworthy collection, evidence
-preservation, cross-evidence comparison, experimental validity, or bounded agent
-drill-down without replacing an upstream tool.
+Consult the owning contract when changing that behavior; routine edits do not require reading
+all docs. Module ownership is in [architecture](docs/architecture.md#package-boundaries).
 
-When changing the product:
+| Change | Contract |
+| --- | --- |
+| Product scope, process or package boundaries | [Architecture](docs/architecture.md) |
+| Preservation, provenance, persisted schemas | [Storage and evidence](docs/storage-and-evidence.md) |
+| Experiments, metrics, comparisons | [Investigations](docs/investigations.md) |
+| Providers, native formats, compatibility | [Adapters](docs/adapters.md) |
+| Cancellation, resources, integrity, privacy | [Runtime safety](docs/runtime-safety.md) |
+| CLI, MCP, setup, update, continuation | [Interfaces](docs/interfaces.md) |
+| Test selection and proof gaps | [Testing](docs/testing.md) |
 
-- preserve native artifacts, provenance, failed attempts, and experimental
-  structure;
-- distinguish observed, derived, and inferred claims;
-- prefer bounded task-shaped operations over arbitrary commands or SQL;
-- prefer integrating maintained measurement and replay tools through typed adapters;
-  build custom measurement or replay machinery only when maintained tools cannot
-  satisfy the required evidence, safety, or reproducibility contract;
-- keep in-progress work request-owned, session scratch ephemeral, native
-  artifacts content-addressed, and immutable evidence manifests authoritative;
-- use DuckDB only as an ephemeral query engine; Flameox never creates or imports
-  SQLite, though upstream packages may read their own native formats internally;
-- keep CLI and MCP as thin transports over the same `AnalysisRuntime` and
-  operation registry;
-- let agents pass validated argv, cwd, environment, provider arguments, and
-  request-lowerable limits directly to capture;
-- expose coverage, limitations, compatibility, and containment truthfully;
-- optimize for investigation leverage, not integration count.
+## Development
 
-Profiles guide discovery but do not prove causality, semantic correctness, or
-performance improvement. Confirmatory claims require representative workloads,
-declared metrics and estimands, compatible identities, preserved samples, and
-a semantic oracle.
+Use Python 3.12+, `uv`, and the committed `uv.lock`. Start with `uv sync --extra dev`;
+add provider extras only when needed. Ruff and strict mypy own style and typing checks.
+Commands and contribution conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Project Structure & Module Organization
-
-flameox is a Python 3.12+ package using a `src/` layout. `runtime.py` owns the
-process-lifespan operation runtime; `runtime_contracts.py` owns strict public
-contracts; `repository.py` owns optional immutable preservation; `execution.py`
-owns bounded subprocess work; operation integrations live in `providers/`;
-reusable format parsers live in `adapters/`; isolated protocols live in
-`workers/`; and `cli.py` plus `mcp/` are thin transports. Tests mirror these
-semantic owners under `tests/`.
-
-Read the relevant contract before changing product behavior:
-
-- `docs/architecture.md` for process, package, dependency, and platform rules;
-- `docs/storage-and-evidence.md` for storage, provenance, publication, and
-  schema rules;
-- `docs/investigations.md` for experiments, recipes, statistics, and evidence
-  quality;
-- `docs/adapters.md` for integration, compatibility, probing, and adapter policy
-  behavior;
-- `docs/runtime-safety.md` for concurrency, recovery, retention, integrity,
-  security, privacy, and observability;
-- `docs/interfaces.md` for CLI and MCP behavior and trust boundaries.
-
-## Tool Changes
-
-- Expose named, task-shaped MCP tools from the operation registry. Do not add
-  search/execute gateways or compatibility aliases for removed tools.
-- Keep public fields, bounds, and descriptions in canonical runtime models;
-  project transport schemas from them rather than maintaining parallel models.
-  Validate admitted arguments against the advertised schema before execution.
-- Fix behavior in its semantic owner. Add a wrapper, abstraction, or reexport
-  only when it serves a distinct contract or removes meaningful duplication.
-- Preserve exact continuation and recovery handoffs. Reading another page must
-  not rerun a capture; session handles and durable evidence have different lifetimes.
-
-## Build, Test, and Development Commands
-
-Use `uv` and the committed `uv.lock`:
-
-```console
-uv sync --extra dev --extra memory --extra trace --extra cpu
-uv run flameox --help
-uv run pytest -q
-uv run ruff check src tests tools
-uv run ruff format --check src tests tools
-uv run mypy src tests tools
-```
-
-The first command installs development tools and supported lightweight
-integrations. Run a focused test while iterating, for example
-`uv run pytest tests/test_runtime.py -q`. See [docs/testing.md](docs/testing.md)
-for optional and performance selections and the CI workflow for additional checks.
-
-## Coding Style & Naming Conventions
-
-Use four-space indentation, complete type annotations, and Python 3.12 syntax.
-Ruff enforces a 100-character line limit, import ordering, modernization, and
-common bug patterns; mypy runs in strict mode.
-
-## Testing Guidelines
-
-Prefer real end-to-end workflows, then integration behavior, then focused golden
-examples. Extend an existing workflow when it can prove the regression. Remove
-redundant tests, private-helper assertions, and mock scaffolding; retain narrower
-tests only for distinct contracts those workflows cannot reliably prove. When
-pruning, identify the remaining proof for each distinct behavior or record the gap
-in [docs/testing.md](docs/testing.md).
-
-For tool changes, exercise the installed CLI and real MCP stdio transport with
-valid and adversarial inputs, native evidence, and relevant continuation or
-recovery flows. Check advertised schemas against accepted inputs and emitted
-results. Include failure paths; a passing suite alone does not establish the
-documented behavior. Report the exercised surface and remaining proof gaps.
-
-Name files `test_<area>.py` and tests `test_<observable_behavior>`. Mark tests that
-spawn or communicate with subprocesses `process`; use `e2e` for installed CLI or
-MCP workflows with real processes and native evidence. CI reports combined branch
-coverage without a percentage gate.
-
-## Commit & Pull Request Guidelines
-
-History follows Conventional Commit-style subjects such as
-`feat(evidence): add immutable manifest query`, `test: ...`, and `docs: ...`.
-Keep commits focused and use an optional scope when it clarifies ownership.
-Pull requests should explain the problem and chosen approach, link relevant
-issues, list commands actually run, and call out compatibility or safety
-implications. Include CLI output or protocol examples for user-visible changes;
-screenshots are only useful for changes with a visual surface.
+Match validation to the changed behavior. For tool changes, exercise affected installed CLI and
+real MCP stdio workflows, including relevant failure and continuation paths, and check schemas
+against accepted inputs and emitted results. Documentation-only changes need link and contract
+checks, not collector or performance runs. Record material proof gaps in
+[testing](docs/testing.md#evidence-and-limits).

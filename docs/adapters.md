@@ -92,7 +92,7 @@ remain in the total counts and estimated bytes, with separate `unresolved_sample
 `unresolved_sampled_bytes` metrics, incomplete coverage, and an explicit attribution limitation.
 
 `inspect_triton_autotune` reads native `*.autotune.json` caches (`triton-cache`) emitted
-by Triton's `cache_results=True`, as well as the existing listener-event format.
+by Triton's `cache_results=True`, and listener events.
 Native timing values retain producer order, including positive-infinity sentinels;
 they are not averaged as repeated samples. The best configuration is derived
 using Triton's lexicographic comparison. Native caches do not prove cache hits,

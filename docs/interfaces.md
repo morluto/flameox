@@ -8,64 +8,17 @@ provider behavior, or lifecycle state.
 The low-level Python MCP SDK server owns protocol initialization, framing, transports, progress,
 and MCP types. A declarative Flameox tool registry projects strict input and output schemas and
 dispatches thin handlers over the shared `AnalysisRuntime`; Flameox does not implement a custom MCP
-protocol. The catalog contains 26 named analysis tools, 20 named capture tools, and five lifecycle
-tools. Analysis tools are read-only and idempotent. Capture tools execute a typed argv and are
-annotated as effects; they never masquerade as reads. Lifecycle tools prepare providers or manage
-immutable evidence.
+protocol. Analysis tools are read-only and idempotent. Capture tools execute typed argv and carry
+effect annotations. Lifecycle tools prepare providers or manage immutable evidence.
 
-Analysis tool names, in operation-registry order, are:
-
-```text
-summarize_trace                 inspect_trace_call_graph
-summarize_pytorch_trace         summarize_trace_operations
-summarize_trace_lifecycle       inspect_trace_window
-rank_cpu_hotspots               inspect_cpu_callers
-rank_allocation_hotspots        rank_retained_memory
-summarize_benchmarks            analyze_benchmark_scaling
-compare_benchmarks              summarize_inference
-compare_inference               inspect_gpu_launches
-inspect_gpu_kernel_metrics      inspect_triton_autotune
-inspect_sanitizer_failures      inspect_kernel_validation
-compare_kernel_validation       summarize_failures
-inspect_pytest_fixtures         summarize_coverage
-inspect_performance_candidates  preview_artifact
-```
-
-Capture tool names combine `capture_and_` with the analysis task name. Available capture tools are:
-
-```text
-capture_and_summarize_trace
-capture_and_inspect_trace_call_graph
-capture_and_summarize_pytorch_trace
-capture_and_summarize_trace_operations
-capture_and_summarize_trace_lifecycle
-capture_and_inspect_trace_window
-capture_and_rank_cpu_hotspots
-capture_and_inspect_cpu_callers
-capture_and_rank_allocation_hotspots
-capture_and_rank_retained_memory
-capture_and_summarize_benchmarks
-capture_and_analyze_benchmark_scaling
-capture_and_inspect_gpu_launches
-capture_and_inspect_gpu_kernel_metrics
-capture_and_inspect_triton_autotune
-capture_and_inspect_sanitizer_failures
-capture_and_summarize_failures
-capture_and_inspect_pytest_fixtures
-capture_and_summarize_coverage
-capture_and_preview_artifact
-```
-
-The five lifecycle tools are `prepare_providers`, `preserve_evidence`, `rescue_evidence`,
-`query_evidence`, and `inspect_evidence`. There are no gateway tools, opaque operation selectors,
-or compatibility aliases.
-`flameox mcp inspect` lists compact names and annotations; `--tool TOOL_NAME` returns
-one exact MCP input/output schema, its operation examples, and compatible provider-field schemas.
-`--full`
-shows the complete catalog. CLI results omit process-local `analysis_id`
-because it cannot survive command exit. CLI inspection reports bounded tool/operation choices;
-an unsupported declared artifact format returns the operation's accepted formats before provider
-decoding.
+The operation registry supplies analysis task names; capturable operations also expose
+`capture_and_` tools with the same task name. Lifecycle tools are `prepare_providers`,
+`preserve_evidence`, `rescue_evidence`, `query_evidence`, and `inspect_evidence`.
+Use `flameox mcp inspect` for the current catalog and annotations, `--tool TOOL_NAME` for one
+tool's exact input/output schemas, examples, and provider fields, or `--full` for all schemas.
+There are no gateway tools, opaque operation selectors, or aliases.
+CLI results omit process-local `analysis_id` because it cannot survive command exit.
+An unsupported declared artifact format returns the operation's accepted formats before decoding.
 
 `rescue_evidence` accepts one live session analysis and an agent-selected explicit absolute path
 below an existing parent to a distinct new directory. It stages the normal immutable evidence
@@ -131,8 +84,8 @@ invalid requests, terminal infrastructure failures, and failures with no trustwo
 `isError=true`. Pages are selected by row count; complete rows, execution provenance, and
 continuation arguments are returned without a response-byte ceiling or a second compaction pass.
 
-On the 2026 protocol, SDK cache hints mark the static tool catalog as public for one hour.
-Older negotiated protocol revisions omit these fields.
+SDK cache hints mark the static tool catalog as public for one hour when the negotiated protocol
+supports them.
 
 For analysis and capture results, `next_page` contains the exact named analysis tool and complete
 arguments for the next call. It includes ordered live path sources or preserved evidence sources,
@@ -166,7 +119,7 @@ summaries require exactly one source, comparison operations require at least two
 intentional aggregations accept a larger bounded collection.
 
 Operation-specific fields appear directly at the tool's top level, defaulting according to the
-shared operation model. A operation may require fields such as the start and end bounds for
+shared operation model. An operation may require fields such as the start and end bounds for
 `inspect_trace_window`; transport validation returns their field paths and accepted values where
 applicable. Unknown fields are rejected, and pstats CPU metrics use a closed vocabulary in the
 tool schema. Its path-source `format` field enumerates the operation's accepted formats.
@@ -201,8 +154,6 @@ working directories, and host paths. The local CLI `evidence show` command is th
 full-provenance view. Missing or corrupt evidence uses the ordinary structured tool-failure contract.
 
 MCP exposes no resources, resource templates, evidence URIs, or resource-link content blocks.
-Clients that previously read an evidence URI should call `inspect_evidence` with its evidence ID.
-Preservation, rescue, and inventory results now return IDs without URI fields.
 
 Every tool advertises a compact output schema for its stable result envelope. Provider-specific
 metrics and rows remain open JSON values. Success uses structured content directly, without an
@@ -261,8 +212,7 @@ record. After preserving a CLI capture, execute the same field. A rescued handof
 the exact `next_page.environment` needed to open its alternate evidence store. An unpreserved CLI capture
 sets continuation to null and reports the exact preservation or rescue rerun because its scratch is
 released at exit. Scratch can be released immediately after preserved evidence is available.
-A changed input cannot reuse a continuation. Tokens issued by older path-bound implementations
-must be restarted with a fresh analysis. Preview `offset` counts logical rows: text lines, JSONL
+A changed input cannot reuse a continuation. Preview `offset` counts logical rows: text lines, JSONL
 records, CSV data records, Parquet records, and projected JSON entries.
 
 For oversized text lines, `preview_artifact` accepts the top-level

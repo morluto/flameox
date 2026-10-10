@@ -34,7 +34,7 @@ Flameox 区分观测、推导和推断。性能剖析可用于探索，但不能
 
 ## MCP
 
-MCP 服务不绑定工作区。它与 CLI 共用操作注册表，提供具名分析和采集工具。分析工具接收明确来源；采集工具接收类型化目标和采集器。操作专属字段直接显示在工具 schema 中。运行 `flameox mcp inspect` 查看目录；添加 `--tool TOOL_NAME` 查看对应 schema 和示例。完整工具目录及契约见[接口文档](docs/interfaces.md)。
+MCP 服务不绑定工作区。它与 CLI 共用操作注册表，提供具名分析和采集工具。分析工具接收明确来源；采集工具接收类型化目标和采集器。操作专属字段直接显示在工具 schema 中。运行 `flameox mcp inspect` 查看目录；添加 `--tool TOOL_NAME` 查看对应 schema 和示例。工具契约见[接口文档](docs/interfaces.md)。
 
 工具直接内联返回完整的有界结果，包括失败信息和恢复操作。保留后的证据具有持久的 `evidence_id`；调用 `inspect_evidence` 可内联获取脱敏元数据和重新分析所需的来源。
 

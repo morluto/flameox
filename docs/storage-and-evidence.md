@@ -144,7 +144,7 @@ Agent projections expose an opaque `source` accepted unchanged by analysis tools
 plus `logical_sources` for directory bundles and ordered `analysis_sources` for the original
 analysis. Selectors address immutable manifest positions, not hashes of private roles that could
 be checked against guessed filenames. File selectors always select exact members, even when a
-filename contains the directory-role delimiter. New manifests include `source_layout`: each source
+filename contains the directory-role delimiter. Manifests include `source_layout`: each source
 declares its file/directory kind, exact artifact indices, relative member paths, and identity,
 with an ordered mapping for
 the original analysis inputs. Empty directories retain their metadata without inventing a native
@@ -181,6 +181,4 @@ synthesize replacement metadata.
 
 Repository format `4` records the same task name used by runtime, CLI, and MCP in `operation`.
 Analysis inputs bind their file or directory kind as well as their native digest. Unsupported
-repository, artifact, and manifest versions fail before contents are trusted. There are no aliases,
-legacy readers, or automatic migrations. Use an empty store for this contract; changing a version
-field cannot migrate content-addressed evidence.
+repository, artifact, and manifest versions fail before contents are trusted.
