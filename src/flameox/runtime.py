@@ -1243,7 +1243,7 @@ class AnalysisRuntime:
                 if progress:
                     await progress(sequence_number, total, f"captured {case.name} block {block}")
 
-            def finish_analysis() -> tuple[dict[str, Any], dict[str, Any] | None]:
+            def finish_analysis() -> tuple[dict[str, Any], dict[str, Any] | None] | RuntimeFailure:
                 try:
                     if not analysis_sources:
                         raise RuntimeFailure(
@@ -1274,49 +1274,64 @@ class AnalysisRuntime:
                         limits=selected_limits,
                         failure=error,
                     )
-                    if preserve:
-                        result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
-                    next_request = (
-                        self.next_analysis_request(result) if include_next_request else None
+                else:
+                    cached = self.analyses[str(result["analysis_id"])]
+                    if target.provider_id == "py-spy":
+                        py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
+                        process_scope = (
+                            "the target and newly created Python subprocesses"
+                            if py_spy_arguments.subprocesses
+                            else "the target process only"
+                        )
+                        result["limitations"].append(
+                            f"py-spy sampled {process_scope}; sampled stacks are not complete "
+                            "process-tree execution evidence."
+                        )
+                    cached.sources = captured
+                    cached.analysis_source_indices = self._captured_source_indices(
+                        captured, analysis_sources
                     )
-                    return result, next_request
-                cached = self.analyses[str(result["analysis_id"])]
-                if target.provider_id == "py-spy":
-                    py_spy_arguments = cast(PySpyCaptureArguments, capture_arguments)
-                    process_scope = (
-                        "the target and newly created Python subprocesses"
-                        if py_spy_arguments.subprocesses
-                        else "the target process only"
+                    cached.manifest_body["capture_request"] = {
+                        "target": target.model_dump(mode="json"),
+                        "mode": mode,
+                        "experiment": experiment.model_dump(mode="json") if experiment else None,
+                        "executions": executions,
+                    }
+                    result = self._finalize_capture_result(
+                        result,
+                        cached,
+                        capability_id=capability_id,
+                        mode=mode,
+                        experiment=experiment,
+                        executions=executions,
                     )
-                    result["limitations"].append(
-                        f"py-spy sampled {process_scope}; sampled stacks are not complete "
-                        "process-tree execution evidence."
-                    )
-                cached.sources = captured
-                cached.analysis_source_indices = self._captured_source_indices(
-                    captured, analysis_sources
-                )
-                cached.manifest_body["capture_request"] = {
-                    "target": target.model_dump(mode="json"),
-                    "mode": mode,
-                    "experiment": experiment.model_dump(mode="json") if experiment else None,
-                    "executions": executions,
-                }
-                result = self._finalize_capture_result(
-                    result,
-                    cached,
-                    capability_id=capability_id,
-                    mode=mode,
-                    experiment=experiment,
-                    executions=executions,
-                )
                 if preserve:
-                    result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                    try:
+                        result["preserved"] = self.preserve_evidence(str(result["analysis_id"]))
+                    except RuntimeFailure as error:
+                        if error.code not in {
+                            "REPOSITORY_CORRUPTION",
+                            "UNSUPPORTED_REPOSITORY_FORMAT",
+                            "REPOSITORY_IO_FAILURE",
+                        }:
+                            raise
+                        error.details["analysis_id"] = result["analysis_id"]
+                        error.remediation = (
+                            *error.remediation,
+                            "Capture completed and remains available under analysis_id. "
+                            "If the configured store is unusable, call rescue_evidence with "
+                            "that handle and a new evidence directory. Retry publication "
+                            "without repeating the capture.",
+                        )
+                        return error
                 self._prune_scratch(protected_root=request_scratch)
                 next_request = self.next_analysis_request(result) if include_next_request else None
                 return result, next_request
 
-            return await self.run_in_request(finish_analysis)
+            completed = await self.run_in_request(finish_analysis)
+        if isinstance(completed, RuntimeFailure):
+            raise completed
+        return completed
 
     @staticmethod
     def _capture_console_output(

@@ -36,6 +36,11 @@ Full streams have `output_streams` metadata; excerpts have `console_diagnostics`
 Failed captures with no native artifacts can still preserve their diagnostics,
 execution outcome, and analysis failure without creating placeholder log files.
 
+If inline preservation fails because the repository is corrupt, unsupported, or
+unwritable, the completed capture remains in the session. The typed failure includes
+`details.analysis_id`; use it with `rescue_evidence` and a new evidence directory
+before restarting. Retrying publication does not require another workload execution.
+
 ## Repository layout
 
 The first explicit preservation creates exactly:

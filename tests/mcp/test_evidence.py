@@ -14,7 +14,7 @@ from mcp_types import TextContent
 from flameox.mcp.server import FlameoxServer
 from flameox.repository import EvidenceRepository
 from flameox.runtime import AnalysisRuntime
-from flameox.runtime_contracts import MAX_ROWS
+from flameox.runtime_contracts import MAX_ROWS, EvidenceSource
 
 
 @pytest.mark.process
@@ -295,26 +295,65 @@ def test_analysis_preservation_query_inspection_and_restart(tmp_path: Path) -> N
 
 
 @pytest.mark.integration
-def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path) -> None:
+@pytest.mark.process
+@pytest.mark.parametrize("mode", ["analysis", "capture", "failed_analysis"])
+def test_mcp_rescues_live_analysis_from_unusable_configured_store(
+    tmp_path: Path, mode: str
+) -> None:
     configured = tmp_path / "configured"
     configured.mkdir()
     (configured / "unexpected").write_text("corrupt")
     rescue = tmp_path / "rescue"
     artifact = tmp_path / "input.json"
     artifact.write_text('[{"value": 1}]')
+    marker = tmp_path / "runs"
 
     async def exercise() -> str:
         async with Client(
             FlameoxServer(evidence_directory=configured), raise_exceptions=True
         ) as client:
-            analyzed = await client.call_tool(
-                "preview_artifact",
-                {"sources": [{"kind": "path", "path": str(artifact)}]},
-            )
+            if mode == "analysis":
+                analyzed = await client.call_tool(
+                    "preview_artifact",
+                    {"sources": [{"kind": "path", "path": str(artifact)}]},
+                )
+                analysis_id = analyzed.structured_content["analysis_id"]
+            else:
+                analyzed = await client.call_tool(
+                    "capture_artifact_preview",
+                    {
+                        "target": {
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "from pathlib import Path\n"
+                                f"with Path({str(marker)!r}).open('a') as stream:\n"
+                                "    stream.write('run\\n')\n"
+                                "print('retained evidence'); print('x' * 2048)\n",
+                            ],
+                            "cwd": str(tmp_path),
+                        },
+                        "provider": {"kind": "direct"},
+                        "preserve": True,
+                        **(
+                            {"limits": {"max_input_bytes": 1024}}
+                            if mode == "failed_analysis"
+                            else {}
+                        ),
+                    },
+                )
+                assert analyzed.is_error
+                assert analyzed.structured_content["code"] == "REPOSITORY_CORRUPTION"
+                analysis_id = analyzed.structured_content["details"]["analysis_id"]
+                assert (
+                    "without repeating the capture"
+                    in analyzed.structured_content["next_action"]["message"]
+                )
+                assert marker.read_text() == "run\n"
             rescued = await client.call_tool(
                 "rescue_evidence",
                 {
-                    "analysis_id": analyzed.structured_content["analysis_id"],
+                    "analysis_id": analysis_id,
                     "destination": str(rescue),
                 },
             )
@@ -331,7 +370,25 @@ def test_mcp_rescues_live_analysis_from_unusable_configured_store(tmp_path: Path
     evidence_id = anyio.run(exercise)
     reopened = AnalysisRuntime(evidence_directory=rescue)
     try:
-        assert reopened.read_evidence(evidence_id)["evidence_id"] == evidence_id
+        manifest = reopened.read_evidence(evidence_id)
+        assert manifest["evidence_id"] == evidence_id
+        if mode != "analysis":
+            assert marker.read_text() == "run\n"
+            assert manifest["body"]["capture_request"]["executions"][0]["status"] == "succeeded"
+            if mode == "failed_analysis":
+                assert manifest["body"]["analysis_request"]["failure"]["code"] == "LIMIT_EXCEEDED"
+            else:
+                inspected = reopened.read_evidence_agent_projection(evidence_id)
+                replay = reopened.analyze(
+                    "artifact.preview",
+                    [
+                        EvidenceSource.model_validate(source)
+                        for source in inspected["analysis_sources"]
+                    ],
+                    {},
+                )
+                assert replay["blocks"][1]["rows"][0]["text"] == "retained evidence"
+                assert marker.read_text() == "run\n"
     finally:
         reopened.close()
 
