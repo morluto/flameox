@@ -520,3 +520,43 @@ async def test_systemd_scope_cancellation_terminates_escaped_descendants(
 
     assert cleanup == [True]
     assert not os.path.exists(f"/proc/{descendant_pid}")
+
+
+@pytest.mark.anyio
+async def test_writable_growth_observation_tolerates_disappearing_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    temporary = output / "temporary"
+    temporary.write_bytes(b"x")
+    original_stat = Path.stat
+    observations = 0
+
+    def stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        nonlocal observations
+        if path == temporary:
+            observations += 1
+            if observations == 4:
+                temporary.unlink()
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    result = await SubprocessBroker().run(
+        request(
+            tmp_path,
+            "-c",
+            "import time; time.sleep(.3)",
+            resource_policy=ResourcePolicy(
+                filesystem_path=tmp_path,
+                writable_roots=(output,),
+                minimum_free_bytes=0,
+                maximum_writable_growth_bytes=100,
+                sampling_interval_ms=25,
+            ),
+        )
+    )
+    assert observations == 4
+    assert isinstance(result.process.termination, ExitedProcessTermination)
+    assert result.process.termination.exit_code == 0
+    assert not temporary.exists()

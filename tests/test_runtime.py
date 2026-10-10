@@ -673,3 +673,39 @@ def test_unreadable_directory_members_prevent_analysis_and_preservation(tmp_path
     finally:
         hidden.chmod(0o700)
         runtime.close()
+
+
+@pytest.mark.process
+def test_live_scratch_file_churn_does_not_interrupt_other_analysis(tmp_path: Path) -> None:
+    import subprocess
+    import time
+
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("stable input")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    active = runtime.scratch / "capture-active"
+    active.mkdir()
+    ready = tmp_path / "ready"
+    workload = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path\n"
+            f"p = Path({str(active / 'temporary')!r})\n"
+            f"Path({str(ready)!r}).touch()\n"
+            "while True:\n    p.write_bytes(b'x')\n    p.unlink()\n",
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        for _ in range(300):
+            result = runtime.analyze("artifact.preview", [PathSource(path=str(artifact))], {})
+            assert result["coverage"]["complete"] is True
+        assert workload.poll() is None
+    finally:
+        workload.terminate()
+        workload.wait(timeout=5)
+        runtime.close()

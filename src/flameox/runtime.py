@@ -11,6 +11,7 @@ import random
 import re
 import secrets
 import shutil
+import stat
 import statistics
 import sys
 import tempfile
@@ -3283,8 +3284,14 @@ class AnalysisRuntime:
         return resolved
 
     def _scratch_commitment(self, *, consuming_root: Path | None = None) -> tuple[int, int]:
-        files = [item for item in self.scratch.rglob("*") if item.is_file()]
-        sizes = {item: item.stat().st_size for item in files}
+        sizes: dict[Path, int] = {}
+        for item in self.scratch.rglob("*"):
+            try:
+                metadata = item.stat()
+            except FileNotFoundError:
+                continue  # Active workloads may remove temporary files during this snapshot.
+            if stat.S_ISREG(metadata.st_mode):
+                sizes[item] = metadata.st_size
         used_bytes, used_files = sum(sizes.values()), len(sizes)
         for root, (reserved_bytes, reserved_files) in self._capture_reservations.items():
             if consuming_root is not None and consuming_root.is_relative_to(root):

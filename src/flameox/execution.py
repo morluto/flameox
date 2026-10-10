@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import signal
+import stat
 import threading
 import time
 from collections import deque
@@ -1331,12 +1332,16 @@ class SubprocessBroker:
         observed = 0
         try:
             for path in root.rglob("*"):
-                if not path.is_file():
+                try:
+                    metadata = path.stat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
                     continue
                 observed += 1
                 if observed > max_files:
                     return None
-                total += path.stat().st_size
+                total += metadata.st_size
         except OSError:
             return None
         return total
