@@ -421,7 +421,10 @@ OpenCode `opencode.jsonc` files retain their comments and unrelated settings whi
 updates the `mcp.flameox` entry. Ambiguous duplicate JSON or JSONC keys and configuration nesting beyond
 parser limits are rejected before provider preparation or writes.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
-download, and compatibility failures retain uvx's complete stderr. System and
+download, and compatibility failures retain bounded local uvx stderr. Setup verifies the base
+release even without optional providers, checking distribution version, extras, and tool catalog
+before writing configuration. Setup and update share the broker execution boundary, including
+output limits and descendant cleanup. System and
 vendor providers receive external installation guidance. Setup does not create a persistent global
 tool, durable operation, project state, or MCP setup endpoint. Other CLI commands use the same
 explicit paths, capture working directories, and user-level evidence store as MCP.

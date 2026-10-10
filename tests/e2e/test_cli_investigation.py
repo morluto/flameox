@@ -162,7 +162,21 @@ def test_installed_setup_preserves_comments_and_rejects_ambiguous_configuration(
         "nested_jsonc": "[" * 10_000 + "0" + "]" * 10_000,
     }[mode]
     config.write_text(source)
-    environment = {**os.environ, "HOME": str(tmp_path), "NO_COLOR": "1"}
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = Path(sys.executable).with_name("flameox")
+    uvx = bin_dir / "uvx"
+    uvx.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "offset = sys.argv.index('--from') + 2\n"
+        "forwarded = sys.argv[offset + 1:]\n"
+        "if sys.argv[offset] == 'python':\n"
+        f"    os.execv({sys.executable!r}, [{sys.executable!r}, *forwarded])\n"
+        f"os.execv({str(cli)!r}, [{str(cli)!r}, *forwarded])\n"
+    )
+    uvx.chmod(0o755)
+    environment = {**os.environ, "HOME": str(tmp_path), "NO_COLOR": "1", "PATH": str(bin_dir)}
     command = [
         str(Path(sys.executable).with_name("flameox")),
         "setup",

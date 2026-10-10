@@ -140,3 +140,87 @@ def test_codex_toml_setup_preserves_comments_and_unrelated_settings(tmp_path: Pa
     assert document["model"] == "gpt"
     assert document["mcp_servers"]["flameox"]["command"] == "uvx"
     assert "# keep this comment" in config.read_text()
+
+
+@pytest.mark.parametrize("client", list(SetupClient))
+@pytest.mark.parametrize(
+    "environment", [{"UV_DEFAULT_INDEX": "https://custom.invalid/simple"}, {"UV_OFFLINE": False}]
+)
+def test_setup_prepares_preserved_client_environments_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client: SetupClient,
+    environment: dict[str, object],
+) -> None:
+    from flameox.setup import prepare_providers
+
+    initial = plan_client_setup([client], [], home=tmp_path)[0]
+    apply_client_setup([initial])
+    document = (
+        tomlkit.parse(initial.path.read_text())
+        if client is SetupClient.CODEX
+        else json5.loads(initial.path.read_text())
+    )
+    key = "environment" if client is SetupClient.OPENCODE else "env"
+    document[client.server_section]["flameox"][key] = environment
+    original = tomlkit.dumps(document) if client is SetupClient.CODEX else json.dumps(document)
+    initial.path.write_text(original)
+    plans = plan_client_setup([client], ["memray"], home=tmp_path)
+    verified: list[tuple[str, dict[str, str]]] = []
+
+    def verify(releases: list[tuple[str, dict[str, str]]], *, timeout_seconds: float) -> None:
+        assert timeout_seconds == 10
+        verified.extend(releases)
+
+    monkeypatch.setattr("flameox.setup.verify_releases", verify)
+    if isinstance(next(iter(environment.values())), str):
+        prepare_providers(plans, ["memray"], 10)
+        assert verified == [(f"flameox[memory]=={__version__}", environment)]
+    else:
+        with pytest.raises(SetupFailure, match="Invalid Flameox environment"):
+            prepare_providers(plans, ["memray"], 10)
+        assert not verified
+    assert initial.path.read_text() == original
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="Version probe shim requires POSIX")
+@pytest.mark.parametrize("mode", ["different", "matching", "output", "timeout"])
+def test_path_cli_advisory_is_bounded_nonfatal_and_settles_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    import time
+
+    from flameox.setup import path_cli_version_advisory
+
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    finished = tmp_path / "finished"
+    executable = tmp_path / "flameox"
+    executable.write_text(
+        f"#!{sys.executable}\nimport os, time\nfrom pathlib import Path\n"
+        f"mode = {mode!r}\n"
+        "if mode == 'timeout':\n"
+        "    if os.fork() == 0:\n"
+        f"        Path({str(started)!r}).touch()\n"
+        f"        while not Path({str(release)!r}).exists():\n"
+        "            time.sleep(0.01)\n"
+        f"        Path({str(finished)!r}).touch()\n"
+        "        os._exit(0)\n"
+        "    time.sleep(30)\n"
+        "elif mode == 'output':\n    print('x' * 8192)\n"
+        f"else:\n    print({__version__!r} if mode == 'matching' else '0.0.1')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    result = path_cli_version_advisory()
+    if mode == "different":
+        assert result is not None
+        assert result.cli_version == "0.0.1"
+    else:
+        assert result is None
+    if mode == "timeout":
+        assert started.exists()
+        release.touch()
+        time.sleep(1)
+        assert not finished.exists()

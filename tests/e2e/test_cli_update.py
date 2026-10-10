@@ -35,18 +35,19 @@ pytestmark = [
 @pytest.mark.parametrize(
     "failure", [None, "resolver", "version", "extras", "catalog", "timeout", "output"]
 )
+@pytest.mark.parametrize("second_client", [SetupClient.CODEX, SetupClient.OPENCODE])
 def test_installed_update_verifies_every_environment_before_switching_client_pins(
-    tmp_path: Path, failure: str | None
+    tmp_path: Path, failure: str | None, second_client: SetupClient
 ) -> None:
     cli = Path(sys.executable).with_name("flameox")
     plans = plan_client_setup([SetupClient.CURSOR], [], home=tmp_path)
-    plans += plan_client_setup([SetupClient.CODEX], ["memray"], home=tmp_path)
+    plans += plan_client_setup([second_client], ["memray"], home=tmp_path)
     apply_client_setup(plans)
     apply_client_setup(
         [
             plan.setup
             for plan in plan_client_update(
-                [SetupClient.CURSOR, SetupClient.CODEX], "0.1.0", home=tmp_path
+                [SetupClient.CURSOR, second_client], "0.1.0", home=tmp_path
             )
         ]
     )
@@ -56,8 +57,9 @@ def test_installed_update_verifies_every_environment_before_switching_client_pin
             entry = document["mcp_servers"]["flameox"]
         else:
             document = json.loads(setup_plan.path.read_text())
-            entry = document["mcpServers"]["flameox"]
-        entry["env"] = {
+            entry = document[setup_plan.client.server_section]["flameox"]
+        environment_key = "environment" if setup_plan.client is SetupClient.OPENCODE else "env"
+        entry[environment_key] = {
             "UV_DEFAULT_INDEX": f"https://{setup_plan.client.value}.example.invalid/simple",
             "UV_CACHE_DIR": str(tmp_path / f"cache-{setup_plan.client.value}"),
         }
@@ -134,11 +136,11 @@ def test_installed_update_verifies_every_environment_before_switching_client_pin
         assert len(prepared) == 4
         assert {item["index"] for item in prepared} == {
             "https://cursor.example.invalid/simple",
-            "https://codex.example.invalid/simple",
+            f"https://{second_client.value}.example.invalid/simple",
         }
         assert {item["cache"] for item in prepared} == {
             str(tmp_path / "cache-cursor"),
-            str(tmp_path / "cache-codex"),
+            str(tmp_path / f"cache-{second_client.value}"),
         }
         current = subprocess.run(
             command, env=environment, capture_output=True, text=True, timeout=10, check=False

@@ -179,7 +179,7 @@ def setup(
                 _write_advisories(value)
             return
 
-        preparation = prepare_providers(selected, timeout_seconds)
+        preparation = prepare_providers(plans, selected, timeout_seconds)
         results = apply_client_setup(plans)
     except SetupFailure as error:
         raise typer.BadParameter(str(error)) from error

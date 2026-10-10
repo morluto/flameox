@@ -176,3 +176,17 @@ def test_capture_forwards_arguments_verbatim_after_separator(tmp_path: Path) -> 
     payload = json.loads(result.stdout)
     assert json.loads(payload["blocks"][1]["rows"][0]["text"]) == forwarded
     assert payload["capture"]["executions"][0]["argv"][3:] == forwarded
+
+
+@pytest.mark.parametrize("command", [["setup", "--yes"], ["update", "--check"]])
+def test_client_configuration_decode_errors_have_a_cli_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    configuration = tmp_path / ".cursor" / "mcp.json"
+    configuration.parent.mkdir()
+    configuration.write_bytes(b'{"bad":"\xff"}')
+    result = CliRunner().invoke(app, [*command, "--client", "cursor"])
+    assert result.exit_code == 2
+    assert "Could not read" in result.output
+    assert configuration.read_bytes() == b'{"bad":"\xff"}'

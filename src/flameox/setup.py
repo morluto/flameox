@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
+import tempfile
 from collections.abc import MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -20,7 +19,10 @@ from tomlkit.items import InlineTable
 
 from flameox import __version__
 from flameox.atomic import atomic_write_text
+from flameox.command_binding import ExecutableResolver
+from flameox.execution import ExecutionRequest, SubprocessBroker
 from flameox.filesystem import BoundedFileSystem
+from flameox.installation import verify_releases
 from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS
 from flameox.providers.environment import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
@@ -105,6 +107,12 @@ class ClientSetupPlan:
     detected: bool
     original: str | None
     content: str
+
+    @property
+    def environment(self) -> dict[str, str]:
+        document = _parse_client_configuration(self.client, self.path, self.content)
+        entry = document[self.client.server_section]["flameox"]
+        return _client_environment(self.client, self.path, entry)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,28 +201,30 @@ class CliVersionAdvisory:
 def path_cli_version_advisory() -> CliVersionAdvisory | None:
     """Return a non-fatal advisory when the PATH CLI differs from this release."""
 
-    executable = shutil.which("flameox")
-    if executable is None:
-        return None
     try:
-        completed = subprocess.run(
-            [executable, "--version"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=PATH_CLI_PROBE_TIMEOUT_SECONDS,
+        binding = ExecutableResolver().require_host_tool(
+            "flameox", cwd=Path.cwd(), environment=dict(os.environ)
         )
-    except (OSError, subprocess.TimeoutExpired):
+        with tempfile.TemporaryDirectory(prefix="flameox-version-") as directory:
+            scratch = Path(directory).resolve()
+            result = SubprocessBroker().run_sync(
+                ExecutionRequest(
+                    argv=(str(binding.invocation_path), "--version"),
+                    executable_binding=binding,
+                    cwd=scratch,
+                    allowed_working_roots=(scratch,),
+                    timeout_seconds=PATH_CLI_PROBE_TIMEOUT_SECONDS,
+                    max_output_bytes=4096,
+                )
+            )
+    except (OSError, DomainError):
         return None
-    if completed.returncode != 0:
+    if getattr(result.process.termination, "exit_code", None) != 0:
         return None
-    output = completed.stdout
-    version = (
-        output.decode(errors="replace").strip() if isinstance(output, bytes) else output.strip()
-    )
+    version = result.stdout.decode(errors="replace").strip()
     if not version or "\n" in version or version == __version__:
         return None
-    return CliVersionAdvisory(executable, version, __version__)
+    return CliVersionAdvisory(str(binding.invocation_path), version, __version__)
 
 
 def parse_setup_clients(values: list[str]) -> list[SetupClient]:
@@ -446,6 +456,15 @@ def _read_client_configuration(
         return None, tomlkit.document() if client is SetupClient.CODEX else {}
     try:
         source = _read_configuration(path)
+    except (OSError, UnicodeError, DomainError) as error:
+        raise SetupFailure(f"Could not read {client.display_name} configuration: {path}") from error
+    return source, _parse_client_configuration(client, path, source)
+
+
+def _parse_client_configuration(
+    client: SetupClient, path: Path, source: str
+) -> MutableMapping[str, Any]:
+    try:
         document = (
             tomlkit.parse(source)
             if client is SetupClient.CODEX
@@ -453,13 +472,23 @@ def _read_client_configuration(
             if path.suffix == ".jsonc"
             else json.loads(source, object_pairs_hook=_unique_json_object)
         )
-    except (OSError, ValueError, RecursionError, TOMLKitError, DomainError) as error:
+    except (ValueError, RecursionError, TOMLKitError) as error:
         raise SetupFailure(f"Could not read {client.display_name} configuration: {path}") from error
     if not isinstance(document, MutableMapping):
         raise SetupFailure(
             f"{client.display_name} configuration must contain a JSON object: {path}"
         )
-    return source, document
+    return document
+
+
+def _client_environment(client: SetupClient, path: Path, entry: Any) -> dict[str, str]:
+    environment_key = "environment" if client is SetupClient.OPENCODE else "env"
+    environment = entry.get(environment_key, {})
+    if not isinstance(environment, MutableMapping) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in environment.items()
+    ):
+        raise SetupFailure(f"Invalid Flameox environment in {path}; repair it before preparation.")
+    return dict(environment)
 
 
 def _json_plan(
@@ -580,11 +609,7 @@ def read_client_installations(
             args = entry.get("args")
             command_line = [entry.get("command"), *args] if isinstance(args, list) else None
         requirement = _installed_launcher_requirement(command_line, path)
-        environment = entry.get("env", {})
-        if not isinstance(environment, MutableMapping) or not all(
-            isinstance(key, str) and isinstance(value, str) for key, value in environment.items()
-        ):
-            raise SetupFailure(f"Flameox launcher environment must contain string values: {path}")
+        environment = _client_environment(client, path, entry)
         assert isinstance(command_line, list) and original is not None
         installations.append(
             ClientInstallation(
@@ -594,7 +619,7 @@ def read_client_installations(
                 document,
                 command_line,
                 requirement,
-                dict(environment),
+                environment,
             )
         )
     return installations
@@ -701,18 +726,8 @@ def apply_client_setup(plans: list[ClientSetupPlan]) -> list[ClientSetupResult]:
     return results
 
 
-def _decode_stderr(stderr: bytes | str | None) -> str:
-    if not stderr:
-        return ""
-    return stderr.strip() if isinstance(stderr, str) else stderr.decode(errors="replace").strip()
-
-
-def _failure_message(message: str, stderr: bytes | str | None) -> str:
-    diagnostic = _decode_stderr(stderr)
-    return f"{message}\n\nuvx stderr:\n{diagnostic}" if diagnostic else message
-
-
 def prepare_providers(
+    plans: list[ClientSetupPlan],
     providers: list[str],
     timeout_seconds: int = DEFAULT_PREPARATION_TIMEOUT_SECONDS,
 ) -> ProviderPreparation:
@@ -725,36 +740,10 @@ def prepare_providers(
     managed = [item for item in requested if item in MANAGED_PROVIDER_EXTRAS]
     launcher_command, launcher_args = mcp_launcher(managed)
     server_args = [*launcher_args, "mcp", "serve"]
-    preparation_command: list[str] = []
-
-    if managed:
-        uvx = shutil.which(launcher_command)
-        if uvx is None:
-            raise SetupFailure("Provider preparation requires uvx on PATH.")
-        preparation_command = [uvx, *launcher_args, "--version"]
-        try:
-            completed = subprocess.run(
-                preparation_command,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=timeout_seconds,
-            )
-        except OSError as error:
-            raise SetupFailure("uvx could not prepare the provider environment.") from error
-        except subprocess.TimeoutExpired as error:
-            raise SetupFailure(
-                _failure_message(
-                    f"uvx provider preparation exceeded {timeout_seconds} seconds.", error.stderr
-                )
-            ) from error
-        if completed.returncode != 0:
-            raise SetupFailure(
-                _failure_message(
-                    f"uvx provider preparation exited with status {completed.returncode}.",
-                    completed.stderr,
-                )
-            )
+    preparation_command = [launcher_command, *launcher_args, "mcp", "inspect"]
+    requirement = launcher_args[launcher_args.index("--from") + 1]
+    environments = [(requirement, plan.environment) for plan in plans]
+    verify_releases(environments, timeout_seconds=timeout_seconds)
 
     return ProviderPreparation(
         requested,

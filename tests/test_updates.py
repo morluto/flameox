@@ -43,7 +43,8 @@ def test_update_preserves_providers_client_settings_and_disabled_state(
         document = json5.loads(source)
         section = document["mcp" if client is SetupClient.OPENCODE else "mcpServers"]
     entry = section["flameox"]
-    entry["env"] = {"KEEP": "value"}
+    environment_key = "environment" if client is SetupClient.OPENCODE else "env"
+    entry[environment_key] = {"KEEP": "value"}
     if client is SetupClient.OPENCODE:
         entry["enabled"] = False
         entry["command"].extend(["--limits", '{"max_rows":10}'])
@@ -58,6 +59,7 @@ def test_update_preserves_providers_client_settings_and_disabled_state(
 
     planned = plan_client_update([client], "9.8.7", home=tmp_path)
     assert planned[0].requirement == "flameox[cpu,memory]==9.8.7"
+    assert planned[0].environment == {"KEEP": "value"}
     assert initial.path.read_text() == source
     apply_client_setup([plan.setup for plan in planned])
     content = initial.path.read_text()
@@ -292,18 +294,22 @@ def test_release_check_bounds_metadata_bytes(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize("source", ["client", "inherited"])
+@pytest.mark.parametrize("client", [SetupClient.CURSOR, SetupClient.OPENCODE])
 def test_update_rejects_unforwardable_index_credentials_without_disclosing_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, client: SetupClient
 ) -> None:
-    plans = plan_client_setup([SetupClient.CURSOR], [], home=tmp_path)
+    plans = plan_client_setup([client], [], home=tmp_path)
     apply_client_setup(plans)
     if source == "client":
         document = json.loads(plans[0].path.read_text())
-        document["mcpServers"]["flameox"]["env"] = {"UV_INDEX_PRIVATE_PASSWORD": "PRIVATE-VALUE"}
+        environment_key = "environment" if client is SetupClient.OPENCODE else "env"
+        document[client.server_section]["flameox"][environment_key] = {
+            "UV_INDEX_PRIVATE_PASSWORD": "PRIVATE-VALUE"
+        }
         plans[0].path.write_text(json.dumps(document))
     else:
         monkeypatch.setenv("UV_INDEX_PRIVATE_PASSWORD", "PRIVATE-VALUE")
-    planned = plan_client_update([SetupClient.CURSOR], "1.2.3", home=tmp_path)
+    planned = plan_client_update([client], "1.2.3", home=tmp_path)
     original = plans[0].path.read_text()
     with pytest.raises(SetupFailure, match="UV_INDEX_PRIVATE_PASSWORD") as failure:
         prepare_updated_releases(planned, 10)
@@ -330,6 +336,7 @@ def test_update_reports_partial_publication_if_later_file_write_fails(
     monkeypatch.setattr("flameox.setup.atomic_write_text", fail_codex)
     result = CliRunner().invoke(app, ["update", "--version", "9.8.7"])
     assert result.exit_code == 2, result.output
-    assert "restart or reconnect" in result.output
+    assert "restart" in result.output
+    assert "reconnect" in result.output
     assert "==9.8.7" in plans[0].path.read_text()
     assert plans[-1].path.read_text() == original_codex
