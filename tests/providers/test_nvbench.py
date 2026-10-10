@@ -103,6 +103,18 @@ def test_nvbench_directory_preserves_native_sample_values_and_compares(tmp_path:
     }
 
 
+def test_nvbench_comparison_preserves_an_undefined_ratio_for_zero_baselines(tmp_path: Path) -> None:
+    baseline = _bundle(tmp_path / "baseline", [0.0])
+    candidate = _bundle(tmp_path / "candidate", [1.0])
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    sources = [PathSource(path=str(path), format="nvbench") for path in (baseline, candidate)]
+    try:
+        result = runtime.analyze("benchmark.compare", sources, {})
+        assert result["blocks"][1]["rows"][0]["ratio"] is None
+    finally:
+        runtime.close()
+
+
 def test_nvbench_compare_does_not_pair_different_states(tmp_path: Path) -> None:
     baseline = _bundle(tmp_path / "baseline", [1.0], elements=16)
     candidate = _bundle(tmp_path / "candidate", [2.0], elements=1_024)

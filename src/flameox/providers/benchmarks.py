@@ -7,6 +7,7 @@ from typing import Any
 
 from flameox.benchmark_samples import benchmark_series_identity
 from flameox.canonical import canonical_bytes
+from flameox.providers.benchmark_comparison import AggregateSeries, compare_series
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.benchmark_samples_contract import (
@@ -239,11 +240,9 @@ class BenchmarkProvider:
         if baseline_index >= len(row_sets):
             raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
         requested_metric = arguments.get("metric")
-        series: list[dict[bytes, tuple[float, int]]] = []
-        identities: list[dict[bytes, dict[str, Any]]] = []
+        series: list[AggregateSeries] = []
         for rows in row_sets:
-            values: dict[bytes, tuple[float, int]] = {}
-            members: dict[bytes, dict[str, Any]] = {}
+            values: AggregateSeries = {}
             for row in rows:
                 if row["is_warmup"]:
                     continue
@@ -271,7 +270,7 @@ class BenchmarkProvider:
                     and count > 0
                 ):
                     key = canonical_bytes(identity)
-                    total, prior_count = values.get(key, (0.0, 0))
+                    _identity, total, prior_count = values.get(key, (identity, 0.0, 0))
                     try:
                         aggregate_total = total + float(value)
                     except OverflowError as error:
@@ -282,64 +281,14 @@ class BenchmarkProvider:
                         raise ProviderFailure(
                             "LIMIT_EXCEEDED", "Benchmark comparison exceeds finite numeric range."
                         )
-                    values[key] = aggregate_total, prior_count + count
-                    members[key] = identity
+                    values[key] = identity, aggregate_total, prior_count + count
             series.append(values)
-            identities.append(members)
-        common = set(series[baseline_index])
-        for values in series:
-            common.intersection_update(values)
-        all_identities = set().union(*(set(values) for values in series))
-        unmatched = all_identities.difference(common)
-        output: list[dict[str, Any]] = []
-        baseline = series[baseline_index]
-        for key in sorted(common):
-            baseline_total, baseline_count = baseline[key]
-            baseline_mean = baseline_total / baseline_count
-            for input_index, values in enumerate(series):
-                if input_index != baseline_index:
-                    candidate_total, candidate_count = values[key]
-                    candidate_mean = candidate_total / candidate_count
-                    ratio = candidate_mean / baseline_mean if baseline_mean else None
-                    if ratio is not None and not math.isfinite(ratio):
-                        raise ProviderFailure(
-                            "LIMIT_EXCEEDED",
-                            "Benchmark comparison ratio exceeds finite numeric range.",
-                        )
-                    output.append(
-                        {
-                            **identities[baseline_index][key],
-                            "baseline_index": baseline_index,
-                            "candidate_index": input_index,
-                            "baseline_mean": baseline_mean,
-                            "candidate_mean": candidate_mean,
-                            "ratio": ratio,
-                        }
-                    )
-        return ProviderAnalysis(
+        return compare_series(
+            series,
+            arguments,
+            max_rows=max_rows,
             provider_id=provider_id,
             provider_version=provider_version,
-            blocks=[
-                {
-                    "type": "metrics",
-                    "values": {
-                        "input_count": len(row_sets),
-                        "compatible_metric_count": len(common),
-                        "unmatched_identity_count": len(unmatched),
-                    },
-                },
-                {"type": "table", "rows": output[:max_rows]},
-            ],
-            rows_observed=len(output),
-            complete=len(output) <= max_rows,
-            limitations=[
-                "Ratios summarize observed sample means and do not establish causal improvement.",
-                *(
-                    ["Series absent from one or more inputs were not compared."]
-                    if unmatched
-                    else []
-                ),
-            ],
         )
 
     @staticmethod

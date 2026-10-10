@@ -66,6 +66,10 @@ durable SHA-256 identity derived from the canonical manifest body.
 - `mcp/server.py` and `cli.py` are thin projections over the same runtime.
 - Provider adapters accept resolved explicit inputs and return typed evidence;
   they do not discover source trees or publish evidence.
+- `providers/benchmark_comparison.py` owns pooled-mean comparison of aggregated
+  benchmark series. Native readers retain ownership of their identity fields,
+  sample decoding, and aggregation; the shared comparison does not add or
+  discard identity fields.
 
 DuckDB may be used in memory for bounded aggregation. It is never a durable
 catalog. Flameox production code must not create or depend on SQLite state.

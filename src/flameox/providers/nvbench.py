@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from flameox.canonical import canonical_bytes
+from flameox.providers.benchmark_comparison import AggregateSeries, compare_series
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
@@ -29,7 +30,7 @@ class _NvbenchBundle:
     rows: list[dict[str, Any]]
     measurement_count: int
     benchmark_names: set[str]
-    series: dict[bytes, tuple[dict[str, Any], float, int]]
+    series: AggregateSeries
 
 
 class NvbenchProvider:
@@ -110,77 +111,12 @@ class NvbenchProvider:
     ) -> ProviderAnalysis:
         if len(bundles) < 2:
             raise ProviderFailure("INVALID_INPUT", "benchmark.compare requires at least 2 inputs")
-        baseline_index = int(arguments.get("baseline_index", 0))
-        if baseline_index >= len(bundles):
-            raise ProviderFailure("INVALID_INPUT", "baseline_index does not select an input")
-        requested_metric = arguments.get("metric")
-        common = set(bundles[baseline_index].series)
-        for bundle in bundles:
-            common.intersection_update(bundle.series)
-        if requested_metric is not None:
-            common = {
-                key
-                for key in common
-                if bundles[baseline_index].series[key][0]["benchmark"] == requested_metric
-            }
-        all_identities = set().union(*(set(bundle.series) for bundle in bundles))
-        if requested_metric is not None:
-            all_identities = {
-                key
-                for key in all_identities
-                if any(
-                    bundle.series[key][0]["benchmark"] == requested_metric
-                    for bundle in bundles
-                    if key in bundle.series
-                )
-            }
-        unmatched = all_identities.difference(common)
-        baseline = bundles[baseline_index].series
-        rows: list[dict[str, Any]] = []
-        for key in sorted(common):
-            identity, baseline_sum, baseline_count = baseline[key]
-            baseline_mean = baseline_sum / baseline_count
-            for input_index, bundle in enumerate(bundles):
-                if input_index == baseline_index:
-                    continue
-                _candidate_identity, candidate_sum, candidate_count = bundle.series[key]
-                candidate_mean = candidate_sum / candidate_count
-                if len(rows) < max_rows:
-                    rows.append(
-                        {
-                            **identity,
-                            "baseline_index": baseline_index,
-                            "candidate_index": input_index,
-                            "baseline_mean": baseline_mean,
-                            "candidate_mean": candidate_mean,
-                            "ratio": candidate_mean / baseline_mean if baseline_mean else None,
-                        }
-                    )
-        observed = len(common) * (len(bundles) - 1)
-        return ProviderAnalysis(
+        return compare_series(
+            [bundle.series for bundle in bundles],
+            arguments,
+            max_rows=max_rows,
             provider_id="nvbench",
             provider_version=bundles[0].version,
-            blocks=[
-                {
-                    "type": "metrics",
-                    "values": {
-                        "input_count": len(bundles),
-                        "compatible_metric_count": len(common),
-                        "unmatched_identity_count": len(unmatched),
-                    },
-                },
-                {"type": "table", "rows": rows},
-            ],
-            rows_observed=observed,
-            complete=observed <= len(rows),
-            limitations=[
-                "Ratios summarize observed sample means and do not establish causal improvement.",
-                *(
-                    ["Series absent from one or more inputs were not compared."]
-                    if unmatched
-                    else []
-                ),
-            ],
         )
 
     @staticmethod
@@ -222,7 +158,7 @@ class NvbenchProvider:
         if not isinstance(benchmarks, list) or len(benchmarks) > _MAX_BENCHMARKS:
             raise ProviderFailure("LIMIT_EXCEEDED", "NVBench benchmark count is invalid")
         rows: list[dict[str, Any]] = []
-        series: dict[bytes, tuple[dict[str, Any], float, int]] = {}
+        series: AggregateSeries = {}
         benchmark_names: set[str] = set()
         measurement_count = 0
         state_count = 0
