@@ -173,6 +173,75 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
             assert reversed_result.is_error is True
             assert reversed_result.structured_content["code"] == "INVALID_REQUEST"
             assert reversed_result.structured_content["field_path"] == ["created_before"]
+            from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+                ExportTraceServiceRequest,
+            )
+
+            epoch_ns = 1_791_720_000_000_000_000
+            otlp = ExportTraceServiceRequest()
+            scope = otlp.resource_spans.add().scope_spans.add()
+            for index in range(1, 4):
+                span = scope.spans.add()
+                span.trace_id = bytes.fromhex("01" * 16)
+                span.span_id = index.to_bytes(8, "big")
+                span.name = f"epoch-span-{index}"
+                span.start_time_unix_nano = epoch_ns + index * 100
+                span.end_time_unix_nano = span.start_time_unix_nano + 10
+            trace = tmp_path / "epoch.otlp"
+            trace.write_bytes(otlp.SerializeToString())
+            window_schema = Draft202012Validator(by_name["inspect_trace_window"].input_schema)
+            window_args: dict[str, Any] = {
+                "sources": [{"path": str(trace), "format": "otlp"}],
+                "start_ns": epoch_ns + 150,
+                "end_ns": epoch_ns + 250,
+                "page_size": 2,
+            }
+            for as_strings in (False, True):
+                bounds = {
+                    key: str(value) if as_strings and key in {"start_ns", "end_ns"} else value
+                    for key, value in window_args.items()
+                }
+                assert window_schema.is_valid(bounds)
+                window = await session.call_tool("inspect_trace_window", bounds)
+                await session.validate_tool_result("inspect_trace_window", window)
+                assert not window.is_error
+                kept = await session.call_tool(
+                    "preserve_evidence", {"analysis_id": window.structured_content["analysis_id"]}
+                )
+                await session.validate_tool_result("preserve_evidence", kept)
+                assert not kept.is_error
+                next_page = kept.structured_content["next_page"]
+                assert next_page["arguments"]["start_ns"] == str(epoch_ns + 150)
+                assert next_page["arguments"]["end_ns"] == str(epoch_ns + 250)
+                continued = await session.call_tool(next_page["tool"], next_page["arguments"])
+                await session.validate_tool_result(next_page["tool"], continued)
+                assert not continued.is_error
+                rows = continued.structured_content["blocks"][1]["rows"]
+                assert [row["name"] for row in rows] == ["epoch-span-2"]
+                assert rows[0]["start_time_unix_nano"] == str(epoch_ns + 200)
+            integral_window = {**window_args, "start_ns": 2.0}
+            assert window_schema.is_valid(integral_window)
+            integral = await session.call_tool("inspect_trace_window", integral_window)
+            await session.validate_tool_result("inspect_trace_window", integral)
+            assert not integral.is_error
+            for invalid_bound in (
+                True,
+                "01",
+                "+1",
+                "1.0",
+                " 1",
+                "\u0661",
+                "1\n",
+                f"{epoch_ns}\n",
+                2**63,
+                str(2**63),
+            ):
+                invalid_window = {**window_args, "start_ns": invalid_bound}
+                assert not window_schema.is_valid(invalid_window)
+                rejected = await session.call_tool("inspect_trace_window", invalid_window)
+                await session.validate_tool_result("inspect_trace_window", rejected)
+                assert rejected.is_error
+                assert rejected.structured_content["field_path"] == ["start_ns"]
             preview = await session.call_tool(
                 "preview_artifact",
                 {"sources": [{"path": str(artifact)}], "page_size": 2.0},

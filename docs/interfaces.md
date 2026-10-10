@@ -83,6 +83,11 @@ the domain registries before runtime execution. Invalid combinations use Flameox
 failure contract, not raw Pydantic diagnostics. Capability-specific schemas are part of
 `tools/list`, with optional CLI discovery for compact views.
 
+Trace-window bounds accept exact integers or canonical decimal strings from zero through
+`9223372036854775807` nanoseconds; the exclusive end must be positive and greater than the start.
+Epoch timestamps beyond JSON's interoperable integer range are preserved and returned in replay
+arguments as exact decimal strings. Native readers receive integer bounds without rounding.
+
 Both tool families accept typed `limits` that can lower the server's input-byte, traversal, worker,
 process-output, memory, and provenance ceilings. Omitted limits inherit server policy. `page_size`
 is shorthand for `limits.max_rows`; when both are supplied, they must agree. Continuation handoffs
@@ -290,7 +295,8 @@ Requests cannot raise server limits.
 inventory snapshot and the original filters; callers resume by repeating those filters unchanged.
 Creation bounds accept timezone-aware RFC3339 strings, and the upper bound must not precede the
 lower bound. Advertised JSON Schema types are enforced before execution, including rejection of
-numeric strings and booleans for integer fields; integral JSON numbers such as `2.0` remain valid.
+numeric strings and booleans for integer fields, except the explicit decimal-string form of
+trace-window bounds. Integral JSON numbers such as `2.0` remain valid.
 
 ## Capture
 

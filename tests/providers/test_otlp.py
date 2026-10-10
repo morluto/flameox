@@ -6,12 +6,15 @@ import pytest
 
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
+    EvidenceSource,
     PathSource,
     RequestLimits,
 )
 
 
-def _write_otlp_trace(path: Path, *, include_event: bool = False) -> None:
+def _write_otlp_trace(
+    path: Path, *, include_event: bool = False, timestamp_offset: int = 0
+) -> None:
     from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
         ExportTraceServiceRequest,
     )
@@ -25,12 +28,12 @@ def _write_otlp_trace(path: Path, *, include_event: bool = False) -> None:
         span.trace_id = bytes.fromhex("01" * 16)
         span.span_id = index.to_bytes(8, "big")
         span.name = f"span-{index}"
-        span.start_time_unix_nano = start
-        span.end_time_unix_nano = start + 10
+        span.start_time_unix_nano = timestamp_offset + start
+        span.end_time_unix_nano = timestamp_offset + start + 10
         if include_event and index == 2:
             event = span.events.add()
             event.name = "checkpoint"
-            event.time_unix_nano = start + 5
+            event.time_unix_nano = timestamp_offset + start + 5
     path.write_bytes(request.SerializeToString())
 
 
@@ -64,21 +67,52 @@ def test_otlp_partial_rows_continue_without_repository_state(tmp_path: Path) -> 
 
 
 @pytest.mark.process
-def test_otlp_window_filters_inside_isolated_parser(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("timestamp_offset", "string_bounds"),
+    [(0, False), (1_791_720_000_000_000_000, False), (1_791_720_000_000_000_000, True)],
+)
+def test_otlp_window_filters_inside_isolated_parser(
+    tmp_path: Path, timestamp_offset: int, string_bounds: bool
+) -> None:
     trace = tmp_path / "trace.otlp"
-    _write_otlp_trace(trace)
+    _write_otlp_trace(trace, timestamp_offset=timestamp_offset)
+    bounds: dict[str, int | str] = {
+        "start_ns": timestamp_offset + 150,
+        "end_ns": timestamp_offset + 250,
+    }
+    if string_bounds:
+        bounds = {key: str(value) for key, value in bounds.items()}
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
         result = runtime.analyze(
             "trace.window",
             [PathSource(path=str(trace), format="otlp")],
-            {"start_ns": 150, "end_ns": 250},
+            bounds,
         )
+        preserved = runtime.preserve_evidence(result["analysis_id"])
     finally:
         runtime.close()
 
     span_rows = [row for row in result["blocks"][1]["rows"] if row["table"] == "spans"]
     assert [row["name"] for row in span_rows] == ["span-2"]
+    if timestamp_offset:
+        assert span_rows[0]["start_time_unix_nano"] == str(timestamp_offset + 200)
+    reopened = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        manifest = reopened.read_evidence(preserved["evidence_id"])
+        saved_bounds = manifest["body"]["analysis_request"]["arguments"]
+        assert saved_bounds == (
+            {key: str(value) for key, value in bounds.items()} if timestamp_offset else bounds
+        )
+        projection = reopened.read_evidence_agent_projection(preserved["evidence_id"])
+        replayed = reopened.analyze(
+            "trace.window",
+            [EvidenceSource.model_validate(item) for item in projection["analysis_sources"]],
+            saved_bounds,
+        )
+        assert replayed["blocks"] == result["blocks"]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.process

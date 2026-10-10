@@ -104,6 +104,7 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
     Source,
+    StrictModel,
     WorkloadBudget,
     compatible_capture_providers,
 )
@@ -144,6 +145,7 @@ class CachedAnalysis:
 class ValidatedCaptureRequest:
     capability: Capability
     capture_arguments: CaptureArguments
+    analysis_arguments: StrictModel
     limits: RequestLimits
     cases: list[ExperimentCase]
     blocks: int
@@ -528,7 +530,7 @@ class AnalysisRuntime:
             identity,
             capability_id=capability_id,
             sources=resolved,
-            arguments=validated.model_dump(mode="json"),
+            arguments=validated.model_dump(mode="python"),
             limits=selected_limits,
         )
         if provider_analysis is None and capability.id != "artifact.preview":
@@ -783,6 +785,7 @@ class AnalysisRuntime:
         return ValidatedCaptureRequest(
             capability=capability,
             capture_arguments=capture_arguments,
+            analysis_arguments=analysis_arguments,
             limits=selected_limits,
             cases=cases,
             blocks=experiment.blocks if experiment else 1,
@@ -849,6 +852,11 @@ class AnalysisRuntime:
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         validated_capture = self._validate_capture_request(
             target, capability_id, experiment=experiment, limits=limits
+        )
+        target = target.model_copy(
+            update={
+                "analysis_arguments": validated_capture.analysis_arguments.model_dump(mode="json")
+            }
         )
         mode = "experiment" if experiment is not None else "single"
         selected_limits = validated_capture.limits

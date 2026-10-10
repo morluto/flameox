@@ -112,11 +112,16 @@ def test_self_reporting_capture_retains_workload_exit(
                     argv=[sys.executable, "-c", "raise SystemExit(7)"],
                     cwd=str(tmp_path),
                     provider_id=provider,
+                    analysis_arguments=(
+                        {"start_ns": 1_791_720_000_000_000_000, "end_ns": 1_791_720_000_000_000_100}
+                        if provider == "torch-profiler"
+                        else {}
+                    ),
                 ),
                 {
                     "benchmark-samples": "benchmark.summary",
                     "observations": "failures.summary",
-                    "torch-profiler": "trace.summary",
+                    "torch-profiler": "trace.window",
                 }[provider],
                 preserve=True,
             )
@@ -125,6 +130,11 @@ def test_self_reporting_capture_retains_workload_exit(
             assert execution["workload_returncode"] == 7
             manifest = runtime.read_evidence(result["preserved"]["evidence_id"])
             assert manifest["body"]["capture_request"]["executions"][0]["workload_returncode"] == 7
+            if provider == "torch-profiler":
+                assert manifest["body"]["capture_request"]["target"]["analysis_arguments"] == {
+                    "start_ns": "1791720000000000000",
+                    "end_ns": "1791720000000000100",
+                }
         finally:
             runtime.close()
 

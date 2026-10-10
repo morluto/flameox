@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -277,13 +278,80 @@ class StaticArguments(StrictModel):
         return value
 
 
+_WINDOW_INTEGER_MAX = 2**63 - 1
+_WINDOW_INTEGER_MAX_TEXT = str(_WINDOW_INTEGER_MAX)
+# Decimal alternatives express the same signed 64-bit ceiling to JSON Schema clients.
+_WINDOW_DECIMAL_PATTERN = (
+    r"^(?:0|[1-9][0-9]{0,17}|"
+    + "|".join(
+        f"{_WINDOW_INTEGER_MAX_TEXT[:index]}[{int(index == 0)}-{int(digit) - 1}]"
+        f"[0-9]{{{len(_WINDOW_INTEGER_MAX_TEXT) - index - 1}}}"
+        for index, digit in enumerate(_WINDOW_INTEGER_MAX_TEXT)
+        if int(digit) > int(index == 0)
+    )
+    + f"|{_WINDOW_INTEGER_MAX_TEXT})$"
+)
+type _WindowDecimal = Annotated[
+    str,
+    Field(
+        pattern=_WINDOW_DECIMAL_PATTERN,
+        json_schema_extra={"allOf": [{"not": {"pattern": "[^0-9]"}}]},
+    ),
+]
+type _PositiveWindowDecimal = Annotated[
+    _WindowDecimal, Field(json_schema_extra={"not": {"const": "0"}})
+]
+
+
+def _window_integer(value: Any) -> int:
+    if type(value) is int:
+        return value
+    if type(value) is float and value.is_integer() and abs(value) <= MAX_SAFE_JSON_INTEGER:
+        return int(value)
+    if (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdecimal()
+        and (value == "0" or not value.startswith("0"))
+        and len(value) <= len(_WINDOW_INTEGER_MAX_TEXT)
+    ):
+        return int(value)
+    raise ValueError("window bounds require exact integers or canonical decimal strings")
+
+
 class WindowArguments(StrictModel):
     model_config = ConfigDict(
         json_schema_extra={"examples": [{"start_ns": 0, "end_ns": 1_000_000}]}
     )
 
-    start_ns: int = Field(description="Inclusive trace-window start in nanoseconds.", ge=0)
-    end_ns: int = Field(description="Exclusive trace-window end in nanoseconds.", gt=0)
+    start_ns: Annotated[
+        int,
+        BeforeValidator(
+            _window_integer,
+            json_schema_input_type=Annotated[int, Field(ge=0, le=_WINDOW_INTEGER_MAX)]
+            | _WindowDecimal,
+        ),
+    ] = Field(
+        description="Inclusive trace-window start in nanoseconds; exact decimal strings accepted.",
+        ge=0,
+        le=_WINDOW_INTEGER_MAX,
+    )
+    end_ns: Annotated[
+        int,
+        BeforeValidator(
+            _window_integer,
+            json_schema_input_type=Annotated[int, Field(gt=0, le=_WINDOW_INTEGER_MAX)]
+            | _PositiveWindowDecimal,
+        ),
+    ] = Field(
+        description="Exclusive trace-window end in nanoseconds; exact decimal strings accepted.",
+        gt=0,
+        le=_WINDOW_INTEGER_MAX,
+    )
+
+    @field_serializer("start_ns", "end_ns", when_used="json")
+    def canonical_bound(self, value: int) -> int | str:
+        return str(value) if value > MAX_SAFE_JSON_INTEGER else value
 
     @model_validator(mode="after")
     def ordered(self) -> WindowArguments:
