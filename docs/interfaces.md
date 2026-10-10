@@ -410,7 +410,7 @@ targets or `--all`; `--yes` never converts detection into consent, and `--dry-ru
 paths and actions without mutation. Repeated `--provider` options declare the complete Python
 provider set for the exact version-pinned uvx environment used by the saved launcher.
 OpenCode `opencode.jsonc` files retain their comments and unrelated settings while setup creates or
-updates the `mcp.flameox` entry. Ambiguous duplicate JSONC keys and configuration nesting beyond
+updates the `mcp.flameox` entry. Ambiguous duplicate JSON or JSONC keys and configuration nesting beyond
 parser limits are rejected before provider preparation or writes.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,
 download, and compatibility failures retain uvx's complete stderr. System and

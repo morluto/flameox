@@ -137,6 +137,7 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
     [
         "line_comment",
         "block_comment",
+        "duplicate_json",
         "duplicate_section",
         "duplicate_entry",
         "nested_json",
@@ -146,13 +147,14 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
 def test_installed_setup_preserves_comments_and_rejects_ambiguous_configuration(
     tmp_path: Path, mode: str
 ) -> None:
-    client = "cursor" if mode == "nested_json" else "opencode"
+    client = "cursor" if mode in {"nested_json", "duplicate_json"} else "opencode"
     relative = ".cursor/mcp.json" if client == "cursor" else ".config/opencode/opencode.jsonc"
     config = tmp_path / relative
     config.parent.mkdir(parents=True)
     source = {
         "line_comment": '{"enabled":true// keep this comment\n}',
         "block_comment": '{"enabled":true/* keep this comment */}',
+        "duplicate_json": '{"mcpServers":{"important":{"command":"keep"}},"mcpServers":{}}',
         "duplicate_section": '{"mcp":{},"mcp":{}}',
         "duplicate_entry": '{"mcp":{"flameox":{},"flameox":{}}}',
         "nested_json": "[" * 10_000 + "0" + "]" * 10_000,

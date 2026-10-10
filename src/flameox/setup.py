@@ -7,7 +7,7 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import json5
 import tomlkit
@@ -351,6 +351,15 @@ def _jsonc_update_mcp_entry(source: str, section_name: str, entry: object) -> st
     )
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _json_plan(
     client: SetupClient,
     path: Path,
@@ -364,7 +373,7 @@ def _json_plan(
             document = (
                 json5.loads(source, allow_duplicate_keys=False)
                 if path.suffix == ".jsonc"
-                else json.loads(source)
+                else json.loads(source, object_pairs_hook=_unique_json_object)
             )
         except (OSError, ValueError, RecursionError) as error:
             raise SetupFailure(
