@@ -610,7 +610,11 @@ class AnalysisRuntime:
                 max_bytes=selected_limits.max_input_bytes,
                 max_files=selected_limits.max_input_files,
             )
-            if (current_digest, current_size) != (source.sha256, source.size_bytes):
+            if (current_digest, current_size, source.path.is_dir()) != (
+                source.sha256,
+                source.size_bytes,
+                source.is_directory,
+            ):
                 raise RuntimeFailure(
                     "MISSING_OR_CHANGED_INPUT", f"Input changed during analysis: {source.path}"
                 )

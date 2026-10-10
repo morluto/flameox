@@ -5,7 +5,9 @@ import errno
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -42,6 +44,36 @@ def test_missing_repository_metadata_does_not_hide_preserved_evidence(tmp_path: 
         with pytest.raises(RuntimeFailure) as preserve_failure:
             runtime.preserve_evidence(second["analysis_id"])
         assert preserve_failure.value.code == "REPOSITORY_CORRUPTION"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("directory_first", [False, True])
+def test_source_kind_changed_after_decoding_cannot_return_successful_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory_first: bool
+) -> None:
+    source = tmp_path / "native"
+    if directory_first:
+        source.mkdir()
+    else:
+        source.write_bytes(b"")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    original = runtime._iter_rows
+
+    def replaced(path: Path, format_name: str) -> Iterator[dict[str, Any]]:
+        yield from original(path, format_name)
+        if directory_first:
+            path.rmdir()
+            path.write_bytes(b"")
+        else:
+            path.unlink()
+            path.mkdir()
+
+    monkeypatch.setattr(runtime, "_iter_rows", replaced)
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze("artifact.preview", [PathSource(path=str(source), format="text")], {})
+        assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
     finally:
         runtime.close()
 
