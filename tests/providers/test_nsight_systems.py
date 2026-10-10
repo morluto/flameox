@@ -10,6 +10,7 @@ from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     PathSource,
     RequestLimits,
+    RuntimeFailure,
 )
 
 
@@ -187,3 +188,29 @@ def test_nsight_parquetdir_is_analyzed_without_sqlite_or_repository(tmp_path: Pa
     assert result["coverage"] == {"rows_returned": 2, "rows_observed": 3, "complete": False}
     assert result["continuation"]
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.parametrize(
+    "capability,table",
+    [
+        ("gpu.launches", "CUDA_GPU_KERN_SUM"),
+        ("trace.summary", "CUDA_GPU_KERN_SUM"),
+        ("trace.operations", "CUDA_API_TRACE"),
+        ("trace.lifecycle", "PROCESS"),
+    ],
+)
+def test_nsight_systems_rejects_malformed_selected_tables(
+    tmp_path: Path, capability: str, table: str
+) -> None:
+    report = tmp_path / "report.parquetdir"
+    report.mkdir()
+    native = report / f"{table}.parquet"
+    native.write_bytes(b"not parquet")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as caught:
+            runtime.analyze(capability, [PathSource(path=str(report), format="nsys-parquet")], {})
+        assert caught.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+    assert native.read_bytes() == b"not parquet"

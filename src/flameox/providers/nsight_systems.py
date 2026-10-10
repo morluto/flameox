@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -75,20 +76,25 @@ class NsightSystemsParquetProvider:
         rows: list[dict[str, Any]] = []
         observed = 0
         tables: list[str] = []
-        for file in files:
-            parquet = pq.ParquetFile(file)
-            tables.append(file.stem)
-            observed += parquet.metadata.num_rows
-            if len(rows) >= max_rows:
-                continue
-            for batch in parquet.iter_batches(batch_size=min(256, max_rows - len(rows))):
-                for value in batch.to_pylist():
-                    normalized = json.loads(json.dumps(value, default=str))
-                    rows.append({"table": file.stem, **normalized})
+        try:
+            for file in files:
+                parquet = pq.ParquetFile(file)
+                tables.append(file.stem)
+                observed += parquet.metadata.num_rows
+                if len(rows) >= max_rows:
+                    continue
+                for batch in parquet.iter_batches(batch_size=min(256, max_rows - len(rows))):
+                    for value in batch.to_pylist():
+                        normalized = json.loads(json.dumps(value, default=str))
+                        rows.append({"table": file.stem, **normalized})
+                        if len(rows) >= max_rows:
+                            break
                     if len(rows) >= max_rows:
                         break
-                if len(rows) >= max_rows:
-                    break
+        except (OSError, pa.ArrowException) as error:
+            raise ProviderFailure(
+                "DECODE_FAILURE", "Nsight Systems Parquet table is invalid"
+            ) from error
         no_accelerator_activity = capability_id == "gpu.launches" and observed == 0
         limitations = [
             "Table schemas vary by Nsight Systems version.",
