@@ -8,6 +8,7 @@ from typing import Any
 
 from flameox.canonical import sha256_id
 from flameox.command_binding import ExecutableResolver
+from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.harness import IsolatedWorkerHarness
 from flameox.workers.perfetto_contract import (
@@ -171,5 +172,5 @@ class PerfettoProvider:
 
     @staticmethod
     def _identity(path: Path) -> str:
-        with path.open("rb") as stream:
+        with open_binary(path.resolve(strict=True)) as stream:
             return sha256_id(hashlib.file_digest(stream, "sha256").hexdigest())

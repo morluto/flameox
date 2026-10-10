@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import errno
+import io
 import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TextIO
 
 from flameox.runtime_errors import DomainError, ErrorCode
 
@@ -186,3 +188,39 @@ def _windows_final_path(descriptor: int) -> Path:
     elif value.startswith("\\\\?\\"):
         value = value[4:]
     return Path(value)
+
+
+@contextmanager
+def open_binary(path: Path) -> Iterator[io.BufferedReader]:
+    """Open a native regular file without blocking on a replaced FIFO."""
+    try:
+        with (
+            BoundedFileSystem((path.parent,)).open_regular(path) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as stream,
+        ):
+            yield stream
+    except DomainError as error:
+        raise OSError("Native input is missing or is no longer a regular file") from error
+
+
+@contextmanager
+def open_text(
+    path: Path,
+    *,
+    encoding: str | None = None,
+    errors: str | None = None,
+    newline: str | None = None,
+) -> Iterator[TextIO]:
+    with (
+        open_binary(path) as stream,
+        io.TextIOWrapper(stream, encoding=encoding, errors=errors, newline=newline) as text,
+    ):
+        yield text
+
+
+def read_regular_bytes(path: Path, *, max_bytes: int) -> bytes:
+    """Read a bounded native regular file, preserving parser I/O failure handling."""
+    try:
+        return BoundedFileSystem((path.parent,)).read_bytes(path, max_bytes=max_bytes)
+    except DomainError as error:
+        raise OSError("Native input is missing, changed, or is no longer a regular file") from error

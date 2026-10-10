@@ -688,3 +688,46 @@ def test_rejected_input_mutation_cannot_poison_later_analysis_cache(tmp_path: Pa
     finally:
         sys.setprofile(previous)
         runtime.close()
+
+
+@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+def test_profile_removed_after_admission_has_a_typed_runtime_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str
+) -> None:
+    from collections.abc import Mapping
+
+    from flameox.providers.contracts import ProviderAnalysis
+
+    artifact = tmp_path / "profile.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "shared": {"frames": [{"name": "work"}]},
+                "profiles": [{"type": "sampled", "unit": "none", "samples": [[0]], "weights": [1]}],
+            }
+        )
+    )
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    original = runtime.cpu_profiles.analyze
+
+    def removed(
+        capability_id: str,
+        path: Path,
+        format_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        max_rows: int,
+    ) -> ProviderAnalysis | None:
+        path.unlink()
+        return original(capability_id, path, format_name, arguments, max_rows=max_rows)
+
+    try:
+        sources = [PathSource(path=str(artifact), format="py-spy")]
+        assert runtime.analyze(capability, sources, {})["coverage"]["complete"] is True
+        artifact.write_text(artifact.read_text() + "\n")
+        monkeypatch.setattr(runtime.cpu_profiles, "analyze", removed)
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(capability, sources, {})
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()

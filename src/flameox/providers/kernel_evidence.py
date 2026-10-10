@@ -8,6 +8,7 @@ from statistics import fmean
 from typing import Any, cast
 
 from flameox.canonical import canonical_identity_bytes, content_id
+from flameox.filesystem import open_binary, read_regular_bytes
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.source_files import directory_files
 
@@ -55,7 +56,7 @@ class KernelEvidenceProvider:
         try:
             if path.stat().st_size > _MAX_KERNEL_BYTES:
                 raise ProviderFailure("LIMIT_EXCEEDED", "Kernel validation document exceeds 64 MiB")
-            value = json.loads(path.read_bytes())
+            value = json.loads(read_regular_bytes(path, max_bytes=_MAX_KERNEL_BYTES))
         except ProviderFailure:
             raise
         except (OSError, ValueError, RecursionError) as error:
@@ -374,7 +375,7 @@ class KernelEvidenceProvider:
         event_count = 0
         limitations: list[str] = []
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 while raw := stream.readline(_MAX_LINE_BYTES + 1):
                     if len(raw) > _MAX_LINE_BYTES:
                         raise ProviderFailure(
@@ -486,7 +487,9 @@ def _triton_cache(path: Path, *, max_rows: int) -> ProviderAnalysis:
     if path.stat().st_size > _MAX_LINE_BYTES:
         raise ProviderFailure("LIMIT_EXCEEDED", "Triton cache exceeds 64 KiB")
     try:
-        document = _object(json.loads(path.read_bytes()), "Triton cache")
+        document = _object(
+            json.loads(read_regular_bytes(path, max_bytes=_MAX_LINE_BYTES)), "Triton cache"
+        )
     except (OSError, ValueError, RecursionError) as error:
         raise ProviderFailure("DECODE_FAILURE", "Triton cache is unreadable") from error
     key = document.get("key")

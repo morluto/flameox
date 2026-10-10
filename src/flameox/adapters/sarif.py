@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlsplit
 from ijson import IncompleteJSONError, JSONError
 
 from flameox.adapters.json_events import JsonLocation, parse_json_events
+from flameox.filesystem import open_binary
 
 DEFAULT_EXCLUDE_PATHS = (
     ".git",
@@ -233,7 +234,7 @@ def _stream_document(path: Path, normalization: _Normalization) -> tuple[_Docume
     document = _Document()
     parse_error: str | None = None
     try:
-        with path.open("rb") as stream:
+        with open_binary(path) as stream:
             for prefix, event, value in parse_json_events(stream):
                 if _consume_document_event(document, normalization, prefix, event, value):
                     continue

@@ -8,6 +8,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
+from flameox.filesystem import open_binary, read_regular_bytes
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_PROFILE_BYTES = 64 * 1024 * 1024
@@ -160,7 +161,7 @@ class CpuProfileProvider:
         aggregates: defaultdict[str, int] = defaultdict(int)
         sample_count = 0
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 while raw := stream.readline(_MAX_LINE_BYTES + 1):
                     if len(raw) > _MAX_LINE_BYTES:
                         raise ProviderFailure(
@@ -274,7 +275,7 @@ def _read_speedscope(path: Path) -> tuple[list[dict[str, Any]], list[Any]]:
     if path.stat().st_size > _MAX_PROFILE_BYTES:
         raise ProviderFailure("LIMIT_EXCEEDED", "py-spy profile exceeds 64 MiB")
     try:
-        document = json.loads(path.read_bytes())
+        document = json.loads(read_regular_bytes(path, max_bytes=_MAX_PROFILE_BYTES))
     except (OSError, ValueError, RecursionError) as error:
         raise ProviderFailure("DECODE_FAILURE", "py-spy Speedscope profile is invalid") from error
     root = _object(document, "Speedscope profile")

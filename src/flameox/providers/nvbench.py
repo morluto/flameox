@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from flameox.canonical import canonical_identity_bytes
+from flameox.filesystem import open_binary, read_regular_bytes
 from flameox.providers.benchmark_comparison import AggregateSeries, compare_series
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -137,7 +138,7 @@ class NvbenchProvider:
         if primary.stat().st_size > _MAX_JSON_BYTES:
             raise ProviderFailure("LIMIT_EXCEEDED", "NVBench JSON exceeds 64 MiB")
         try:
-            document = json.loads(primary.read_bytes())
+            document = json.loads(read_regular_bytes(primary, max_bytes=_MAX_JSON_BYTES))
         except (OSError, ValueError, RecursionError) as error:
             raise ProviderFailure("DECODE_FAILURE", "NVBench JSON is invalid") from error
         root = _object(document, "NVBench document")
@@ -293,7 +294,7 @@ def _sidecar_rows(
     expected_bytes = count * 4
     if path.stat().st_size != expected_bytes:
         raise ProviderFailure("DECODE_FAILURE", "NVBench sidecar size contradicts its metadata")
-    with path.open("rb") as stream:
+    with open_binary(path) as stream:
         for index in range(count):
             raw = stream.read(4)
             if len(raw) != 4:

@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from flameox.filesystem import open_binary
 from flameox.observations import (
     MAX_OBSERVATION_EVENT_BYTES,
     bounded_observation_value,
@@ -453,7 +454,7 @@ class ReliabilityProvider:
         path: Path, *, max_line_bytes: int = _MAX_LINE_BYTES
     ) -> Iterator[tuple[int, dict[str, Any]]]:
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 lines = iter(partial(stream.readline, max_line_bytes + 1), b"")
                 for index, raw in enumerate(lines):
                     if len(raw) > max_line_bytes:

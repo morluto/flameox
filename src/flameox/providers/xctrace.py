@@ -6,6 +6,7 @@ from xml.etree.ElementTree import Element
 
 from defusedxml.ElementTree import ParseError, iterparse  # type: ignore[import-untyped]
 
+from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _MAX_ATTRIBUTE_LENGTH = 2_000
@@ -20,26 +21,28 @@ class XctraceProvider:
         parents: list[Element] = []
         observed = 0
         try:
-            for event, element in iterparse(path, events=("start", "end")):
-                if event == "start":
-                    parents.append(element)
-                    continue
-                observed += 1
-                if len(rows) < max_rows:
-                    rows.append(
-                        {
-                            "element": str(element.tag)[:500],
-                            "attributes": {
-                                str(key)[:200]: str(value)[:_MAX_ATTRIBUTE_LENGTH]
-                                for key, value in sorted(element.attrib.items())[:32]
-                            },
-                            "text": (element.text or "").strip()[:_MAX_ATTRIBUTE_LENGTH] or None,
-                        }
-                    )
-                element.clear()
-                parents.pop()
-                if parents:
-                    parents[-1].remove(element)
+            with open_binary(path) as stream:
+                for event, element in iterparse(stream, events=("start", "end")):
+                    if event == "start":
+                        parents.append(element)
+                        continue
+                    observed += 1
+                    if len(rows) < max_rows:
+                        rows.append(
+                            {
+                                "element": str(element.tag)[:500],
+                                "attributes": {
+                                    str(key)[:200]: str(value)[:_MAX_ATTRIBUTE_LENGTH]
+                                    for key, value in sorted(element.attrib.items())[:32]
+                                },
+                                "text": (element.text or "").strip()[:_MAX_ATTRIBUTE_LENGTH]
+                                or None,
+                            }
+                        )
+                    element.clear()
+                    parents.pop()
+                    if parents:
+                        parents[-1].remove(element)
         except (OSError, ParseError, ValueError) as error:
             raise ProviderFailure(
                 "DECODE_FAILURE", "xctrace table-of-contents XML is invalid"

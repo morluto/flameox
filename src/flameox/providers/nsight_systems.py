@@ -7,6 +7,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 
 _OPERATION_TABLE_PREFIXES = (
@@ -78,20 +79,23 @@ class NsightSystemsParquetProvider:
         tables: list[str] = []
         try:
             for file in files:
-                parquet = pq.ParquetFile(file)
-                tables.append(file.stem)
-                observed += parquet.metadata.num_rows
-                if len(rows) >= max_rows:
-                    continue
-                for batch in parquet.iter_batches(batch_size=min(256, max_rows - len(rows))):
-                    for value in batch.to_pylist():
-                        normalized = json.loads(json.dumps(value, default=str))
-                        normalized = {"value": normalized} if "table" in normalized else normalized
-                        rows.append({"table": file.stem, **normalized})
+                with open_binary(file) as stream:
+                    parquet = pq.ParquetFile(stream)
+                    tables.append(file.stem)
+                    observed += parquet.metadata.num_rows
+                    if len(rows) >= max_rows:
+                        continue
+                    for batch in parquet.iter_batches(batch_size=min(256, max_rows - len(rows))):
+                        for value in batch.to_pylist():
+                            normalized = json.loads(json.dumps(value, default=str))
+                            normalized = (
+                                {"value": normalized} if "table" in normalized else normalized
+                            )
+                            rows.append({"table": file.stem, **normalized})
+                            if len(rows) >= max_rows:
+                                break
                         if len(rows) >= max_rows:
                             break
-                    if len(rows) >= max_rows:
-                        break
         except (OSError, pa.ArrowException) as error:
             raise ProviderFailure(
                 "DECODE_FAILURE", "Nsight Systems Parquet table is invalid"

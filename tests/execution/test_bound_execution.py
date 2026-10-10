@@ -223,3 +223,52 @@ async def test_working_directory_symlink_loops_return_typed_failures(
         )
     assert failure.value.code is ErrorCode.INVALID_INPUT
     assert str(tmp_path) not in failure.value.message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs require POSIX")
+@pytest.mark.parametrize("format_name", ["text", "json", "jsonl", "csv", "parquet", "decoder"])
+def test_native_reader_rejects_fifo_replacement_after_admission(
+    tmp_path: Path, format_name: str
+) -> None:
+    script = """
+import os, sys
+from pathlib import Path
+from flameox.runtime import AnalysisRuntime
+from flameox.runtime_contracts import PathSource, RuntimeFailure
+from flameox.providers.perfetto import PerfettoProvider
+root = Path(sys.argv[1])
+path = root / "native"
+path.write_text('{"row":1}')
+runtime = AnalysisRuntime(evidence_directory=root / "store")
+if sys.argv[2] == "decoder":
+    path.unlink()
+    os.mkfifo(path)
+    try:
+        PerfettoProvider._identity(path)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("special decoder accepted")
+else:
+    original = runtime._read_rows
+    def changed(*args, **kwargs):
+        path.unlink()
+        os.mkfifo(path)
+        return original(*args, **kwargs)
+    runtime._read_rows = changed
+    try:
+        runtime.analyze("artifact.preview", [PathSource(path=str(path), format=sys.argv[2])], {})
+    except RuntimeFailure as error:
+        assert error.code == "DECODE_FAILURE", error.code
+    else:
+        raise AssertionError("special input accepted")
+runtime.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), format_name],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

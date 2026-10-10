@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import pyarrow.parquet as pq
 
+from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.runtime_errors import DomainError, ErrorCode
 from flameox.workers.harness import IsolatedWorkerHarness
@@ -133,28 +134,30 @@ class MemrayProvider:
     def _read_rows(
         files: dict[str, Path], metric: str, *, max_rows: int
     ) -> tuple[list[dict[str, Any]], int]:
-        frames = {str(row["frame_id"]): row for row in pq.read_table(files["frames"]).to_pylist()}
+        with open_binary(files["frames"]) as stream:
+            frames = {str(row["frame_id"]): row for row in pq.read_table(stream).to_pylist()}
         selected: list[dict[str, Any]] = []
         observed = 0
-        parquet = pq.ParquetFile(files["frame_measurements"])
-        for batch in parquet.iter_batches(batch_size=256):
-            for measurement in batch.to_pylist():
-                if measurement.get("metric") != metric:
-                    continue
-                observed += 1
-                frame = frames.get(str(measurement.get("frame_id")), {})
-                selected.append(
-                    {
-                        "rank": 0,
-                        "function": frame.get("function"),
-                        "file": frame.get("file"),
-                        "line": frame.get("line"),
-                        "self_bytes": measurement.get("self_value"),
-                        "inclusive_bytes": measurement.get("inclusive_value"),
-                        "allocation_count": measurement.get("sample_count"),
-                        "frame_id": measurement.get("frame_id"),
-                    }
-                )
+        with open_binary(files["frame_measurements"]) as stream:
+            parquet = pq.ParquetFile(stream)
+            for batch in parquet.iter_batches(batch_size=256):
+                for measurement in batch.to_pylist():
+                    if measurement.get("metric") != metric:
+                        continue
+                    observed += 1
+                    frame = frames.get(str(measurement.get("frame_id")), {})
+                    selected.append(
+                        {
+                            "rank": 0,
+                            "function": frame.get("function"),
+                            "file": frame.get("file"),
+                            "line": frame.get("line"),
+                            "self_bytes": measurement.get("self_value"),
+                            "inclusive_bytes": measurement.get("inclusive_value"),
+                            "allocation_count": measurement.get("sample_count"),
+                            "frame_id": measurement.get("frame_id"),
+                        }
+                    )
         selected.sort(
             key=lambda row: (
                 -int(row["inclusive_bytes"] or 0),

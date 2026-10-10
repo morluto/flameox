@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from flameox.canonical import digest_model, sha256_id
+from flameox.filesystem import open_binary, read_regular_bytes
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.providers.inference_comparison import assess_comparison, field_identities, mean_ratios
 
@@ -175,7 +176,7 @@ class InferenceExportProvider:
         try:
             if path.stat().st_size > maximum_bytes:
                 raise ValueError(f"{label} exceeds its document-size bound")
-            payload = json.loads(path.read_bytes())
+            payload = json.loads(read_regular_bytes(path, max_bytes=maximum_bytes))
             if not isinstance(payload, dict):
                 raise ValueError(f"{label} must be a JSON object")
             return payload
@@ -340,7 +341,13 @@ class InferenceExportProvider:
         try:
             if path.stat().st_size > _SGLANG_MAX_BYTES:
                 raise ValueError("SGLang export exceeds its document-size bound")
-            lines = [line for line in path.read_text().splitlines() if line.strip()]
+            lines = [
+                line
+                for line in read_regular_bytes(path, max_bytes=_SGLANG_MAX_BYTES)
+                .decode()
+                .splitlines()
+                if line.strip()
+            ]
             if len(lines) != 1:
                 raise ValueError("SGLang export must contain one aggregate JSONL record")
             payload = json.loads(lines[0])
@@ -472,7 +479,7 @@ class InferenceExportProvider:
         max_output_length = 0
         workload_digest = hashlib.sha256()
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 for line_index, raw in enumerate(
                     iter(lambda: stream.readline(_MOONCAKE_MAX_LINE_BYTES + 1), b"")
                 ):

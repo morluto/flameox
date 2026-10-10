@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from flameox.canonical import digest_model
+from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.providers.inference_comparison import assess_comparison, mean_ratios
 from flameox.workers.aiperf_contract import (
@@ -118,7 +119,7 @@ class AIPerfProvider:
     def _read_projection(path: Path, *, expected_rows: int) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 while raw := stream.readline(_PROJECTED_LINE_BYTES + 1):
                     if len(raw) > _PROJECTED_LINE_BYTES:
                         raise ValueError("AIPerf projection row exceeds its byte bound")

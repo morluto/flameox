@@ -46,6 +46,7 @@ from flameox.execution import (
     ResourcePolicy,
     SubprocessBroker,
 )
+from flameox.filesystem import open_binary, open_text
 from flameox.paths import default_data_directory
 from flameox.process_models import ProcessResult, process_exit_code
 from flameox.providers.aiperf import AIPerfProvider
@@ -2469,7 +2470,7 @@ class AnalysisRuntime:
         if path.is_dir():
             return "directory"
         try:
-            with path.open("rb") as stream:
+            with open_binary(path) as stream:
                 header = stream.read(16).lstrip()
         except OSError:
             return "unknown"
@@ -2750,6 +2751,10 @@ class AnalysisRuntime:
                 maximum_rss_bytes=limits.max_memory_bytes,
                 maximum_output_bytes=limits.max_output_bytes,
             )
+        except OSError as error:
+            raise RuntimeFailure(
+                "DECODE_FAILURE", "Native evidence could not be read after admission"
+            ) from error
         except DomainError as error:
             code = (
                 "UNAVAILABLE_CAPABILITY"
@@ -3058,10 +3063,11 @@ class AnalysisRuntime:
         elif format_name == "parquet":
             import pyarrow.parquet as parquet
 
-            for batch in parquet.ParquetFile(path).iter_batches(batch_size=256):
-                yield from (dict(row) for row in batch.to_pylist())
+            with open_binary(path) as stream:
+                for batch in parquet.ParquetFile(stream).iter_batches(batch_size=256):
+                    yield from (dict(row) for row in batch.to_pylist())
         elif format_name == "csv":
-            with path.open(newline="", encoding="utf-8", errors="replace") as stream:
+            with open_text(path, newline="", encoding="utf-8", errors="replace") as stream:
                 reader = csv.DictReader(stream)
                 headers = reader.fieldnames or []
                 if len(headers) != len(set(headers)):
@@ -3071,7 +3077,7 @@ class AnalysisRuntime:
                         raise ValueError("CSV row does not match its headers")
                     yield dict(row)
         elif format_name == "jsonl":
-            with path.open(encoding="utf-8") as stream:
+            with open_text(path, encoding="utf-8") as stream:
                 for line in stream:
                     value = json.loads(line)
                     yield value if isinstance(value, dict) else {"value": value}
@@ -3087,7 +3093,7 @@ class AnalysisRuntime:
         }:
             yield from iter_json_rows(path)
         else:
-            with path.open(encoding="utf-8", errors="replace") as stream:
+            with open_text(path, encoding="utf-8", errors="replace") as stream:
                 for number, line in enumerate(stream, 1):
                     yield {"line": number, "text": line.rstrip("\n")}
 

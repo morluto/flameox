@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from flameox.filesystem import open_text
+
 
 def iter_text_fragments(path: Path, text_fragment_chars: int) -> Iterator[dict[str, Any]]:
     """Yield bounded fragments, retaining LF delimiters and replacing invalid UTF-8.
@@ -19,7 +21,7 @@ def iter_text_fragments(path: Path, text_fragment_chars: int) -> Iterator[dict[s
 
     line = 1
     fragment = 0
-    with path.open(encoding="utf-8", errors="replace", newline="\n") as stream:
+    with open_text(path, encoding="utf-8", errors="replace", newline="\n") as stream:
         while text := stream.readline(text_fragment_chars):
             terminated = text.endswith("\n")
             yield {

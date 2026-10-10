@@ -9,6 +9,8 @@ from typing import Any
 import ijson
 from ijson.common import ObjectBuilder
 
+from flameox.filesystem import open_binary
+
 type Event = tuple[str, Any]
 
 
@@ -38,7 +40,7 @@ def _array_rows(events: Iterator[Event]) -> Iterator[dict[str, Any]]:
 
 def iter_json_rows(path: Path) -> Iterator[dict[str, Any]]:
     """Stream array elements, object sections, or a scalar root in document order."""
-    with path.open("rb") as stream:
+    with open_binary(path) as stream:
         events = iter(ijson.basic_parse(stream, use_float=True))
         first = next(events)
         if first[0] == "start_array":
