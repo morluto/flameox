@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 import secrets
 import shutil
 import sys
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar, cast
 
-import anyio
 from pydantic import JsonValue, ValidationError
 
 from flameox.atomic import atomic_write_json
@@ -36,7 +34,6 @@ from flameox.workers.protocol import (
     worker_failure_error_code,
 )
 
-T = TypeVar("T")
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
@@ -135,99 +132,6 @@ class IsolatedWorkerHarness:
         ) as (response, _job_root):
             return response
 
-    async def run_typed(
-        self,
-        definition: WorkerDefinition[RequestT, ResponseT],
-        request: RequestT,
-    ) -> ResponseT:
-        """Run a typed worker asynchronously when no staged output outlives the call."""
-        job_root = self._job_root(definition.name)
-        job_root.mkdir(parents=True, exist_ok=False)
-        try:
-            request_path, response_path, request_id = self._prepare_request(
-                definition, request, job_root
-            )
-            outcome = await self.broker.run(
-                self._execution_request(
-                    definition.module,
-                    request_path,
-                    response_path,
-                    job_root,
-                    timeout_seconds=definition.timeout_seconds,
-                )
-            )
-            return self._load_typed_response(
-                process_exit_code(outcome.process.termination),
-                outcome.stderr,
-                response_path,
-                definition=definition,
-                request_id=request_id,
-            )
-        finally:
-            shutil.rmtree(job_root, ignore_errors=True)
-
-    async def run_typed_session(
-        self,
-        definition: WorkerDefinition[RequestT, ResponseT],
-        request: RequestT,
-        *,
-        consume: Callable[[ResponseT, Path], T],
-        timeout_seconds: float | None = None,
-        maximum_rss_bytes: int | None = None,
-        maximum_writable_growth_bytes: int | None = None,
-        heartbeat: Callable[[Path], Awaitable[None]] | None = None,
-        job_root: Path | None = None,
-    ) -> T:
-        """Keep typed worker outputs alive while one host-side consumer validates them."""
-        job_root = job_root or self._job_root(definition.name)
-        job_root.mkdir(parents=True, exist_ok=False)
-        try:
-            request_path, response_path, request_id = self._prepare_request(
-                definition, request, job_root
-            )
-            task = asyncio.create_task(
-                self.broker.run(
-                    self._execution_request(
-                        definition.module,
-                        request_path,
-                        response_path,
-                        job_root,
-                        timeout_seconds=(
-                            definition.timeout_seconds
-                            if timeout_seconds is None
-                            else timeout_seconds
-                        ),
-                        maximum_rss_bytes=maximum_rss_bytes,
-                        maximum_writable_growth_bytes=maximum_writable_growth_bytes,
-                    )
-                )
-            )
-            try:
-                while not task.done():
-                    done, _pending = await asyncio.wait({task}, timeout=0.25)
-                    if task in done:
-                        break
-                    if heartbeat is not None:
-                        await heartbeat(job_root)
-                outcome = await task
-            finally:
-                if not task.done():
-                    task.cancel()
-                with anyio.CancelScope(shield=True):
-                    await asyncio.gather(task, return_exceptions=True)
-            if heartbeat is not None:
-                await heartbeat(job_root)
-            response = self._load_typed_response(
-                process_exit_code(outcome.process.termination),
-                outcome.stderr,
-                response_path,
-                definition=definition,
-                request_id=request_id,
-            )
-            return consume(response, job_root)
-        finally:
-            shutil.rmtree(job_root, ignore_errors=True)
-
     def validate_output_file(self, job_root: Path, output: WorkerOutputFile) -> Path:
         """Open and identify one declared worker output through the trusted-root boundary."""
         path = job_root / output.relative_path
@@ -253,28 +157,6 @@ class IsolatedWorkerHarness:
                 "Worker output digest does not match its declaration.",
             )
         return path
-
-    def read_staged_bytes(
-        self,
-        job_root: Path,
-        relative_path: str,
-        *,
-        max_bytes: int,
-    ) -> bytes | None:
-        """Read one optional bounded worker side-channel without trusting its path type."""
-        path = job_root / relative_path
-        if not path.exists():
-            return None
-        filesystem = BoundedFileSystem((job_root,))
-        with filesystem.open_regular(
-            path,
-            max_bytes=max_bytes,
-            require_single_link=True,
-        ) as descriptor:
-            chunks: list[bytes] = []
-            while chunk := os.read(descriptor, min(4_096, max_bytes)):
-                chunks.append(chunk)
-        return b"".join(chunks)
 
     def _job_root(self, name: str) -> Path:
         return self.runtime.staging_root / "artifact-workers" / f"{name}-{secrets.token_hex(16)}"

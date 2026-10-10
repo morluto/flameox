@@ -32,7 +32,9 @@ bounds or wait for inherited pipe writers.
 
 The broker shields asynchronous finalization from AnyIO cancellation scopes; callers do not
 detach or shield broker work themselves. Worker sessions retain their job directory until their
-child has settled, including when request encoding, a heartbeat, or the consuming callback fails.
+child has settled, including when the owning request is cancelled or the consuming code fails.
+The worker harness has one synchronous session boundary; asynchronous requests
+enter it through the runtime's request-owned worker thread.
 
 Ordinary subprocess startup checks for request-scope cancellation before launch.
 Transport acquisition is shielded from repeated scope cancellation so a created

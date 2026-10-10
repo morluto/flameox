@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import signal
 from pathlib import Path
@@ -11,6 +10,8 @@ import psutil
 import pytest
 from pydantic import Field, TypeAdapter
 
+from flameox.execution import ProcessCancelledError
+from flameox.runtime import AnalysisRuntime
 from flameox.workers.harness import IsolatedWorkerHarness, WorkerRuntimeConfig
 from flameox.workers.protocol import WorkerDefinition, WorkerOperationId
 
@@ -35,35 +36,51 @@ def test_worker_session_settles_child_before_releasing_staging(
 ) -> None:
     pid_path = tmp_path / "child.pid"
     (tmp_path / "lifecycle_worker.py").write_text(
-        "import os, pathlib, time\n"
+        "import json, os, pathlib, sys, time\n"
         "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
-        "time.sleep(30)\n"
+        "request = json.loads(pathlib.Path(sys.argv[2]).read_text())\n"
+        "if request['payload'] == 1: time.sleep(30)\n"
+        "request['kind'] = 'success'\n"
+        "pathlib.Path(sys.argv[4]).write_text(json.dumps(request))\n"
     )
-    harness = IsolatedWorkerHarness(WorkerRuntimeConfig(tmp_path, tmp_path, tmp_path))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "evidence")
+    harness = IsolatedWorkerHarness(
+        WorkerRuntimeConfig(tmp_path, tmp_path, tmp_path), broker=runtime.broker
+    )
+    receipts: list[ProcessCancelledError] = []
+
+    def consume() -> None:
+        try:
+            with harness.run_typed_sync_session(worker_definition(), 1 if cancelled else 2) as (
+                result,
+                root,
+            ):
+                assert result == 2
+                assert root.is_dir()
+                raise RuntimeError("consumer failed")
+        except ProcessCancelledError as error:
+            receipts.append(error)
+            raise
 
     async def exercise() -> None:
-        with anyio.CancelScope() as scope:
-
-            async def heartbeat(root: Path) -> None:
-                if pid_path.exists():
-                    if cancelled:
-                        scope.cancel()
-                        await anyio.sleep(0)
-                    raise RuntimeError("heartbeat failed")
-
-            if cancelled:
-                await harness.run_typed_session(
-                    worker_definition(), 1, consume=lambda value, _: value, heartbeat=heartbeat
-                )
-            else:
-                with pytest.raises(RuntimeError, match="heartbeat failed"):
-                    await harness.run_typed_session(
-                        worker_definition(),
-                        1,
-                        consume=lambda value, _: value,
-                        heartbeat=heartbeat,
-                    )
         try:
+            with anyio.fail_after(10), anyio.CancelScope() as scope:
+
+                async def cancel_started_child() -> None:
+                    while not pid_path.exists():
+                        await anyio.sleep(0.01)
+                    scope.cancel()
+
+                if cancelled:
+                    async with anyio.create_task_group() as group:
+                        group.start_soon(cancel_started_child)
+                        await runtime.run_in_request(consume)
+                else:
+                    with pytest.raises(RuntimeError, match="consumer failed"):
+                        await runtime.run_in_request(consume)
+            if cancelled:
+                assert len(receipts) == 1
+                assert receipts[0].process.cleanup_complete
             pid = int(pid_path.read_text())
             assert (
                 not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
@@ -72,6 +89,6 @@ def test_worker_session_settles_child_before_releasing_staging(
         finally:
             if pid_path.exists() and psutil.pid_exists(int(pid_path.read_text())):
                 os.kill(int(pid_path.read_text()), signal.SIGKILL)
-            await asyncio.sleep(0.1)
+            runtime.close()
 
     anyio.run(exercise)
