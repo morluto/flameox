@@ -140,6 +140,44 @@ def test_nvbench_compare_does_not_pair_different_states(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("baseline_samples", "candidate_samples"), [([], [1.0]), ([1.0], []), ([], [])]
+)
+def test_nvbench_comparison_does_not_match_series_without_observations(
+    tmp_path: Path, baseline_samples: list[float], candidate_samples: list[float]
+) -> None:
+    bundles = [
+        _bundle(tmp_path / "baseline", baseline_samples),
+        _bundle(tmp_path / "candidate", candidate_samples),
+    ]
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        for bundle, samples in zip(bundles, (baseline_samples, candidate_samples), strict=True):
+            if samples:
+                continue
+            source = PathSource(path=str(bundle), format="nvbench")
+            summary = runtime.analyze("benchmark.summary", [source], {})
+            scaling = runtime.analyze(
+                "benchmark.scaling", [source], {"input_dimension": "elements"}
+            )
+            assert summary["blocks"][0]["values"]["measurement_count"] == 0
+            assert scaling["blocks"][0]["values"]["inconclusive_series_count"] == 1
+            assert scaling["blocks"][1]["rows"][0]["point_count"] == 0
+        result = runtime.analyze(
+            "benchmark.compare",
+            [PathSource(path=str(path), format="nvbench") for path in bundles],
+            {},
+        )
+    finally:
+        runtime.close()
+    assert result["blocks"][1]["rows"] == []
+    assert result["blocks"][0]["values"] == {
+        "input_count": 2,
+        "compatible_metric_count": 0,
+        "unmatched_identity_count": int(bool(baseline_samples or candidate_samples)),
+    }
+
+
+@pytest.mark.parametrize(
     ("baseline_name", "candidate_name"),
     [
         ("variant-a,elements=16", "variant-b,elements=16"),

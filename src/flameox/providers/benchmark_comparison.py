@@ -27,8 +27,8 @@ def compare_series(
     selected_keys = [
         {
             key
-            for key, aggregate in values.items()
-            if requested_metric is None or aggregate[0]["benchmark"] == requested_metric
+            for key, (identity, _total, count) in values.items()
+            if count > 0 and (requested_metric is None or identity["benchmark"] == requested_metric)
         }
         for values in series
     ]
