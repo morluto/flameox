@@ -211,6 +211,7 @@ class AnalysisInput(EvidenceModel):
     path: Nonempty
     role: Nonempty
     producer: str | None
+    is_directory: bool | None = None
 
 
 class AnalysisFailure(EvidenceModel):
@@ -314,6 +315,8 @@ class ManifestBody(EvidenceModel):
             if index >= len(layout.sources):
                 raise ValueError("Invalid analysis source index")
             source = layout.sources[index]
+            if item.is_directory is not None and item.is_directory != source.is_directory:
+                raise ValueError("Invalid analysis source kind")
             if (source.sha256, source.format, source.producer) != (
                 item.sha256,
                 item.format,

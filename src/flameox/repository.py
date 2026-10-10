@@ -270,7 +270,11 @@ class EvidenceRepository:
     ) -> tuple[list[NativeSource], SourceLayout]:
         groups: list[list[tuple[str | None, NativeSource]]] = []
         for source in sources:
-            is_directory = source.path.is_dir()
+            if source.path.is_dir() != source.is_directory:
+                raise RepositoryError(
+                    "MISSING_OR_CHANGED_INPUT", "Input kind changed before preservation."
+                )
+            is_directory = source.is_directory
             files = directory_files(source.path) if is_directory else [source.path]
             members = []
             remaining = source.size_bytes
@@ -326,7 +330,7 @@ class EvidenceRepository:
                     size_bytes=source.size_bytes,
                     format=source.format,
                     producer=source.producer,
-                    is_directory=source.path.is_dir(),
+                    is_directory=source.is_directory,
                     artifact_indices=indices,
                     relative_paths=[relative for relative, _ in members if relative is not None],
                 )
@@ -346,6 +350,10 @@ class EvidenceRepository:
                     "MISSING_OR_CHANGED_INPUT", "Analysis source mapping is out of range."
                 )
             source = sources[source_index]
+            if item.is_directory is not None and item.is_directory != source.is_directory:
+                raise RepositoryError(
+                    "MISSING_OR_CHANGED_INPUT", "Analysis input kind changed before preservation."
+                )
             if (source.sha256, source.format, source.producer) != (
                 item.sha256,
                 item.format,

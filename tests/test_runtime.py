@@ -645,3 +645,31 @@ def test_stale_external_inputs_do_not_break_unrelated_analysis_eviction(tmp_path
         assert runtime.read_evidence(preserved["evidence_id"])
     finally:
         runtime.close()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="Requires enforced POSIX directory permissions"
+)
+def test_unreadable_directory_members_prevent_analysis_and_preservation(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    hidden = bundle / "nested"
+    hidden.mkdir(parents=True)
+    (bundle / "visible.txt").write_text("visible")
+    (hidden / "native.txt").write_text("native")
+    store = tmp_path / "store"
+    runtime = AnalysisRuntime(evidence_directory=store)
+    try:
+        source = PathSource(path=str(bundle))
+        readable = runtime.analyze("artifact.preview", [source], {})
+        assert readable["coverage"]["complete"] is True
+        hidden.chmod(0)
+        with pytest.raises(RuntimeFailure) as analysis_failure:
+            runtime.analyze("artifact.preview", [source], {})
+        assert analysis_failure.value.code == "INVALID_INPUT"
+        with pytest.raises(RuntimeFailure) as preservation_failure:
+            runtime.preserve_evidence(readable["analysis_id"])
+        assert preservation_failure.value.code == "INVALID_INPUT"
+        assert not list(store.rglob("*.json"))
+    finally:
+        hidden.chmod(0o700)
+        runtime.close()

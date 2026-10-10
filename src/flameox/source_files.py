@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,10 @@ class NativeSource:
     format: str
     producer: str | None
     role: str
+    is_directory: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.is_directory = self.path.is_dir()
 
     def public(self) -> dict[str, Any]:
         return {
@@ -90,19 +94,31 @@ def copy_verified_file(source: NativeSource, target: Path) -> None:
 
 def directory_files(path: Path, *, max_files: int | None = None) -> list[Path]:
     files: list[Path] = []
-    for item in path.rglob("*"):
-        if item.is_symlink():
-            raise RuntimeFailure(
-                "INVALID_INPUT", f"Directory sources cannot contain symlinks: {item}"
-            )
-        if not item.is_file() and not item.is_dir():
-            raise RuntimeFailure(
-                "INVALID_INPUT", f"Directory sources cannot contain special files: {item}"
-            )
-        if item.is_file():
-            files.append(item)
-            if max_files is not None and len(files) > max_files:
-                raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_files")
+    pending = [path]
+    try:
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    item = Path(entry.path)
+                    if entry.is_symlink():
+                        raise RuntimeFailure(
+                            "INVALID_INPUT", f"Directory sources cannot contain symlinks: {item}"
+                        )
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(item)
+                    elif entry.is_file(follow_symlinks=False):
+                        files.append(item)
+                        if max_files is not None and len(files) > max_files:
+                            raise RuntimeFailure("LIMIT_EXCEEDED", "Input exceeds max_input_files")
+                    else:
+                        raise RuntimeFailure(
+                            "INVALID_INPUT",
+                            f"Directory sources cannot contain special files: {item}",
+                        )
+    except OSError as error:
+        raise RuntimeFailure(
+            "INVALID_INPUT", "Could not enumerate the complete source directory"
+        ) from error
     return sorted(files)
 
 

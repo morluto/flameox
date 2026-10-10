@@ -512,6 +512,7 @@ class AnalysisRuntime:
                 {
                     "path": str(item.path),
                     "sha256": item.sha256,
+                    "is_directory": item.is_directory,
                     "format": item.format,
                     "producer": item.producer,
                     "role": item.role,
@@ -1442,6 +1443,7 @@ class AnalysisRuntime:
                 {
                     "path": str(item.path),
                     "sha256": item.sha256,
+                    "is_directory": item.is_directory,
                     "format": item.format,
                     "producer": item.producer,
                     "role": item.role,

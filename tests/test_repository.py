@@ -374,3 +374,41 @@ def test_preservation_does_not_mutate_project_git_configuration(tmp_path: Path) 
 
     assert exclude.read_text().splitlines() == ["existing-pattern"]
     assert tracked_ignore.read_text() == "tracked-pattern\n"
+
+
+@pytest.mark.parametrize("directory_first", [False, True])
+def test_empty_source_kind_is_retained_through_analysis_and_preservation(
+    tmp_path: Path, directory_first: bool
+) -> None:
+    source = tmp_path / "native"
+    if directory_first:
+        source.mkdir()
+    else:
+        source.write_bytes(b"")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        inputs = [PathSource(path=str(source), format="text")]
+        first = runtime.analyze("artifact.preview", inputs, {})
+        assert first["coverage"]["complete"] is True
+        preserved = runtime.preserve_evidence(first["analysis_id"])
+        manifest = runtime.read_evidence(preserved["evidence_id"])
+        assert manifest["body"]["source_layout"]["sources"][0]["is_directory"] is directory_first
+        pending = runtime.analyze("artifact.preview", inputs, {}, limits=RequestLimits(max_rows=1))
+        if directory_first:
+            source.rmdir()
+            source.write_bytes(b"")
+        else:
+            source.unlink()
+            source.mkdir()
+        # Reusing this path and digest must not reuse the first source's kind.
+        second = runtime.analyze("artifact.preview", inputs, {})
+        assert second["analysis_id"] != first["analysis_id"]
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.preserve_evidence(pending["analysis_id"])
+        assert failure.value.code == "MISSING_OR_CHANGED_INPUT"
+        assert (
+            runtime.preserve_evidence(second["analysis_id"])["evidence_id"]
+            != preserved["evidence_id"]
+        )
+    finally:
+        runtime.close()
