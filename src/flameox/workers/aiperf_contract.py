@@ -41,8 +41,8 @@ class AIPerfProjectionRow(ContractModel):
     provider_request_id: str | None = Field(default=None, max_length=500)
     conversation_id: str | None = Field(default=None, max_length=500)
     turn_index: Annotated[int, Field(ge=0)] | None = None
-    input_tokens: Annotated[int, Field(ge=0)]
-    output_tokens: Annotated[int, Field(ge=0)]
+    input_tokens: Annotated[int, Field(ge=0)] | None
+    output_tokens: Annotated[int, Field(ge=0)] | None
     scheduled_ns: Annotated[int, Field(ge=0)] | None = None
     observed_started_ns: Annotated[int, Field(ge=0)]
     ttft_ns: Annotated[int, Field(ge=0)] | None = None

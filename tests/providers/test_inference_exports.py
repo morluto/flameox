@@ -341,6 +341,75 @@ def test_mooncake_summary_aggregates_beyond_returned_rows(tmp_path: Path) -> Non
 
 @pytest.mark.optional
 @pytest.mark.process
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_aiperf_retains_empty_metric_failures_without_inventing_counts(
+    tmp_path: Path, cancelled: bool, mixed: bool
+) -> None:
+    pytest.importorskip("aiperf")
+    export = tmp_path / "native.jsonl"
+    metadata = {
+        "session_num": 7,
+        "request_start_ns": 125,
+        "request_end_ns": 250,
+        "worker_id": "worker-0",
+        "record_processor_id": "processor-0",
+        "benchmark_phase": "profiling",
+        "was_cancelled": cancelled,
+    }
+    records: list[dict[str, Any]] = [
+        {
+            "metadata": metadata,
+            "metrics": {},
+            "error": None
+            if cancelled
+            else {"type": "TimeoutError", "code": 408, "message": "PRIVATE_ERROR_TEXT"},
+            "raw_prompt": "PRIVATE_PROMPT",
+        }
+    ]
+    if mixed:
+        records.append(
+            {
+                "metadata": {**metadata, "session_num": 8, "was_cancelled": False},
+                "metrics": {
+                    "input_sequence_length": {"value": 20, "unit": "tokens"},
+                    "output_sequence_length": {"value": 3, "unit": "tokens"},
+                    "request_latency": {"value": 10, "unit": "ms"},
+                },
+                "error": None,
+            }
+        )
+    export.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        sources = [PathSource(path=str(export), format="aiperf")]
+        result = runtime.analyze("inference.summary", sources, {})
+        metrics = result["blocks"][0]["values"]
+        assert metrics["request_count"] == len(records)
+        assert metrics["successful_requests"] == int(mixed)
+        assert metrics["input_tokens"] is None
+        assert metrics["output_tokens"] is None
+        assert metrics["requests_missing_input_tokens"] == 1
+        assert metrics["comparison_identity"] == {}
+        assert set(metrics["comparison_identity_unavailable"]) == {"system", "workload"}
+        row = result["blocks"][1]["rows"][0]
+        assert row["outcome"] == ("cancelled" if cancelled else "failed")
+        assert row["input_tokens"] is None and row["output_tokens"] is None
+        assert row["latency_ns"] is None and row["tpot_ns"] is None
+        assert "PRIVATE_" not in json.dumps(result)
+        if mixed:
+            compared = runtime.analyze("inference.compare", sources * 2, {})
+            comparison = compared["blocks"][1]["rows"][0]
+            assert comparison["ratio"] == 1
+            assert comparison["baseline_samples"] == 1
+            assert comparison["compatibility"] == "partial"
+            assert "workload" in comparison["identity_unavailable"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.optional
+@pytest.mark.process
 def test_aiperf_runtime_comparison_uses_prompt_free_request_metrics(tmp_path: Path) -> None:
     pytest.importorskip("aiperf")
 
@@ -528,3 +597,61 @@ def test_aiperf_export_is_projected_without_prompts_or_repository(
     assert result["blocks"][1]["rows"][0]["source_request_id"] == "conversation-a:2"
     assert "raw_prompt" not in json.dumps(result)
     assert not (tmp_path / ".flameox").exists()
+
+
+@pytest.mark.parametrize("format_name", ["vllm-benchmark", "sglang-benchmark"])
+def test_inference_rejects_invalid_unicode_identity_without_leaking_native_text(
+    tmp_path: Path, format_name: str
+) -> None:
+    payload: dict[str, object] = (
+        _vllm_payload()
+        if format_name == "vllm-benchmark"
+        else {"duration": 1, "completed": 1, "total_input_tokens": 1, "total_output_tokens": 1}
+    )
+    payload["model"] = "\ud800"
+    artifact = tmp_path / "native.json"
+    artifact.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "inference.summary", [PathSource(path=str(artifact), format=format_name)], {}
+            )
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("format_name,line_limit", [("mooncake", 65_536), ("aiperf", 1_048_576)])
+@pytest.mark.parametrize("prefix", ["", "\n", " "])
+def test_inference_line_bounds_apply_before_whitespace_skipping(
+    tmp_path: Path, format_name: str, line_limit: int, prefix: str
+) -> None:
+    if format_name == "aiperf":
+        pytest.importorskip("aiperf")
+        native = {
+            "metadata": {"session_num": 0, "was_cancelled": False},
+            "metrics": {},
+            "error": {"type": "TimeoutError", "message": "timeout"},
+        }
+    else:
+        native = {"timestamp": 0, "input_length": 1, "output_length": 1}
+    artifact = tmp_path / "native.jsonl"
+    artifact.write_text(prefix + " " * (line_limit + 1) + json.dumps(native) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "inference.summary",
+                [
+                    PathSource(
+                        path=str(artifact),
+                        format="aiperf" if format_name == "aiperf" else "mooncake-trace",
+                    )
+                ],
+                {},
+            )
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()

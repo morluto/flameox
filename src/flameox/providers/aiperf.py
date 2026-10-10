@@ -72,6 +72,16 @@ class AIPerfProvider:
         ]
         if result.truncated:
             limitations.append("AIPerf requests were truncated by the declared row bound.")
+        token_totals: dict[str, int | None] = {}
+        missing_counts: dict[str, int] = {}
+        for field in ("input_tokens", "output_tokens"):
+            missing = sum(row[field] is None for row in rows)
+            token_totals[field] = None if missing else sum(int(row[field]) for row in rows)
+            if missing:
+                missing_counts[f"requests_missing_{field}"] = missing
+                limitations.append(
+                    f"{missing} requests lack {field}; its total and workload identity are unknown."
+                )
         return ProviderAnalysis(
             provider_id="aiperf",
             provider_version=result.aiperf_version,
@@ -81,16 +91,20 @@ class AIPerfProvider:
                     "values": {
                         "request_count": len(rows),
                         "successful_requests": len(successful),
-                        "input_tokens": sum(int(row["input_tokens"]) for row in rows),
-                        "output_tokens": sum(int(row["output_tokens"]) for row in rows),
+                        **token_totals,
+                        **missing_counts,
                         "median_ttft_ns": statistics.median(ttfts) if ttfts else None,
                         "p95_latency_ns": self._percentile(latencies, 0.95),
-                        "comparison_identity": {
+                        "comparison_identity": {}
+                        if missing_counts
+                        else {
                             "workload": digest_model(
                                 workload, projection="flameox.inference.workload/v1"
                             )
                         },
-                        "comparison_identity_unavailable": ["system"],
+                        "comparison_identity_unavailable": ["system", "workload"]
+                        if missing_counts
+                        else ["system"],
                     },
                 },
                 {"type": "table", "rows": rows},

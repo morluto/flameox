@@ -88,8 +88,21 @@ def _error_category(error_type: str | None, code: int | None) -> AIPerfErrorCate
 
 def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRow:
     metadata = record.metadata
-    input_tokens = _token_count(record.metrics, "input_sequence_length")
-    output_tokens = _token_count(record.metrics, "output_sequence_length")
+    outcome: AIPerfOutcome = (
+        "cancelled"
+        if metadata.was_cancelled
+        else ("failed" if record.error is not None else "succeeded")
+    )
+    input_tokens = (
+        _token_count(record.metrics, "input_sequence_length")
+        if outcome == "succeeded" or "input_sequence_length" in record.metrics
+        else None
+    )
+    output_tokens = (
+        _token_count(record.metrics, "output_sequence_length")
+        if outcome == "succeeded" or "output_sequence_length" in record.metrics
+        else None
+    )
     latency_ns = _duration_ns(record.metrics.get("request_latency"))
     ttft_ns = _duration_ns(record.metrics.get("time_to_first_token"))
     tpot_ns = (
@@ -97,6 +110,7 @@ def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRo
         if latency_ns is not None
         and ttft_ns is not None
         and latency_ns >= ttft_ns
+        and output_tokens is not None
         and output_tokens > 1
         else None
     )
@@ -110,11 +124,6 @@ def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRo
     if record.error is not None:
         error_type = _error_category(record.error.type, record.error.code)
         error_code = str(record.error.code) if record.error.code is not None else None
-    outcome: AIPerfOutcome = (
-        "cancelled"
-        if metadata.was_cancelled
-        else ("failed" if record.error is not None else "succeeded")
-    )
     return AIPerfProjectionRow(
         line_index=line_index,
         source_request_id=source_request_id,
@@ -156,14 +165,14 @@ def _handle(request: AIPerfWorkerRequest, job_root: Path) -> AIPerfWorkerResult:
         with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
             line_index = 0
             while raw := input_stream.readline(request.max_line_bytes + 1):
+                if len(raw) > request.max_line_bytes:
+                    raise ValueError(f"record line {line_index} exceeds the byte limit")
                 if not raw.strip():
                     line_index += 1
                     continue
                 if row_count >= request.max_rows:
                     truncated = True
                     break
-                if len(raw) > request.max_line_bytes:
-                    raise ValueError(f"record line {line_index} exceeds the byte limit")
                 record = MetricRecordInfo.model_validate_json(raw)
                 encoded = _projection(record, line_index).model_dump_json().encode() + b"\n"
                 output_stream.write(encoded)

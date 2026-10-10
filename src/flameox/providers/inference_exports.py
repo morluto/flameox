@@ -96,6 +96,13 @@ def _observed_scalars(payload: Mapping[str, Any], names: Sequence[str]) -> dict[
             and not isinstance(value, bool)
             and (isinstance(value, int) or math.isfinite(value))
         )
+        if is_text and isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ProviderFailure(
+                    "DECODE_FAILURE", "Inference identity text is invalid."
+                ) from error
         if is_text or is_number:
             observed[name] = value
     return observed
@@ -469,10 +476,10 @@ class InferenceExportProvider:
                 for line_index, raw in enumerate(
                     iter(lambda: stream.readline(_MOONCAKE_MAX_LINE_BYTES + 1), b"")
                 ):
-                    if not raw.strip():
-                        continue
                     if len(raw) > _MOONCAKE_MAX_LINE_BYTES:
                         raise ValueError("Mooncake trace line exceeds its byte bound")
+                    if not raw.strip():
+                        continue
                     payload = json.loads(raw)
                     row = self._mooncake_row(payload, line_index)
                     if first_timestamp is None:
