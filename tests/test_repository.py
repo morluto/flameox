@@ -138,7 +138,10 @@ def test_repository_rejects_recursively_nested_metadata(tmp_path: Path, filename
         runtime.close()
 
 
-def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "member", ["root", "prefix", "bundle", "manifest", "data", "artifact", "payload"]
+)
+def test_repository_rejects_symlinked_evidence_data(tmp_path: Path, member: str) -> None:
     artifact = tmp_path / "samples.json"
     artifact.write_text("[]")
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -147,9 +150,21 @@ def test_repository_rejects_symlinked_evidence_data(tmp_path: Path) -> None:
         preserved = runtime.preserve_evidence(result["analysis_id"])
         evidence_id = preserved["evidence_id"]
         bundle = tmp_path / ".flameox" / "evidence" / "sha256" / evidence_id[:2] / evidence_id
+        store = tmp_path / ".flameox"
+        artifact_bundle = next((store / "artifacts" / "sha256").glob("*/*"))
+        selected = {
+            "root": store,
+            "prefix": bundle.parent,
+            "bundle": bundle,
+            "manifest": bundle / "manifest.json",
+            "data": bundle / "data",
+            "artifact": artifact_bundle,
+            "payload": artifact_bundle / "payload",
+        }[member]
         outside = tmp_path / "outside-data"
-        (bundle / "data").rename(outside)
-        (bundle / "data").symlink_to(outside, target_is_directory=True)
+        is_directory = selected.is_dir()
+        selected.rename(outside)
+        selected.symlink_to(outside, target_is_directory=is_directory)
 
         with pytest.raises(RuntimeFailure) as failure:
             runtime.read_evidence(evidence_id)

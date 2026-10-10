@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -620,8 +621,7 @@ class EvidenceRepository:
             }
         self._validate_repository()
         evidence_root = self.root / "evidence" / "sha256"
-        self._validate_inventory_layout(evidence_root)
-        inventory = sorted(evidence_root.glob("*/*/manifest.json"))
+        inventory = sorted(self._validate_inventory_layout(evidence_root))
         inventory_ids = [path.parent.name for path in inventory]
         inventory_digest = hashlib.sha256("\n".join(inventory_ids).encode()).hexdigest()
         query_digest = self._query_digest(
@@ -845,7 +845,8 @@ class EvidenceRepository:
                     "REPOSITORY_CORRUPTION", "Evidence repository layout is incomplete."
                 )
 
-    def _validate_inventory_layout(self, evidence_root: Path) -> None:
+    def _validate_inventory_layout(self, evidence_root: Path) -> list[Path]:
+        manifests: list[Path] = []
         for prefix in evidence_root.iterdir():
             self._assert_no_symlink_path(prefix)
             if (
@@ -867,6 +868,8 @@ class EvidenceRepository:
                     raise RepositoryError(
                         "REPOSITORY_CORRUPTION", "Evidence inventory bundle is invalid."
                     )
+                manifests.append(bundle / "manifest.json")
+        return manifests
 
     def _assert_no_symlink_path(self, path: Path) -> None:
         try:
@@ -875,14 +878,19 @@ class EvidenceRepository:
             raise RepositoryError(
                 "REPOSITORY_CORRUPTION", "Repository path escapes the evidence data directory."
             ) from exc
-        current = self.root
-        if current.is_symlink():
-            raise RepositoryError(
-                "REPOSITORY_CORRUPTION", "Repository paths must not contain symlinks."
-            )
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
+        current = str(self.root)
+        for part in ("", *relative.parts):
+            if part:
+                current = os.path.join(current, part)
+            try:
+                is_symlink = stat.S_ISLNK(os.lstat(current).st_mode)
+            except OSError as error:
+                if error.errno not in {errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP}:
+                    raise
+                continue
+            except ValueError:
+                continue
+            if is_symlink:
                 raise RepositoryError(
                     "REPOSITORY_CORRUPTION", "Repository paths must not contain symlinks."
                 )
