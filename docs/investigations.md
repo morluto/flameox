@@ -96,6 +96,12 @@ timing protocols, devices, dtypes, shapes, scopes, phases, and other declared id
 pooled merely because a metric name matches. The result reports identities absent from one or more
 inputs rather than manufacturing a ratio across them.
 
+Benchmark comparison and scaling share the same semantic series identity:
+metric, unit, dimensions, scope, phase, loop count, worker, and variant. Scaling
+removes only its requested input dimension from that identity. Trial IDs, block
+IDs, order within a block, and worker run indices identify repeated samples;
+they remain in native evidence and do not split otherwise compatible series.
+
 Inference exports expose digest-only workload and system identities when their native format
 provides enough metadata. Known-different identities fail validation by default. A caller may set
 `allow_heterogeneous=true` for an explicitly exploratory ratio; the result labels that comparison

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from flameox.benchmark_samples import benchmark_series_identity
 from flameox.canonical import canonical_bytes
 from flameox.providers.benchmark_scaling import scaling_projection
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -246,14 +247,7 @@ class BenchmarkProvider:
             for row in rows:
                 if row["is_warmup"]:
                     continue
-                identity = {
-                    "benchmark": str(row["benchmark"]),
-                    "unit": str(row["unit"]),
-                    "dimensions": dict(row.get("dimensions", {})),
-                    "scope": row.get("scope"),
-                    "phase": row.get("phase"),
-                    "loop_count": row.get("loop_count"),
-                }
+                identity = benchmark_series_identity(row)
                 if requested_metric is not None and identity["benchmark"] != requested_metric:
                     continue
                 if row.get("sample_sum_overflow") is True:

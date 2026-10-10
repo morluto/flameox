@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     Field,
@@ -24,6 +25,22 @@ MetricName = Annotated[
 ]
 DimensionValue = Annotated[str, StringConstraints(max_length=200)]
 SampleValue = StrictInt | StrictFloat
+
+
+def benchmark_series_identity(
+    row: Mapping[str, Any], *, input_dimension: str | None = None
+) -> dict[str, Any]:
+    """Keep semantic axes distinct while pooling repeated trials, blocks, and worker runs."""
+    dimensions = row.get("dimensions", {})
+    return {
+        "benchmark": str(row["benchmark"]),
+        "unit": str(row["unit"]),
+        "dimensions": {key: value for key, value in dimensions.items() if key != input_dimension},
+        **{
+            field: row.get(field)
+            for field in ("scope", "phase", "loop_count", "worker_id", "variant_id")
+        },
+    }
 
 
 class BenchmarkDevice(ContractModel):

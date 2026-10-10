@@ -379,8 +379,10 @@ def _state_dimensions(state: Mapping[str, Any]) -> dict[str, Any]:
     }
     parsed_name = False
     if isinstance(name, str):
-        for component in name.split(","):
-            key, separator, value = component.strip().partition("=")
+        components = [component.strip() for component in name.split(",") if component.strip()]
+        parsed_name = bool(components)
+        for component in components:
+            key, separator, value = component.partition("=")
             if (
                 separator
                 and key
@@ -388,9 +390,11 @@ def _state_dimensions(state: Mapping[str, Any]) -> dict[str, Any]:
                 and len(key) <= 120
                 and len(value) <= 200
                 and all(character.isalnum() or character in "._:/-" for character in key)
+                and key not in dimensions
             ):
-                dimensions.setdefault(key, value)
-                parsed_name = True
+                dimensions[key] = value
+            else:
+                parsed_name = False
     if parsed_name:
         dimensions.pop("state")
     return dimensions

@@ -134,6 +134,9 @@ Projection identity includes every non-axis dimension that can distinguish a ser
 device, dtype, variant, scope, and worker identity where applicable. Providers must not blend those
 series. When a composite native label is successfully decomposed into named dimensions, the raw
 label must not remain as a redundant identity that changes with the selected axis.
+NVBench retains its raw state label if any meaningful component cannot be decoded,
+repeats a key, or conflicts with native dimensions. Such labels remain distinct
+even when their decoded numeric dimensions match.
 
 Numeric aggregation requires compatible semantic units. Providers normalize convertible units to
 one declared output unit before pooling and reject incompatible dimensions; for example, seconds

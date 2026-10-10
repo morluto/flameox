@@ -13,7 +13,13 @@ from flameox.runtime_contracts import (
 )
 
 
-def _bundle(root: Path, samples: list[float], *, elements: int = 65_536) -> Path:
+def _bundle(
+    root: Path,
+    samples: list[float],
+    *,
+    elements: int = 65_536,
+    state_name: str | None = None,
+) -> Path:
     root.mkdir()
     sidecar = root / "results.json-bin" / "0.bin"
     sidecar.parent.mkdir()
@@ -32,7 +38,9 @@ def _bundle(root: Path, samples: list[float], *, elements: int = 65_536) -> Path
                         "name": "cub.scan",
                         "states": [
                             {
-                                "name": f"elements={elements}",
+                                "name": state_name
+                                if state_name is not None
+                                else f"elements={elements}",
                                 "device": 0,
                                 "is_skipped": False,
                                 "summaries": [
@@ -117,6 +125,40 @@ def test_nvbench_compare_does_not_pair_different_states(tmp_path: Path) -> None:
         "compatible_metric_count": 0,
         "unmatched_identity_count": 2,
     }
+
+
+@pytest.mark.parametrize(
+    ("baseline_name", "candidate_name"),
+    [
+        ("variant-a,elements=16", "variant-b,elements=16"),
+        ("elements=16,elements=32", "elements=16,elements=64"),
+        ("device=1,elements=16", "device=2,elements=16"),
+    ],
+)
+def test_nvbench_comparison_and_scaling_retain_partly_decoded_native_labels(
+    tmp_path: Path, baseline_name: str, candidate_name: str
+) -> None:
+    baseline = _bundle(tmp_path / "baseline", [1.0], state_name=baseline_name)
+    candidate = _bundle(tmp_path / "candidate", [4.0], state_name=candidate_name)
+    larger_name = candidate_name.replace("elements=16", "elements=32")
+    larger = _bundle(tmp_path / "larger", [4.0], state_name=larger_name)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    sources = [PathSource(path=str(path), format="nvbench") for path in (baseline, candidate)]
+    try:
+        compared = runtime.analyze("benchmark.compare", sources, {})
+        scaled = runtime.analyze(
+            "benchmark.scaling",
+            [sources[0], PathSource(path=str(larger), format="nvbench")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+    assert compared["blocks"][0]["values"]["compatible_metric_count"] == 0
+    assert compared["blocks"][0]["values"]["unmatched_identity_count"] == 2
+    assert compared["blocks"][1]["rows"] == []
+    rows = scaled["blocks"][1]["rows"]
+    assert {row["dimensions"]["state"] for row in rows} == {baseline_name, larger_name}
+    assert all(row["status"] == "inconclusive" for row in rows)
 
 
 def test_nvbench_scaling_uses_numeric_state_dimensions(tmp_path: Path) -> None:

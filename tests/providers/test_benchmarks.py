@@ -27,7 +27,9 @@ def _write_pyperf_suite(path: Path, values: list[float]) -> None:
     pyperf.BenchmarkSuite([pyperf.Benchmark([run])]).dump(str(path), replace=True)
 
 
-def _write_benchmark_samples(path: Path, values: list[int]) -> None:
+def _write_benchmark_samples(
+    path: Path, values: list[int], *, series_fields: dict[str, object] | None = None
+) -> None:
     path.write_text(
         json.dumps(
             {
@@ -41,11 +43,107 @@ def _write_benchmark_samples(path: Path, values: list[int]) -> None:
                         "measurement_clock": "host_monotonic",
                         "synchronization": "not_required",
                         "samples": values,
+                        **(series_fields or {}),
                     }
                 ],
             }
         )
     )
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("axis", "baseline_value", "candidate_value"),
+    [
+        ("scope", "process", "thread"),
+        ("phase", "startup", "steady_state"),
+        ("loop_count", 1, 2),
+        ("worker_id", "worker-a", "worker-b"),
+        ("variant_id", "variant-a", "variant-b"),
+    ],
+)
+def test_benchmark_comparison_and_scaling_keep_semantic_axes_distinct(
+    tmp_path: Path, axis: str, baseline_value: str | int, candidate_value: str | int
+) -> None:
+    baseline = tmp_path / "baseline.samples.json"
+    candidate = tmp_path / "candidate.samples.json"
+    _write_benchmark_samples(
+        baseline, [100], series_fields={axis: baseline_value, "dimensions": {"elements": "10"}}
+    )
+    _write_benchmark_samples(
+        candidate, [400], series_fields={axis: candidate_value, "dimensions": {"elements": "10"}}
+    )
+    scaling = tmp_path / "scaling.samples.json"
+    document = json.loads(baseline.read_text())
+    larger = json.loads(candidate.read_text())["benchmarks"][0]
+    larger["dimensions"]["elements"] = "20"
+    document["benchmarks"].append(larger)
+    scaling.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        compared = runtime.analyze(
+            "benchmark.compare",
+            [PathSource(path=str(path), format="samples") for path in (baseline, candidate)],
+            {},
+        )
+        scaled = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(scaling), format="samples")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+    assert compared["blocks"][0]["values"]["compatible_metric_count"] == 0
+    assert compared["blocks"][0]["values"]["unmatched_identity_count"] == 2
+    assert compared["blocks"][1]["rows"] == []
+    rows = scaled["blocks"][1]["rows"]
+    assert {row[axis] for row in rows} == {baseline_value, candidate_value}
+    assert all(row["status"] == "inconclusive" and row["point_count"] == 1 for row in rows)
+
+
+@pytest.mark.process
+def test_benchmark_repeated_trials_and_blocks_pool_within_semantic_identity(tmp_path: Path) -> None:
+    paths = [tmp_path / "baseline.samples.json", tmp_path / "candidate.samples.json"]
+    for path, multiplier in zip(paths, (1, 2), strict=True):
+        _write_benchmark_samples(path, [100])
+        document = json.loads(path.read_text())
+        template = document["benchmarks"][0]
+        document["benchmarks"] = [
+            {
+                **template,
+                "worker_id": "worker-a",
+                "variant_id": "variant-a",
+                "worker_run_index": block,
+                "trial_id": f"trial-{multiplier}-{block}",
+                "block_id": f"block-{block}",
+                "order_in_block": multiplier,
+                "dimensions": {"elements": str(elements)},
+                "samples": [value * multiplier],
+            }
+            for elements, block, value in ((10, 0, 100), (10, 1, 300), (20, 0, 400), (20, 1, 1200))
+        ]
+        path.write_text(json.dumps(document))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        compared = runtime.analyze(
+            "benchmark.compare",
+            [PathSource(path=str(path), format="samples") for path in paths],
+            {},
+        )
+        scaled = runtime.analyze(
+            "benchmark.scaling",
+            [PathSource(path=str(paths[0]), format="samples")],
+            {"input_dimension": "elements"},
+        )
+    finally:
+        runtime.close()
+    assert compared["blocks"][0]["values"]["compatible_metric_count"] == 2
+    assert all(row["ratio"] == 2 for row in compared["blocks"][1]["rows"])
+    assert scaled["blocks"][0]["values"]["series_count"] == 1
+    row = scaled["blocks"][1]["rows"][0]
+    assert row["exponent"] == pytest.approx(2)
+    assert row["worker_id"] == "worker-a"
+    assert row["variant_id"] == "variant-a"
 
 
 def _write_scaling_samples(path: Path) -> None:
