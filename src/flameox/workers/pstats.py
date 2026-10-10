@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import pstats
 import sys
 from pathlib import Path
@@ -13,6 +14,12 @@ from flameox.workers.pstats_contract import PSTATS_WORKER, PstatsWorkerRequest, 
 
 def _handle(request: PstatsWorkerRequest, _job_root: Path) -> PstatsWorkerResult:
     stats = cast(Any, pstats.Stats(request.artifact_path)).stats
+    for values in stats.values():
+        _measurements(values[:4])
+        if not isinstance(values[4], dict):
+            raise ValueError("pstats callers must be an object")
+        for edge in values[4].values():
+            _edge_values(edge)
     if request.projection == "call_graph":
         return _call_graph(request, stats)
     rows: list[dict[str, Any]] = []
@@ -50,8 +57,6 @@ def _call_graph(request: PstatsWorkerRequest, stats: dict[Any, Any]) -> PstatsWo
     for callee_key, values in stats.items():
         callee = _identity(callee_key)
         callers = values[4]
-        if not isinstance(callers, dict):
-            continue
         for caller_key, raw_edge in callers.items():
             caller = _identity(caller_key)
             if not _matches_edge(request, caller, callee):
@@ -119,10 +124,31 @@ def _matches_edge(
 
 def _edge_values(value: Any) -> tuple[int, int, float | None, float | None]:
     if isinstance(value, tuple) and len(value) == 4:
-        primitive_calls, total_calls, self_time, cumulative_time = value
-        return int(primitive_calls), int(total_calls), float(self_time), float(cumulative_time)
-    calls = int(value)
+        return _measurements(value)
+    calls = _call_count(value)
     return calls, calls, None, None
+
+
+def _measurements(value: Any) -> tuple[int, int, float, float]:
+    primitive_calls, total_calls, self_time, cumulative_time = value
+    times = (self_time, cumulative_time)
+    if any(
+        not isinstance(item, int | float) or isinstance(item, bool) or not math.isfinite(item)
+        for item in times
+    ):
+        raise ValueError("pstats timings must be finite numbers")
+    return (
+        _call_count(primitive_calls),
+        _call_count(total_calls),
+        float(self_time),
+        float(cumulative_time),
+    )
+
+
+def _call_count(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("pstats call counts must be nonnegative integers")
+    return value
 
 
 def main() -> int:
@@ -132,7 +158,7 @@ def main() -> int:
             handler=_handle,
             invalid_failure=WorkerFailureKind.INPUT_MALFORMED,
             invalid_message="pstats profile is unsupported or invalid",
-            caught=(OSError, EOFError, ValueError, TypeError),
+            caught=(OSError, EOFError, ValueError, TypeError, OverflowError),
         )
     )
 

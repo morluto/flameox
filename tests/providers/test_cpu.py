@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import cProfile
 import json
+import marshal
 import os
+import profile as python_profile
 import signal
 import sys
 from pathlib import Path
@@ -47,8 +49,11 @@ def test_pstats_profile_is_bounded_deterministic_cpu_evidence(tmp_path: Path) ->
     assert any("no compatibility guarantee" in item for item in result["limitations"])
 
 
+@pytest.mark.process
+@pytest.mark.parametrize("profiler_kind", ["cProfile", "profile"])
 def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
     tmp_path: Path,
+    profiler_kind: str,
 ) -> None:
     profile = tmp_path / "callers.pstats"
 
@@ -58,7 +63,7 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
     def caller() -> int:
         return leaf()
 
-    profiler = cProfile.Profile()
+    profiler = cProfile.Profile() if profiler_kind == "cProfile" else python_profile.Profile()
     profiler.runcall(caller)
     profiler.dump_stats(profile)
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
@@ -78,7 +83,45 @@ def test_pstats_caller_projection_filters_direction_without_losing_edge_metrics(
     assert row["caller_function"] == "caller"
     assert row["callee_function"] == "leaf"
     assert row["total_calls"] == 1
-    assert row["cumulative_time_seconds"] >= row["self_time_seconds"]
+    if profiler_kind == "cProfile":
+        assert row["cumulative_time_seconds"] >= row["self_time_seconds"]
+    else:
+        assert row["self_time_seconds"] is None
+        assert row["cumulative_time_seconds"] is None
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("capability", ["cpu.hotspots", "cpu.callers"])
+@pytest.mark.parametrize(
+    "invalid", ["self_nan", "cumulative_inf", "negative_count", "fractional_count", "edge_nan"]
+)
+def test_pstats_rejects_invalid_measurements_before_projection(
+    tmp_path: Path, capability: str, invalid: str
+) -> None:
+    artifact = tmp_path / "invalid.pstats"
+    values: list[Any] = [1, 1, 0.1, 0.2, {}]
+    if invalid == "self_nan":
+        values[2] = float("nan")
+    elif invalid == "cumulative_inf":
+        values[3] = float("inf")
+    elif invalid == "negative_count":
+        values[0] = -1
+    elif invalid == "fractional_count":
+        values[1] = 1.5
+    else:
+        values[4] = {("caller.py", 1, "caller"): (1, 1, float("nan"), 0.2)}
+    artifact.write_bytes(marshal.dumps({("app.py", 1, "work"): tuple(values)}))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                capability,
+                [PathSource(path=str(artifact), format="pstats")],
+                {"function": "absent"} if capability == "cpu.callers" else {},
+            )
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
 
 
 def test_pyspy_speedscope_profile_ranks_typed_frames(tmp_path: Path) -> None:
