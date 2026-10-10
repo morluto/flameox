@@ -505,9 +505,9 @@ class InferenceExportProvider:
                                 row["timestamp_ms"],
                                 row["input_length"],
                                 row["output_length"],
-                                row["prefix_hash_count"],
+                                payload.get("hash_ids", []),
                             ],
-                            projection="flameox.mooncake.request/v1",
+                            projection="flameox.mooncake.request/v2",
                         ).encode("ascii")
                         + b"\n"
                     )
@@ -523,7 +523,7 @@ class InferenceExportProvider:
             limitations.append("Mooncake requests were truncated by the declared row bound.")
         return ProviderAnalysis(
             provider_id="mooncake-trace",
-            provider_version="request-trace-v2",
+            provider_version="request-trace-v3",
             blocks=[
                 {
                     "type": "metrics",

@@ -666,3 +666,50 @@ def test_inference_line_bounds_apply_before_whitespace_skipping(
         assert failure.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize("changed_prefixes", [False, True])
+def test_mooncake_comparison_preserves_prefix_reuse_identity(
+    tmp_path: Path, changed_prefixes: bool
+) -> None:
+    sources = []
+    for name, prefixes in (
+        ("baseline", [[1234567, 2345678], [1234567, 2345678]]),
+        (
+            "candidate",
+            [[1234567, 2345678], [3456789, 4567890] if changed_prefixes else [1234567, 2345678]],
+        ),
+    ):
+        trace = tmp_path / f"{name}.jsonl"
+        trace.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "timestamp": index,
+                        "input_length": 1024,
+                        "output_length": 2,
+                        "hash_ids": hashes,
+                    }
+                )
+                for index, hashes in enumerate(prefixes)
+            )
+            + "\n"
+        )
+        sources.append(PathSource(path=str(trace), format="mooncake-trace"))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        if changed_prefixes:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze("inference.compare", sources, {})
+            assert failure.value.code == "INVALID_INPUT"
+            assert failure.value.details == {"differing_fields": ["workload"]}
+        comparison = runtime.analyze(
+            "inference.compare", sources, {"allow_heterogeneous": changed_prefixes}
+        )
+        row = comparison["blocks"][1]["rows"][0]
+        assert row["compatibility"] == ("heterogeneous" if changed_prefixes else "partial")
+        assert set(row["identity_differences"]) == ({"workload"} if changed_prefixes else set())
+        assert "hash_ids" not in json.dumps(comparison)
+        assert "1234567" not in json.dumps(comparison)
+    finally:
+        runtime.close()
