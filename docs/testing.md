@@ -111,3 +111,10 @@ workflow enters the synchronous session through `AnalysisRuntime.run_in_request`
 and checks cancellation receipts, child settlement, consumer failure, and staging
 cleanup. The removed async-only heartbeat path had no production callers;
 its backend-specific test was replaced by this production-path proof.
+
+Pytest retry workflows check that interrupted retry classifications agree between
+summary metrics and diagnostic rows. Kernel malformed-artifact workflows exercise
+both summary and comparison, including null output and metric containers. Native
+benchmark comparisons retain reader-specific identities and zero-baseline ratios;
+benchmark-sample workflows cover aggregate and ratio overflow. NVBench float32
+sidecars cannot represent the float64 overflow fixtures used by those workflows.
