@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import json5
@@ -10,6 +13,46 @@ import tomlkit
 from flameox import __version__
 from flameox.providers.environment import SetupFailure
 from flameox.setup import SetupClient, apply_client_setup, plan_client_setup
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs require POSIX")
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("operation", ["plan", "apply"])
+def test_setup_rejects_special_configuration_files_without_blocking(
+    tmp_path: Path, client: str, operation: str
+) -> None:
+    script = """
+import os, sys
+from pathlib import Path
+from flameox.setup import SetupClient, plan_client_setup, apply_client_setup
+from flameox.providers.environment import SetupFailure
+root = Path(sys.argv[1])
+client = SetupClient(sys.argv[2])
+path = client.config_path(root)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text('' if client is SetupClient.CODEX else '{}')
+plans = plan_client_setup([client], [], home=root)
+path.unlink()
+os.mkfifo(path)
+try:
+    if sys.argv[3] == 'plan':
+        plan_client_setup([client], [], home=root)
+    else:
+        apply_client_setup(plans)
+except SetupFailure:
+    pass
+else:
+    raise AssertionError('special configuration accepted')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), client, operation],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("client", [SetupClient.CLAUDE, SetupClient.CURSOR, SetupClient.GEMINI])
@@ -47,11 +90,14 @@ def test_setup_preserves_existing_client_configuration_and_is_idempotent(
     assert config.read_text() == custom_format
 
 
-def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ["", "\ufeff"])
+def test_opencode_setup_edits_active_jsonc_without_losing_comments(
+    tmp_path: Path, prefix: str
+) -> None:
     config = tmp_path / ".config" / "opencode" / "opencode.jsonc"
     config.parent.mkdir(parents=True)
     config.write_text(
-        '{\n  // keep this comment\n  "theme": "dark",\n'
+        prefix + '{\n  // keep this comment\n  "theme": "dark",\n'
         '  "enabled": true// keep the scalar comment\n}\n'
     )
 
@@ -60,6 +106,7 @@ def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Pat
 
     content = config.read_text()
     document = json5.loads(content)
+    assert content.startswith(prefix + "{")
     assert "keep this comment" in content
     assert "true,// keep the scalar comment" in content
     assert document["enabled"] is True

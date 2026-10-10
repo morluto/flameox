@@ -116,7 +116,7 @@ class ProviderDependencies:
         adjacent = Path(sys.executable).with_name("py-spy.exe" if os.name == "nt" else "py-spy")
         if adjacent.is_file():
             output = await self._run([str(adjacent), "--version"], min(timeout, 10))
-            if output.decode().strip() == f"py-spy {PY_SPY_VERSION}":
+            if output.strip() == f"py-spy {PY_SPY_VERSION}".encode():
                 return self._bind(str(adjacent)), []
         probe = (
             "import importlib.metadata,json,os,sysconfig; "
@@ -146,9 +146,9 @@ class ProviderDependencies:
                 raise ValueError("non-absolute collector")
             binding = self._bind(str(path))
             version = await self._run([str(path), "--version"], min(timeout, 10))
-            if version.decode().strip() != f"py-spy {PY_SPY_VERSION}":
+            if version.strip() != f"py-spy {PY_SPY_VERSION}".encode():
                 raise ValueError("collector version mismatch")
-        except (KeyError, TypeError, ValueError, DomainError, OSError) as error:
+        except (KeyError, TypeError, ValueError, DomainError, OSError, RecursionError) as error:
             raise SetupFailure("Prepared collector identity could not be verified.") from error
         return binding, command
 
@@ -180,7 +180,7 @@ class ProviderDependencies:
             # it neither changes active imports nor discards unrelated collector bindings.
             command = [launcher_command, *launcher_args, "--version"]
             output = await self._run(command, timeout_seconds)
-            if output.decode().strip() != __version__:
+            if output.strip() != __version__.encode():
                 raise SetupFailure("Prepared Flameox release does not match the running release.")
         preparation = ProviderPreparation(
             requested,

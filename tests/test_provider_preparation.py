@@ -125,3 +125,48 @@ def test_prepare_activates_verified_collector_for_the_live_session_and_reuses_it
             assert failed.structured_content["next_action"]["tool"] == "prepare_providers"
 
     anyio.run(exercise)
+
+
+@pytest.mark.integration
+@pytest.mark.process
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixtures")
+@pytest.mark.parametrize(
+    "failure", ["deep_receipt", "collector_version", "server_version", "adjacent_version"]
+)
+def test_preparation_rejects_malformed_native_responses_without_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    interpreter = sys.executable
+    server = tmp_path / "server"
+    server.mkdir()
+    server_python = server / "python"
+    server_python.symlink_to(interpreter)
+    monkeypatch.setattr("flameox.providers.preparation.sys.executable", str(server_python))
+    collector = server / "py-spy" if failure == "adjacent_version" else tmp_path / "collector"
+    collector.write_text(f"#!{interpreter}\nimport sys\nsys.stdout.buffer.write(b'\\xff')\n")
+    collector.chmod(0o755)
+    payload = (
+        b"\xff"
+        if failure == "server_version"
+        else ("[" * 10_000 + "0" + "]" * 10_000).encode()
+        if failure in {"deep_receipt", "adjacent_version"}
+        else json.dumps({"version": PY_SPY_VERSION, "executable": str(collector)}).encode()
+    )
+    uvx = tmp_path / "uvx"
+    uvx.write_text(f"#!{interpreter}\nimport sys\nsys.stdout.buffer.write({payload!r})\n")
+    uvx.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr("flameox.providers.preparation.active_provider_status", lambda _: "unknown")
+
+    async def exercise() -> None:
+        async with Client(
+            FlameoxServer(evidence_directory=tmp_path / "store"), raise_exceptions=True
+        ) as client:
+            result = await client.call_tool(
+                "prepare_providers",
+                {"provider_ids": ["memray" if failure == "server_version" else "py-spy"]},
+            )
+            assert result.is_error
+            assert result.structured_content["code"] == "SETUP_FAILURE"
+
+    anyio.run(exercise)

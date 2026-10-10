@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import MutableMapping
@@ -16,6 +17,7 @@ from tomlkit.items import InlineTable
 
 from flameox import __version__
 from flameox.atomic import atomic_write_text
+from flameox.filesystem import BoundedFileSystem
 from flameox.providers.availability import MANAGED_PROVIDER_EXTRAS
 from flameox.providers.environment import (
     DEFAULT_PREPARATION_TIMEOUT_SECONDS,
@@ -26,6 +28,7 @@ from flameox.providers.environment import (
     external_provider_requirements,
     mcp_launcher,
 )
+from flameox.runtime_errors import DomainError
 
 PATH_CLI_PROBE_TIMEOUT_SECONDS = 5
 
@@ -178,6 +181,8 @@ class _JsoncProperty:
 
 
 def _jsonc_skip_trivia(source: str, index: int) -> int:
+    if index == 0 and source.startswith("\ufeff"):
+        index += 1
     while True:
         while index < len(source) and source[index].isspace():
             index += 1
@@ -356,6 +361,14 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _read_configuration(path: Path) -> str:
+    with (
+        BoundedFileSystem((path.parent,)).open_regular(path) as descriptor,
+        os.fdopen(descriptor, "r", closefd=False) as stream,
+    ):
+        return stream.read()
+
+
 def _json_plan(
     client: SetupClient,
     path: Path,
@@ -365,13 +378,13 @@ def _json_plan(
     source: str | None = None
     if path.exists():
         try:
-            source = path.read_text()
+            source = _read_configuration(path)
             document = (
                 json5.loads(source, allow_duplicate_keys=False)
                 if path.suffix == ".jsonc"
                 else json.loads(source, object_pairs_hook=_unique_json_object)
             )
-        except (OSError, ValueError, RecursionError) as error:
+        except (OSError, ValueError, RecursionError, DomainError) as error:
             raise SetupFailure(
                 f"Could not read {client.display_name} configuration: {path}"
             ) from error
@@ -410,9 +423,9 @@ def _codex_plan(
     source: str | None = None
     if path.exists():
         try:
-            source = path.read_text()
+            source = _read_configuration(path)
             document = tomlkit.parse(source)
-        except (OSError, UnicodeError, TOMLKitError) as error:
+        except (OSError, UnicodeError, TOMLKitError, DomainError) as error:
             raise SetupFailure(f"Could not read Codex configuration: {path}") from error
     else:
         document = tomlkit.document()
@@ -480,7 +493,7 @@ def apply_client_setup(plans: list[ClientSetupPlan]) -> list[ClientSetupResult]:
                 raise SetupFailure(
                     f"Refusing to replace symbolic-link client configuration: {plan.path}"
                 )
-            current = plan.path.read_text() if plan.path.exists() else None
+            current = _read_configuration(plan.path) if plan.path.exists() else None
             if current != plan.original:
                 raise SetupFailure(
                     f"{plan.client.display_name} configuration changed during setup: {plan.path}"
@@ -489,7 +502,7 @@ def apply_client_setup(plans: list[ClientSetupPlan]) -> list[ClientSetupResult]:
                 atomic_write_text(plan.path, plan.content)
         except SetupFailure:
             raise
-        except (OSError, UnicodeError) as error:
+        except (OSError, UnicodeError, DomainError) as error:
             raise SetupFailure(
                 f"Could not update {plan.client.display_name} configuration: {plan.path}. "
                 "Earlier selected clients may already have been configured."
