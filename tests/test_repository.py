@@ -213,6 +213,11 @@ def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -
         assert len(ids) == 3
         assert second["continuation"] is None
 
+        recursive_cursor = base64.urlsafe_b64encode(b"[" * 10_000 + b"0" + b"]" * 10_000).decode()
+        with pytest.raises(RuntimeFailure) as invalid_cursor:
+            runtime.query_evidence(cursor=recursive_cursor)
+        assert invalid_cursor.value.code == "INVALID_INPUT"
+
         decoded_cursor = json.loads(
             base64.urlsafe_b64decode(
                 first["continuation"] + "=" * (-len(first["continuation"]) % 4)

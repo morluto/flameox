@@ -3172,7 +3172,7 @@ class AnalysisRuntime:
             if type(offset) is not int or offset < 0:
                 raise ValueError
             return offset
-        except (ValueError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
             raise RuntimeFailure(
                 "INVALID_INPUT", "Continuation does not match this request and its inputs"
             ) from exc

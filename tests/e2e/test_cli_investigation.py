@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -115,6 +116,19 @@ def test_invalid_cli_arguments_use_safe_typed_diagnostics(tmp_path: Path) -> Non
         assert "Usage: flameox analyze" in malformed.stderr
         assert "invalid JSON" in malformed.stderr
         assert "Traceback" not in malformed.stderr
+
+    continuation = base64.urlsafe_b64encode(b"[" * 10_000 + b"0" + b"]" * 10_000).decode()
+    malformed_token = subprocess.run(
+        [executable, "analyze", "artifact.preview", str(artifact), "--continuation", continuation],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert malformed_token.returncode == 1
+    assert json.loads(malformed_token.stderr)["code"] == "INVALID_INPUT"
+    assert "Traceback" not in malformed_token.stderr
 
 
 def test_capture_preserve_restart_and_replay_native_evidence(tmp_path: Path) -> None:
