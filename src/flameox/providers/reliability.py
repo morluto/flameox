@@ -257,7 +257,9 @@ class ReliabilityProvider:
             nodeid: {phase: str(events[-1]["outcome"]) for phase, events in reports.items()}
             for nodeid, reports in phase_events.items()
         }
-        outcomes = self._outcomes(phases)
+        outcomes = {"passed": 0, "failed": 0, "skipped": 0, "errored": 0}
+        for final_reports in phases.values():
+            outcomes[self._pytest_classification(final_reports)] += 1
         outcomes["errored"] += len(collection_errors)
         retried = sum(
             max(0, len(events) - 1)
@@ -471,17 +473,3 @@ class ReliabilityProvider:
             "scope",
         )
         return {"index": index, **{key: event[key] for key in allowed if key in event}}
-
-    @staticmethod
-    def _outcomes(phases: dict[str, dict[str, str]]) -> dict[str, int]:
-        counts = {"passed": 0, "failed": 0, "skipped": 0, "errored": 0}
-        for reports in phases.values():
-            if reports.get("setup") == "failed" or reports.get("teardown") == "failed":
-                counts["errored"] += 1
-            elif reports.get("call") in counts:
-                counts[str(reports["call"])] += 1
-            elif "skipped" in reports.values():
-                counts["skipped"] += 1
-            else:
-                counts["errored"] += 1
-        return counts

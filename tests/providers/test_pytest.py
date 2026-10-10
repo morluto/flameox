@@ -469,6 +469,36 @@ def test_pytest_nonzero_session_exit_remains_visible(tmp_path: Path) -> None:
 
 
 @pytest.mark.golden
+@pytest.mark.parametrize(
+    ("phase", "classification"), [("call", "failed"), ("setup", "errored"), ("teardown", "errored")]
+)
+def test_pytest_interrupted_retry_metrics_match_diagnostic_classification(
+    tmp_path: Path, phase: str, classification: str
+) -> None:
+    events = tmp_path / "pytest.jsonl"
+    payloads = [
+        {"event": "test_collected", "nodeid": "test_retry"},
+        {"event": "test_phase", "nodeid": "test_retry", "phase": phase, "outcome": "rerun"},
+        {"event": "interrupted"},
+    ]
+    events.write_text("\n".join(json.dumps(event) for event in payloads) + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
+    try:
+        result = runtime.analyze(
+            "failures.summary", [PathSource(path=str(events), format="pytest")], {}
+        )
+    finally:
+        runtime.close()
+    metrics = result["blocks"][0]["values"]
+    assert metrics["completion"] == "interrupted"
+    assert metrics[classification] == 1
+    assert sum(metrics[key] for key in ("passed", "failed", "skipped", "errored")) == 1
+    row = next(row for row in result["blocks"][1]["rows"] if row["nodeid"] == "test_retry")
+    assert row["classification"] == classification
+    assert row["failing_phase"] == phase
+
+
+@pytest.mark.golden
 def test_pytest_retries_preserve_failed_attempts(tmp_path: Path) -> None:
     events = tmp_path / "pytest.jsonl"
     payloads = [
