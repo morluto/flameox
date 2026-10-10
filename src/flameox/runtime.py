@@ -737,6 +737,34 @@ class AnalysisRuntime:
                 environment=dict(os.environ),
             )
             identity[executable] = binding.identity.sha256
+        try:
+            if any(
+                source.format in {"perfetto", "chrome-trace", "pytorch", "rocprof-pftrace"}
+                for source in sources
+            ) and capability_id in {
+                "trace.summary",
+                "trace.call_graph",
+                "trace.pytorch",
+                "trace.window",
+            }:
+                identity["perfetto"] = self.perfetto.projection_identity()
+            if any(source.format == "nsight-compute" for source in sources) and capability_id in {
+                "gpu.kernel_metrics",
+                "kernel.compare",
+            }:
+                identity["nsight-compute"] = self.nsight_compute.projection_identity()
+        except ProviderFailure as error:
+            raise RuntimeFailure(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+                details=error.details,
+                remediation=error.remediation,
+            ) from error
+        except (OSError, RuntimeError, DomainError) as error:
+            raise RuntimeFailure(
+                "UNAVAILABLE_CAPABILITY", "Could not identify the selected external trace reader"
+            ) from error
         return identity
 
     def _validate_capture_request(

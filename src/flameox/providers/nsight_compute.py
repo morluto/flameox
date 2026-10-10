@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import shutil
 from pathlib import Path
@@ -7,6 +9,8 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
+from flameox.canonical import digest_model
+from flameox.filesystem import BoundedFileSystem
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.workers.harness import IsolatedWorkerHarness
 from flameox.workers.nsight_compute_contract import (
@@ -33,7 +37,11 @@ def find_report_interface(executable: Path | None = None) -> Path | None:
         if direct.is_file():
             candidates.add(direct)
         if root.is_dir():
-            candidates.update(root.glob("*/extras/python/ncu_report.py"))
+            candidates.update(
+                candidate
+                for candidate in root.glob("*/extras/python/ncu_report.py")
+                if candidate.is_file()
+            )
     return max(candidates, key=_interface_key) if candidates else None
 
 
@@ -62,15 +70,7 @@ class NsightComputeProvider:
         """Resolve the vendor reader used by capture validation and analysis."""
         return self.interface_path or find_report_interface(executable)
 
-    def analyze(
-        self,
-        path: Path,
-        *,
-        max_rows: int,
-        timeout_seconds: float,
-        maximum_rss_bytes: int,
-        maximum_output_bytes: int,
-    ) -> ProviderAnalysis:
+    def _require_interface(self) -> Path:
         executable_text = shutil.which("ncu")
         interface = self.resolve_interface(Path(executable_text) if executable_text else None)
         if interface is None:
@@ -83,6 +83,30 @@ class NsightComputeProvider:
                     )
                 },
             )
+        return interface
+
+    def projection_identity(self) -> str:
+        interface = self._require_interface()
+        canonical = interface.resolve(strict=True)
+        with (
+            BoundedFileSystem((canonical.parent,)).open_regular(canonical) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as stream,
+        ):
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        return digest_model(
+            [str(interface), str(canonical), digest], projection="flameox.nsight-compute.reader/v1"
+        )
+
+    def analyze(
+        self,
+        path: Path,
+        *,
+        max_rows: int,
+        timeout_seconds: float,
+        maximum_rss_bytes: int,
+        maximum_output_bytes: int,
+    ) -> ProviderAnalysis:
+        interface = self._require_interface()
         metric_limit = max(1, (max_rows + 1) // 2)
         observation_limit = max(1, max_rows - metric_limit)
         response = self.harness.run_typed_sync(

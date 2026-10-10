@@ -709,3 +709,85 @@ def test_live_scratch_file_churn_does_not_interrupt_other_analysis(tmp_path: Pat
         workload.terminate()
         workload.wait(timeout=5)
         runtime.close()
+
+
+@pytest.mark.parametrize("provider", ["perfetto", "nsight-compute"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_projection_cache_and_continuations_bind_external_reader_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, symlink: bool
+) -> None:
+    from typing import Any
+
+    from flameox.providers.contracts import ProviderAnalysis
+    from flameox.providers.nsight_compute import NsightComputeProvider
+    from flameox.providers.perfetto import PerfettoProvider
+
+    reader = tmp_path / ("trace_processor_shell" if provider == "perfetto" else "ncu_report.py")
+    reader.write_text("#!/bin/sh\n# first reader\nexit 0\n")
+    reader.chmod(0o755)
+    if symlink:
+        canonical = reader.with_name("canonical-reader")
+        reader.rename(canonical)
+        try:
+            reader.symlink_to(canonical)
+        except OSError:
+            pytest.skip("Creating a symlink requires platform privileges")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    selected: PerfettoProvider | NsightComputeProvider
+    if provider == "perfetto":
+        monkeypatch.setenv("FLAMEOX_TRACE_PROCESSOR", str(reader))
+        selected = runtime.perfetto
+        capability, format_name = "trace.summary", "chrome-trace"
+    else:
+        runtime.nsight_compute.interface_path = reader
+        selected = runtime.nsight_compute
+        capability, format_name = "gpu.kernel_metrics", "nsight-compute"
+    artifact = tmp_path / "input.json"
+    artifact.write_text('{"traceEvents":[]}')
+    sources = [PathSource(path=str(artifact), format=format_name)]
+    calls = 0
+
+    def project(*_args: Any, **_kwargs: Any) -> ProviderAnalysis:
+        nonlocal calls
+        calls += 1
+        identity = selected.projection_identity()
+        return ProviderAnalysis(
+            provider_id=provider,
+            provider_version=identity,
+            blocks=[
+                {
+                    "type": "table",
+                    "rows": [{"index": index, "reader": identity} for index in range(2)],
+                }
+            ],
+            rows_observed=2,
+            complete=True,
+            limitations=[],
+        )
+
+    monkeypatch.setattr(selected, "analyze", project)
+    try:
+        first = runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
+        assert runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1)) == first
+        assert calls == 1
+        reader.write_text("#!/bin/sh\n# replacement reader\nexit 0\n")
+        with pytest.raises(RuntimeFailure) as continuation_failure:
+            runtime.analyze(
+                capability,
+                sources,
+                {},
+                limits=RequestLimits(max_rows=1),
+                continuation=first["continuation"],
+            )
+        assert continuation_failure.value.code == "INVALID_INPUT"
+        second = runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
+        assert calls == 2
+        assert second["blocks"][0]["rows"][0]["reader"] != first["blocks"][0]["rows"][0]["reader"]
+        reader.unlink()
+        with pytest.raises(RuntimeFailure) as missing_failure:
+            runtime.analyze(capability, sources, {}, limits=RequestLimits(max_rows=1))
+        assert missing_failure.value.code == "UNAVAILABLE_CAPABILITY"
+        assert calls == 2
+    finally:
+        runtime.close()

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from flameox.canonical import sha256_id
+from flameox.canonical import digest_model, sha256_id
 from flameox.command_binding import ExecutableResolver
 from flameox.filesystem import open_binary
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
@@ -25,6 +25,13 @@ class PerfettoProvider:
 
     def __init__(self, harness: IsolatedWorkerHarness) -> None:
         self.harness = harness
+
+    def projection_identity(self) -> str:
+        binary = self._binary()
+        return digest_model(
+            [str(binary), str(binary.resolve()), self._identity(binary)],
+            projection="flameox.perfetto.reader/v1",
+        )
 
     def analyze(
         self,
