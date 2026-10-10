@@ -1,6 +1,6 @@
 {
   "name": "flameox",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Configure and update local Flameox MCP clients through uvx",
   "homepage": "https://github.com/morluto/flameox#readme",
   "bugs": {
