@@ -421,13 +421,23 @@ Paginated `flameox evidence query` output also carries an executable `next_page.
 original filters, page size, and snapshot-bound cursor.
 
 `setup` detects supported coding agents and uses one multi-select prompt to choose which global MCP
-client configurations to update. It preserves unrelated JSON or TOML content and writes stdio
+client configurations to update. Detection labels choices without preselecting them. Interactive
+setup shows the resolved paths and launcher and asks before preparing dependencies or writing files;
+`--yes` approves explicit selections. Prompts require terminal input, output, and stderr, and JSON
+mode stays non-interactive. It preserves unrelated JSON or TOML content and writes stdio
 configuration that launches the exact running Flameox release through `uvx` on Python 3.12.
 Changed clients must restart or reconnect. Non-interactive setup requires explicit `--client`
 targets or `--all`; `--yes` never converts detection into consent, and `--dry-run` reports the exact
 paths and actions without mutation. Repeated `--provider` options declare the complete Python
 provider set for the exact version-pinned uvx environment used by the saved launcher.
-OpenCode `opencode.jsonc` files retain their comments and unrelated settings while setup creates or
+Setup, detection, and update follow nonempty `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `GEMINI_CLI_HOME`
+overrides. OpenCode follows `OPENCODE_CONFIG_DIR`, then `OPENCODE_CONFIG`, then the global directory
+under `XDG_CONFIG_HOME` (default `~/.config`). Within a selected directory, an existing
+`opencode.jsonc` wins over `opencode.json`; the global directory also admits `config.json`.
+Relative override paths are relative to the setup/update working directory. These commands edit
+the selected user configuration; they do not establish whether project or administrator policy
+overrides that registration in a running client.
+OpenCode JSON/JSONC files retain their comments and unrelated settings while setup creates or
 updates the `mcp.flameox` entry. Ambiguous duplicate JSON or JSONC keys and configuration nesting beyond
 parser limits are rejected before provider preparation or writes.
 `--timeout-seconds` accepts 1 through 3,600 and defaults to 1,800. Resolver,

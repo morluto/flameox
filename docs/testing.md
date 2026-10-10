@@ -50,6 +50,11 @@ Configuration workflows cover every supported client, explicit rollback, disable
 TOML/JSONC comments, previews, newer-release protection, and invalid registrations. The shim does
 not prove dependency resolution against a live index; real uvx preparation is a separate manual
 check. CI does not establish update behavior on Windows or against private package indexes.
+Installed CLI workflows also verify selected client home/config overrides through setup previews,
+repeat setup, and update discovery. POSIX terminal workflows check cancellation before dependency
+preparation and reject interactive setup with redirected stderr. Inaccessible profile directories
+produce CLI diagnostics without tracebacks. These checks do not establish registration loading by
+every native client or precedence against project and administrator settings.
 
 A separate real stdio workflow starts with reduced server ceilings and verifies inherited defaults,
 pre-execution limit rejection, and exact preservation/replay of lower request limits. Schema

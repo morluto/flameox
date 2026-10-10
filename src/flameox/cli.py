@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn, cast
@@ -148,7 +149,7 @@ def setup(
         explicit_clients = parse_setup_clients(client or [])
         if all_clients and explicit_clients:
             raise SetupFailure("--all cannot be combined with --client.")
-        interactive = _is_interactive()
+        interactive = _is_interactive() and not json_output
         if yes and not (all_clients or explicit_clients):
             raise SetupFailure("--yes requires --client or --all; detection is not consent.")
         if dry_run and not (all_clients or explicit_clients) and (not interactive or json_output):
@@ -175,10 +176,20 @@ def setup(
             if json_output:
                 _write(value)
             else:
+                typer.echo("◆ Flameox dry-run\n  No changes were made.")
                 _write_setup_plan(plans)
                 _write_external_guidance(value)
                 _write_advisories(value)
             return
+
+        if not yes:
+            _write_setup_plan(plans)
+            command, arguments = mcp_launcher(selected)
+            typer.echo(f"  Launcher: {shlex.join([command, *arguments, 'mcp', 'serve'])}")
+            typer.echo("  Prepare and verify the release before writing client configuration.")
+            if not typer.confirm("Apply these changes?", default=False):
+                typer.echo("Flameox setup cancelled. No changes were made.")
+                return
 
         preparation = prepare_providers(plans, selected, timeout_seconds)
         results = apply_client_setup(plans)
@@ -347,14 +358,14 @@ def _select_setup_clients(detected: list[SetupClient]) -> list[SetupClient]:
         questionary.Choice(
             title=_setup_client_choice_title(item, item in detected),
             value=item.value,
-            checked=item in detected,
+            checked=False,
         )
         for item in SETUP_CLIENTS
     ]
     selected = questionary.checkbox(
         "Which agents should use Flameox?",
         choices=choices,
-        instruction="(space to select, enter to configure or update)",
+        instruction="(space to select, enter to review changes, Ctrl-C to cancel)",
         validate=lambda values: bool(values) or "Select at least one agent.",
     ).ask()
     return parse_setup_clients(selected or [])
@@ -374,11 +385,11 @@ def _display_setup_path(path: Path) -> str:
 
 
 def _is_interactive() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    return sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()
 
 
 def _write_setup_plan(plans: list[ClientSetupPlan]) -> None:
-    typer.echo("◆ Flameox dry-run\n  No changes were made.")
+    typer.echo("◆ Flameox setup plan")
     for plan in plans:
         typer.echo(f"  ◇ {plan.client.display_name}: {plan.action}\n    {plan.path}")
 

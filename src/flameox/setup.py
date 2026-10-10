@@ -64,36 +64,63 @@ class SetupClient(StrEnum):
         }[self]
 
     def config_path(self, home: Path) -> Path:
+        claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home)
+        codex_home = Path(os.environ.get("CODEX_HOME") or home / ".codex")
+        gemini_home = Path(os.environ.get("GEMINI_CLI_HOME") or home)
+        opencode_home = Path(
+            os.environ.get("OPENCODE_CONFIG_DIR")
+            or Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "opencode"
+        )
         return {
-            SetupClient.CLAUDE: home / ".claude.json",
+            SetupClient.CLAUDE: claude_home / ".claude.json",
             SetupClient.CURSOR: home / ".cursor" / "mcp.json",
-            SetupClient.OPENCODE: home / ".config" / "opencode" / "opencode.jsonc",
-            SetupClient.CODEX: home / ".codex" / "config.toml",
-            SetupClient.GEMINI: home / ".gemini" / "settings.json",
+            SetupClient.OPENCODE: opencode_home / "opencode.jsonc",
+            SetupClient.CODEX: codex_home / "config.toml",
+            SetupClient.GEMINI: gemini_home / ".gemini" / "settings.json",
             SetupClient.ANTIGRAVITY: home / ".gemini" / "config" / "mcp_config.json",
         }[self]
 
     def is_detected(self, home: Path) -> bool:
-        if self is SetupClient.ANTIGRAVITY:
-            return any(
-                path.exists()
-                for path in (
-                    home / ".agent",
-                    home / ".gemini" / "antigravity",
-                    self.config_path(home),
+        try:
+            if self is SetupClient.ANTIGRAVITY:
+                return any(
+                    path.exists()
+                    for path in (
+                        home / ".agent",
+                        home / ".gemini" / "antigravity",
+                        self.config_path(home),
+                    )
                 )
-            )
-        marker = {
-            SetupClient.CLAUDE: home / ".claude",
-            SetupClient.CURSOR: home / ".cursor",
-            SetupClient.OPENCODE: home / ".config" / "opencode",
-            SetupClient.CODEX: home / ".codex",
-            SetupClient.GEMINI: self.config_path(home),
-        }[self]
-        return marker.exists() or self.config_path(home).exists()
+            path = self.active_config_path(home)
+            marker = {
+                SetupClient.CLAUDE: Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"),
+                SetupClient.CURSOR: home / ".cursor",
+                SetupClient.OPENCODE: path.parent,
+                SetupClient.CODEX: path.parent,
+                SetupClient.GEMINI: path.parent,
+            }[self]
+            return marker.exists() or path.exists()
+        except OSError as error:
+            raise SetupFailure(
+                f"Could not inspect {self.display_name} configuration: {error.filename or home}"
+            ) from error
 
     def active_config_path(self, home: Path) -> Path:
-        return _client_config_path(self, home)
+        try:
+            path = self.config_path(home).absolute()
+            if self is not SetupClient.OPENCODE:
+                return path
+            if not os.environ.get("OPENCODE_CONFIG_DIR") and os.environ.get("OPENCODE_CONFIG"):
+                return Path(os.environ["OPENCODE_CONFIG"]).absolute()
+            names: tuple[str, ...] = ("opencode.jsonc", "opencode.json")
+            if not os.environ.get("OPENCODE_CONFIG_DIR"):
+                names += ("config.json",)
+            candidates = [path.with_name(name) for name in names]
+            return next((item for item in candidates if item.exists() or item.is_symlink()), path)
+        except OSError as error:
+            raise SetupFailure(
+                f"Could not inspect {self.display_name} configuration: {error.filename or home}"
+            ) from error
 
 
 SETUP_CLIENTS = tuple(SetupClient)
@@ -160,13 +187,10 @@ class ClientInstallation:
             args = entry["args"]
             args[5] = requirement
             content = tomlkit.dumps(document)
-        elif self.path.suffix == ".jsonc":
+        elif self.client is SetupClient.OPENCODE:
             content = _jsonc_update_launcher(self.original, requirement)
         else:
-            if self.client is SetupClient.OPENCODE:
-                entry["command"] = updated
-            else:
-                entry["args"] = updated[1:]
+            entry["args"] = updated[1:]
             content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"
         return ClientUpdatePlan(
             ClientSetupPlan(self.client, self.path, action, True, self.original, content),
@@ -445,9 +469,11 @@ def _read_configuration(path: Path) -> str:
 def _read_client_configuration(
     client: SetupClient, path: Path
 ) -> tuple[str | None, MutableMapping[str, Any]]:
-    if not path.exists():
-        return None, tomlkit.document() if client is SetupClient.CODEX else {}
     try:
+        if path.is_symlink():
+            raise SetupFailure(f"Refusing to replace symbolic-link client configuration: {path}")
+        if not path.exists():
+            return None, tomlkit.document() if client is SetupClient.CODEX else {}
         source = _read_configuration(path)
     except (OSError, UnicodeError, DomainError) as error:
         raise SetupFailure(f"Could not read {client.display_name} configuration: {path}") from error
@@ -462,7 +488,7 @@ def _parse_client_configuration(
             tomlkit.parse(source)
             if client is SetupClient.CODEX
             else json5.loads(source, allow_duplicate_keys=False)
-            if path.suffix == ".jsonc"
+            if client is SetupClient.OPENCODE
             else json.loads(source, object_pairs_hook=_unique_json_object)
         )
     except (ValueError, RecursionError, TOMLKitError) as error:
@@ -505,7 +531,7 @@ def _json_plan(
         return source, source or "", "already_current"
     action: Literal["create", "update"] = "update" if existing is not None else "create"
     section["flameox"] = {**existing, **entry} if isinstance(existing, dict) else entry
-    if path.suffix == ".jsonc" and source is not None:
+    if client is SetupClient.OPENCODE and source is not None:
         content = _jsonc_update_mcp_entry(source, section_name, section["flameox"])
     else:
         content = f"{json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True)}\n"
@@ -553,9 +579,7 @@ def plan_client_setup(
     args = [*launcher_args, "mcp", "serve"]
     plans: list[ClientSetupPlan] = []
     for client in clients:
-        path = _client_config_path(client, root)
-        if path.is_symlink():
-            raise SetupFailure(f"Refusing to replace symbolic-link client configuration: {path}")
+        path = client.active_config_path(root)
         if client is SetupClient.CODEX:
             original, content, action = _codex_plan(path, command, args)
         else:
@@ -566,14 +590,6 @@ def plan_client_setup(
     return plans
 
 
-def _client_config_path(client: SetupClient, home: Path) -> Path:
-    if client is not SetupClient.OPENCODE:
-        return client.config_path(home)
-    directory = home / ".config" / "opencode"
-    candidates = [directory / name for name in ("opencode.jsonc", "opencode.json", "config.json")]
-    return next((path for path in candidates if path.exists()), candidates[0])
-
-
 def read_client_installations(
     clients: list[SetupClient], *, home: Path | None = None
 ) -> list[ClientInstallation]:
@@ -581,9 +597,7 @@ def read_client_installations(
     root = home or Path.home()
     installations: list[ClientInstallation] = []
     for client in clients:
-        path = _client_config_path(client, root)
-        if path.is_symlink():
-            raise SetupFailure(f"Refusing to replace symbolic-link client configuration: {path}")
+        path = client.active_config_path(root)
         original, document = _read_client_configuration(client, path)
         section_name = client.server_section
         section = document.get(section_name, {})
