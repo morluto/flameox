@@ -14,6 +14,14 @@ from pydantic import TypeAdapter, ValidationError
 from flameox import __version__
 from flameox.mcp.server import FlameoxServer, run_server
 from flameox.mcp.tool_registry import capability_descriptor, capability_detail
+from flameox.providers.environment import (
+    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
+    MAX_PREPARATION_TIMEOUT_SECONDS,
+    ProviderPreparation,
+    SetupFailure,
+    external_provider_requirements,
+    mcp_launcher,
+)
 from flameox.runtime import AnalysisRuntime
 from flameox.runtime_contracts import (
     CAPABILITIES,
@@ -27,18 +35,12 @@ from flameox.runtime_contracts import (
     WorkloadBudget,
 )
 from flameox.setup import (
-    DEFAULT_PREPARATION_TIMEOUT_SECONDS,
-    MAX_PREPARATION_TIMEOUT_SECONDS,
     SETUP_CLIENTS,
     ClientSetupPlan,
     CliVersionAdvisory,
-    ProviderPreparation,
     SetupClient,
-    SetupFailure,
     apply_client_setup,
     detect_setup_clients,
-    external_provider_requirements,
-    mcp_launcher,
     parse_setup_clients,
     path_cli_version_advisory,
     plan_client_setup,
