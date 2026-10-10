@@ -8,6 +8,7 @@ import pytest
 import tomlkit
 
 from flameox import __version__
+from flameox.providers.environment import SetupFailure
 from flameox.setup import SetupClient, apply_client_setup, plan_client_setup
 
 
@@ -65,6 +66,19 @@ def test_opencode_setup_edits_active_jsonc_without_losing_comments(tmp_path: Pat
     assert document["theme"] == "dark"
     assert document["mcp"]["flameox"]["type"] == "local"
     assert document["mcp"]["flameox"]["command"][-3:] == ["flameox", "mcp", "serve"]
+
+
+@pytest.mark.parametrize("extension", ["json", "jsonc"])
+def test_opencode_setup_rejects_explicit_null_mcp_sections_consistently(
+    tmp_path: Path, extension: str
+) -> None:
+    config = tmp_path / ".config" / "opencode" / f"opencode.{extension}"
+    config.parent.mkdir(parents=True)
+    original = '{"theme":"dark","mcp":null}'
+    config.write_text(original)
+    with pytest.raises(SetupFailure, match="'mcp' must be an object"):
+        plan_client_setup([SetupClient.OPENCODE], [], home=tmp_path)
+    assert config.read_text() == original
 
 
 def test_codex_toml_setup_preserves_comments_and_unrelated_settings(tmp_path: Path) -> None:

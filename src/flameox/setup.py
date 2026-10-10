@@ -382,10 +382,7 @@ def _json_plan(
     else:
         document = {}
     section_name = "mcp" if client is SetupClient.OPENCODE else "mcpServers"
-    section = document.get(section_name)
-    if section is None:
-        section = {}
-        document[section_name] = section
+    section = document.setdefault(section_name, {})
     if not isinstance(section, dict):
         raise SetupFailure(
             f"{client.display_name} configuration {section_name!r} must be an object: {path}"
