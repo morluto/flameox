@@ -361,36 +361,57 @@ class KernelEvidenceProvider:
         rows: list[dict[str, Any]] = []
         observed = 0
         skipped = 0
+        unavailable_count = 0
+        cache_hit_count = 0
+        event_count = 0
         limitations: list[str] = []
         try:
             with path.open("rb") as stream:
-                for raw in stream:
+                while raw := stream.readline(_MAX_LINE_BYTES + 1):
                     if len(raw) > _MAX_LINE_BYTES:
-                        skipped += 1
-                        continue
+                        raise ProviderFailure(
+                            "LIMIT_EXCEEDED", "Triton event line exceeds the byte limit"
+                        )
                     if not raw.strip():
                         continue
-                    if observed >= _MAX_TRITON_EVENTS:
+                    if event_count >= _MAX_TRITON_EVENTS:
                         raise ProviderFailure(
                             "LIMIT_EXCEEDED", "Triton event count exceeds the limit"
                         )
+                    event_count += 1
                     try:
                         event = _object(json.loads(raw), "Triton autotune event")
                         unavailable = event.get("listener_unavailable")
                         if unavailable is not None:
                             limitations.append(_text(unavailable, "listener limitation"))
+                            unavailable_count += 1
                             continue
                         row = _triton_row(event)
                     except (json.JSONDecodeError, UnicodeDecodeError, ProviderFailure):
                         skipped += 1
                         continue
                     observed += 1
+                    cache_hit_count += int(row["cache_hit"])
                     if len(rows) < max_rows:
                         rows.append(row)
         except OSError as error:
             raise ProviderFailure("DECODE_FAILURE", "Triton event stream is unreadable") from error
         if skipped:
-            limitations.append(f"{skipped} invalid or oversized Triton event(s) were omitted.")
+            limitations.append(f"{skipped} invalid Triton event(s) were omitted.")
+        if unavailable_count:
+            limitations.append(
+                f"{unavailable_count} event(s) reported unavailable Triton listener evidence."
+            )
+        if not observed:
+            raise ProviderFailure(
+                "DECODE_FAILURE" if skipped else "UNSUPPORTED_FORMAT",
+                "Triton event stream contains no usable autotune selections",
+                details={
+                    "invalid_event_count": skipped,
+                    "unavailable_event_count": unavailable_count,
+                    "limitations": limitations,
+                },
+            )
         return ProviderAnalysis(
             provider_id="triton-autotune",
             provider_version="listener-v1",
@@ -399,13 +420,13 @@ class KernelEvidenceProvider:
                     "type": "metrics",
                     "values": {
                         "selection_count": observed,
-                        "cache_hit_count": sum(bool(row["cache_hit"]) for row in rows),
+                        "cache_hit_count": cache_hit_count,
                     },
                 },
                 {"type": "table", "rows": rows},
             ],
             rows_observed=observed,
-            complete=observed <= len(rows),
+            complete=observed <= len(rows) and skipped == 0 and unavailable_count == 0,
             limitations=limitations,
         )
 

@@ -14,6 +14,59 @@ from flameox.runtime_contracts import (
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+@pytest.mark.parametrize("field", ["tree", "samples"])
+@pytest.mark.parametrize("invalid", [None, {}, 1, "invalid"])
+def test_v8_profiles_reject_malformed_required_fields(
+    tmp_path: Path, profile_kind: str, field: str, invalid: object
+) -> None:
+    node = {"id": 1, "callFrame": {"functionName": "work"}, "children": [], "selfSize": 0}
+    tree_field = "nodes" if profile_kind == "cpu" else "head"
+    payload: dict[str, object] = {
+        tree_field: [node] if profile_kind == "cpu" else node,
+        "samples": [],
+    }
+    payload[tree_field if field == "tree" else field] = invalid
+    format_name = "cpuprofile" if profile_kind == "cpu" else "heapprofile"
+    profile = tmp_path / f"profile.{format_name}"
+    profile.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                f"{'cpu' if profile_kind == 'cpu' else 'memory'}.hotspots",
+                [PathSource(path=str(profile), format=format_name)],
+                {},
+            )
+        assert failure.value.code == "DECODE_FAILURE"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+def test_v8_profiles_accept_empty_sample_arrays(tmp_path: Path, profile_kind: str) -> None:
+    node = {"id": 1, "callFrame": {"functionName": "work"}, "children": [], "selfSize": 0}
+    payload = (
+        {"nodes": [node], "samples": []} if profile_kind == "cpu" else {"head": node, "samples": []}
+    )
+    format_name = "cpuprofile" if profile_kind == "cpu" else "heapprofile"
+    profile = tmp_path / f"profile.{format_name}"
+    profile.write_text(json.dumps(payload))
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            f"{'cpu' if profile_kind == 'cpu' else 'memory'}.hotspots",
+            [PathSource(path=str(profile), format=format_name)],
+            {},
+        )
+        assert result["coverage"]["complete"] is True
+        assert result["blocks"][0]["values"]["sample_count"] == 0
+    finally:
+        runtime.close()
+
+
+@pytest.mark.process
 def test_cpu_profile_uses_explicit_isolated_worker_without_repository(tmp_path: Path) -> None:
     profile = tmp_path / "cpu.cpuprofile"
     profile.write_text(

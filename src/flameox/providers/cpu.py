@@ -152,7 +152,7 @@ class CpuProfileProvider:
         sample_count = 0
         try:
             with path.open("rb") as stream:
-                for raw in stream:
+                while raw := stream.readline(_MAX_LINE_BYTES + 1):
                     if len(raw) > _MAX_LINE_BYTES:
                         raise ProviderFailure(
                             "LIMIT_EXCEEDED", "Collapsed perf stack line is too large"
@@ -163,7 +163,12 @@ class CpuProfileProvider:
                     stack_text, separator, count_text = line.rpartition(" ")
                     if not separator or not count_text.isdigit() or not stack_text:
                         raise ProviderFailure("DECODE_FAILURE", "Collapsed perf stack is invalid")
-                    count = int(count_text)
+                    try:
+                        count = int(count_text)
+                    except ValueError as error:
+                        raise ProviderFailure(
+                            "DECODE_FAILURE", "Collapsed perf sample count is invalid"
+                        ) from error
                     frames = [frame for frame in stack_text.split(";") if frame]
                     if not frames:
                         raise ProviderFailure(

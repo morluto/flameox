@@ -17,9 +17,9 @@ from flameox.workers.v8_profiles_contract import (
 
 def _parse_cpu(request: V8ProfileRequest) -> V8ProfileResult:
     nodes: dict[int, dict[str, Any]] = {}
-    top_level = _top_level_keys(Path(request.artifact_path))
-    if "nodes" not in top_level or "samples" not in top_level:
-        _malformed("V8 CPU profile must contain nodes and samples arrays.")
+    _validate_profile_root(
+        Path(request.artifact_path), {"nodes": "start_array", "samples": "start_array"}
+    )
     with Path(request.artifact_path).open("rb") as stream:
         for node in ijson.items(stream, "nodes.item"):
             if len(nodes) >= request.max_nodes:
@@ -143,9 +143,7 @@ def _aggregate_cpu(
 
 def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - streaming validation
     path = Path(request.artifact_path)
-    top_level = _top_level_keys(path)
-    if "head" not in top_level or "samples" not in top_level:
-        _malformed("V8 heap profile must contain head and samples.")
+    _validate_profile_root(path, {"head": "start_map", "samples": "start_array"})
     frame_rows: dict[str, dict[str, Any]] = {}
     aggregates: dict[str, dict[str, int]] = {}
     node_count = 0
@@ -291,13 +289,30 @@ def _parse_heap(request: V8ProfileRequest) -> V8ProfileResult:  # noqa: C901 - s
     )
 
 
-def _top_level_keys(path: Path) -> set[str]:
+def _validate_profile_root(path: Path, required: dict[str, str]) -> None:
     keys: set[str] = set()
+    depth = 0
+    pending: str | None = None
     with path.open("rb") as stream:
-        for prefix, event, value in ijson.parse(stream):
-            if prefix == "" and event == "map_key":
-                keys.add(str(value))
-    return keys
+        for event, value in ijson.basic_parse(stream):
+            if depth == 0 and event != "start_map":
+                _malformed("V8 profile root must be an object.")
+            if pending is not None:
+                if pending in required and event != required[pending]:
+                    _malformed(f"V8 profile field {pending!r} has an invalid container type.")
+                pending = None
+            if depth == 1 and event == "map_key":
+                key = str(value)
+                if key in keys:
+                    _malformed(f"V8 profile repeats top-level field {key!r}.")
+                keys.add(key)
+                pending = key
+            if event in {"start_map", "start_array"}:
+                depth += 1
+            elif event in {"end_map", "end_array"}:
+                depth -= 1
+    if not required.keys() <= keys:
+        _malformed(f"V8 profile must contain {', '.join(required)}.")
 
 
 def _call_frame(value: Any) -> dict[str, Any]:

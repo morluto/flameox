@@ -288,6 +288,109 @@ def test_triton_autotune_stream_reports_provider_selection(tmp_path: Path) -> No
     assert winner["config"] == _triton_event()["winner"]
 
 
+def test_triton_listener_counts_cover_events_beyond_the_returned_population(tmp_path: Path) -> None:
+    artifact = tmp_path / "triton.jsonl"
+    event = {**_triton_event(), "cache_hit": True, "duration_ms": None}
+    artifact.write_text((json.dumps(event) + "\n") * 1_002)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        first = runtime.analyze(
+            "triton.autotune",
+            [PathSource(path=str(artifact), format="triton")],
+            {},
+            limits=RequestLimits(max_rows=1),
+        )
+        second = runtime.analyze(
+            "triton.autotune",
+            [PathSource(path=str(artifact), format="triton")],
+            {},
+            limits=RequestLimits(max_rows=1),
+            continuation=first["continuation"],
+        )
+    finally:
+        runtime.close()
+    assert first["blocks"][0]["values"] == {
+        "selection_count": 1_002,
+        "cache_hit_count": 1_002,
+    }
+    assert second["blocks"][0] == first["blocks"][0]
+    assert first["coverage"] == {"rows_returned": 1, "rows_observed": 1_002, "complete": False}
+
+
+@pytest.mark.parametrize(
+    "unusable_record",
+    ["{bad json}", json.dumps({"listener_unavailable": "Listener was unavailable"})],
+)
+def test_triton_listener_retains_valid_selections_without_claiming_complete_coverage(
+    tmp_path: Path, unusable_record: str
+) -> None:
+    artifact = tmp_path / "triton.jsonl"
+    artifact.write_text(json.dumps(_triton_event()) + "\n" + unusable_record + "\n")
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.analyze(
+            "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+        )
+    finally:
+        runtime.close()
+    assert result["blocks"][0]["values"] == {"selection_count": 1, "cache_hit_count": 0}
+    assert result["blocks"][1]["rows"][0]["function_name"] == "workload.kernel"
+    assert result["coverage"] == {"rows_returned": 1, "rows_observed": 1, "complete": False}
+    assert result["continuation"] is None
+    assert result["limitations"]
+
+
+@pytest.mark.parametrize(
+    ("native", "expected_code"),
+    [
+        ("{bad json}\n", "DECODE_FAILURE"),
+        (json.dumps({"listener_unavailable": "Listener was unavailable"}), "UNSUPPORTED_FORMAT"),
+        ("", "UNSUPPORTED_FORMAT"),
+    ],
+)
+def test_triton_listener_without_usable_selections_reports_typed_failure(
+    tmp_path: Path, native: str, expected_code: str
+) -> None:
+    artifact = tmp_path / "triton.jsonl"
+    artifact.write_text(native)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "triton.autotune", [PathSource(path=str(artifact), format="triton")], {}
+            )
+        assert failure.value.code == expected_code
+        assert "no usable autotune selections" in failure.value.message
+        assert artifact.read_text() == native
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "native",
+    ["x" * (64 * 1024 + 1) + "\n", "{}\n" * 100_001],
+    ids=["oversized-line", "invalid-event-ceiling"],
+)
+def test_triton_listener_enforces_native_limits_before_semantic_filtering(
+    tmp_path: Path, native: str
+) -> None:
+    artifact = tmp_path / "triton.jsonl"
+    artifact.write_text(native)
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        with pytest.raises(RuntimeFailure) as failure:
+            runtime.analyze(
+                "triton.autotune",
+                [PathSource(path=str(artifact), format="triton")],
+                {},
+                limits=RequestLimits(max_rows=1),
+            )
+        assert failure.value.code == "LIMIT_EXCEEDED"
+        assert artifact.read_text() == native
+    finally:
+        runtime.close()
+
+
 def test_native_triton_cache_preserves_quantiles_and_derives_lexicographic_winner(
     tmp_path: Path,
 ) -> None:

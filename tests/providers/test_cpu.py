@@ -319,6 +319,23 @@ def test_collapsed_perf_stacks_are_bounded_cpu_evidence(tmp_path: Path) -> None:
             [PathSource(path=str(profile), format="perf", producer="perf")],
             {},
         )
+        profile.write_bytes(b"x" * (256 * 1024 + 1))
+        with pytest.raises(RuntimeFailure) as oversized:
+            runtime.analyze(
+                "cpu.hotspots",
+                [PathSource(path=str(profile), format="perf", producer="perf")],
+                {},
+            )
+        assert oversized.value.code == "LIMIT_EXCEEDED"
+        for count in ("9" * 5_000, "\u00b2"):
+            profile.write_text(f"main;scan {count}\n")
+            with pytest.raises(RuntimeFailure) as malformed:
+                runtime.analyze(
+                    "cpu.hotspots",
+                    [PathSource(path=str(profile), format="perf", producer="perf")],
+                    {},
+                )
+            assert malformed.value.code == "DECODE_FAILURE"
     finally:
         runtime.close()
 
