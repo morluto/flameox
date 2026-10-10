@@ -115,6 +115,7 @@ def test_memray_worker_emits_only_frames_referenced_by_bounded_measurements(tmp_
     assert len(retained) == 100
     request = MemrayWorkerRequest(
         artifact_path=str(capture),
+        metric="memory.high_watermark",
         limits=MemrayExtractionLimits(
             max_input_bytes=1 << 20,
             max_provider_records=10_000,
@@ -132,3 +133,46 @@ def test_memray_worker_emits_only_frames_referenced_by_bounded_measurements(tmp_
         assert 0 < len(measurements) <= 4
         assert {row["frame_id"] for row in frames} == {row["frame_id"] for row in measurements}
         assert result.coverage.frame_contributions_dropped > 0
+
+
+@pytest.mark.process
+@pytest.mark.requires_memray
+def test_memray_retained_projection_uses_its_own_bounds_and_preserves_totals(
+    tmp_path: Path,
+) -> None:
+    import gc
+
+    memray = pytest.importorskip("memray")
+    capture = tmp_path / "mixed.bin"
+
+    def transient_leaf() -> list[bytearray]:
+        return [bytearray(65_536) for _ in range(64)]
+
+    def retained_leaf() -> bytearray:
+        return bytearray(16_384)
+
+    with memray.Tracker(str(capture)):
+        transient = transient_leaf()
+        del transient
+        gc.collect()
+        retained = retained_leaf()
+    assert retained
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        source = PathSource(path=str(capture), format="memray")
+        peak = runtime.analyze("memory.hotspots", [source], {}, limits=RequestLimits(max_rows=1))
+        end = runtime.analyze("memory.retained", [source], {}, limits=RequestLimits(max_rows=1))
+        assert end["blocks"][1]["rows"][0]["function"] == "retained_leaf"
+        for name in (
+            "total_allocated_bytes",
+            "allocation_operations",
+            "retained_end_bytes",
+            "peak_memory_bytes",
+        ):
+            assert peak["blocks"][0]["values"][name] == end["blocks"][0]["values"][name]
+        assert (
+            peak["blocks"][0]["values"]["peak_memory_bytes"]
+            > end["blocks"][0]["values"]["retained_end_bytes"]
+        )
+    finally:
+        runtime.close()

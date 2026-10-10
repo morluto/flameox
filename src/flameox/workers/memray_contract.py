@@ -15,7 +15,6 @@ class MemrayExtractionLimits(ContractModel):
     max_stack_depth: Annotated[int, Field(gt=0, le=4_096)]
     max_aggregate_rows: Annotated[int, Field(gt=0, le=20_000_000)]
     max_output_bytes: Annotated[int, Field(gt=0, le=1 << 40)]
-    temporary_allocation_threshold: Annotated[int, Field(ge=0, le=1_000)] = 1
 
 
 class MemrayMetricCoverage(ContractModel):
@@ -36,14 +35,14 @@ class MemrayMetricCoverage(ContractModel):
 
 
 class MemrayExtractionCoverage(ContractModel):
-    high_watermark: MemrayMetricCoverage
-    retained_end: MemrayMetricCoverage
+    metric: MemrayMetricCoverage
     frame_contributions_dropped: int = Field(ge=0)
     aggregate_rows_dropped: int = Field(ge=0)
 
 
 class MemrayWorkerRequest(ContractModel):
     artifact_path: str = Field(min_length=1, max_length=4_096)
+    metric: Literal["memory.high_watermark", "memory.retained_end"]
     limits: MemrayExtractionLimits
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow.parquet as pq
 
@@ -11,7 +11,6 @@ from flameox.workers.harness import IsolatedWorkerHarness
 from flameox.workers.memray_contract import (
     MEMRAY_WORKER,
     MemrayExtractionLimits,
-    MemrayMetricCoverage,
     MemrayWorkerRequest,
     MemrayWorkerResult,
 )
@@ -40,7 +39,7 @@ class MemrayProvider:
         timeout_seconds: float,
         maximum_rss_bytes: int,
     ) -> ProviderAnalysis:
-        metric = (
+        metric: Literal["memory.high_watermark", "memory.retained_end"] = (
             "memory.high_watermark" if capability_id == "memory.hotspots" else "memory.retained_end"
         )
         aggregate_limit = min(20_000_000, max(4, max_rows * 4))
@@ -54,6 +53,7 @@ class MemrayProvider:
         )
         request = MemrayWorkerRequest(
             artifact_path=str(path),
+            metric=metric,
             limits=limits,
         )
         try:
@@ -77,14 +77,9 @@ class MemrayProvider:
                 ) from error
             raise
 
-        coverage = (
-            result.coverage.high_watermark
-            if capability_id == "memory.hotspots"
-            else result.coverage.retained_end
-        )
+        coverage = result.coverage.metric
         complete = (
-            isinstance(coverage, MemrayMetricCoverage)
-            and coverage.complete
+            coverage.complete
             and result.coverage.aggregate_rows_dropped == 0
             and result.coverage.frame_contributions_dropped == 0
             and observed <= len(rows)

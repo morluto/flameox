@@ -4,7 +4,6 @@ import hashlib
 import heapq
 import importlib.metadata
 from collections.abc import Iterable
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -261,8 +260,6 @@ def _aggregate(
     metric: Literal[
         "memory.high_watermark",
         "memory.retained_end",
-        "memory.allocated",
-        "memory.temporary",
     ],
     state: _AggregationState,
 ) -> tuple[int, MemrayMetricCoverage]:
@@ -358,43 +355,33 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
             with memray.FileReader(request.artifact_path) as reader:
                 metadata = reader.metadata
                 has_allocation_history = metadata.file_format == memray.FileFormat.ALL_ALLOCATIONS
-                _, high_water_coverage = _aggregate(
-                    reader.get_high_watermark_allocation_records(),
-                    metric="memory.high_watermark",
-                    state=state,
-                )
-                retained_end, retained_coverage = _aggregate(
-                    reader.get_leaked_allocation_records(),
-                    metric="memory.retained_end",
-                    state=state,
-                )
-                allocation_coverage: MemrayMetricCoverage | None
-                allocation_operations = 0
-
-                def allocation_records() -> Iterable[Any]:
-                    nonlocal allocation_operations
-                    for record in reader.get_allocation_records():
-                        if int(record.size) <= 0:
-                            continue
-                        allocation_operations += int(record.n_allocations)
-                        yield record
-
-                try:
-                    _allocated_bytes, allocation_coverage = _aggregate(
-                        allocation_records(),
-                        metric="memory.allocated",
+                if request.metric == "memory.high_watermark":
+                    _, metric_coverage = _aggregate(
+                        reader.get_high_watermark_allocation_records(),
+                        metric=request.metric,
                         state=state,
                     )
-                except NotImplementedError:
-                    allocation_coverage = None
-                with suppress(NotImplementedError):
-                    _aggregate(
-                        reader.get_temporary_allocation_records(
-                            threshold=request.limits.temporary_allocation_threshold
-                        ),
-                        metric="memory.temporary",
+                    retained_end = sum(
+                        int(record.size) for record in reader.get_leaked_allocation_records()
+                    )
+                else:
+                    retained_end, metric_coverage = _aggregate(
+                        reader.get_leaked_allocation_records(),
+                        metric=request.metric,
                         state=state,
                     )
+                allocation_operations: int | None = None
+                allocated_bytes: int | None = None
+                if has_allocation_history:
+                    try:
+                        allocated_bytes = allocation_operations = 0
+                        for record in reader.get_allocation_records():
+                            size = int(record.size)
+                            if size > 0:
+                                allocated_bytes += size
+                                allocation_operations += int(record.n_allocations)
+                    except NotImplementedError:
+                        allocated_bytes = allocation_operations = None
                 projection = state.finalize()
         finally:
             state.close()
@@ -438,19 +425,12 @@ def _handle(request: MemrayWorkerRequest, job_root: Path) -> MemrayWorkerResult:
         reader_version=importlib.metadata.version("memray"),
         peak_memory_bytes=int(metadata.peak_memory),
         retained_end_bytes=retained_end,
-        allocation_operations=(
-            allocation_operations
-            if has_allocation_history and allocation_coverage is not None
-            else None
-        ),
-        total_allocated_bytes=(
-            _allocated_bytes if has_allocation_history and allocation_coverage is not None else None
-        ),
+        allocation_operations=allocation_operations,
+        total_allocated_bytes=allocated_bytes,
         capture_records=int(metadata.total_allocations),
         has_native_traces=bool(metadata.has_native_traces),
         coverage=MemrayExtractionCoverage(
-            high_watermark=high_water_coverage,
-            retained_end=retained_coverage,
+            metric=metric_coverage,
             frame_contributions_dropped=projection.frame_contributions_dropped,
             aggregate_rows_dropped=projection.aggregate_rows_dropped,
         ),
