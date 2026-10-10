@@ -588,6 +588,10 @@ class EvidenceRepository:
         ):
             raise RepositoryError("INVALID_INPUT", "created_after must not exceed created_before")
         if not self._require_metadata_or_absent():
+            if cursor is not None:
+                raise RepositoryError(
+                    "INVALID_INPUT", "Repository query continuation has no inventory."
+                )
             return {
                 "evidence": [],
                 "continuation": None,

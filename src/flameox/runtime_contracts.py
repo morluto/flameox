@@ -195,6 +195,21 @@ class CpuHotspotArguments(StrictModel):
         ),
     )
 
+    def validate_formats(self, formats: Iterable[str]) -> None:
+        if self.metric is not None and any(format_name != "pstats" for format_name in formats):
+            raise RuntimeFailure(
+                "INVALID_INPUT",
+                "cpu.hotspots metric selection is supported only for pstats artifacts",
+                details={
+                    "capability_id": "cpu.hotspots",
+                    "option": "metric",
+                    "supported_formats": ["pstats"],
+                },
+                remediation=(
+                    "Omit metric to use the native fixed-weight metric for this CPU format.",
+                ),
+            )
+
 
 class CpuCallGraphArguments(StrictModel):
     function: str | None = Field(

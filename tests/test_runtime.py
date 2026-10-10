@@ -188,6 +188,7 @@ def test_digest_mismatch_fails_before_decoding(tmp_path: Path) -> None:
     runtime.close()
 
 
+@pytest.mark.process
 def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = AnalysisRuntime(
@@ -212,7 +213,18 @@ def test_direct_capture_reports_progress_and_preserves_native_output(tmp_path: P
             assert updates == [(0, 1), (1, 1)]
             provider_id = result["provider"]["id"]
             result["provider"]["id"] = "caller-mutated"
+            source = PathSource(
+                path=result["inputs"][0]["path"], format=result["inputs"][0]["format"]
+            )
+            sibling = runtime.analyze(
+                "artifact.preview", [source], {}, limits=RequestLimits(max_rows=1)
+            )
+            assert sibling["analysis_id"] != result["analysis_id"]
             preserved = runtime.preserve_evidence(result["analysis_id"])
+            assert Path(source.path).is_file()
+            runtime.preserve_evidence(sibling["analysis_id"])
+            assert not Path(source.path).exists()
+            assert not list(runtime.scratch.glob("capture-*"))
             manifest = runtime.read_evidence(preserved["evidence_id"])
             assert {item["role"] for item in manifest["body"]["artifacts"]} == {
                 "capture-0001/stdout",

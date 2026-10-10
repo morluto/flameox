@@ -18,6 +18,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -249,9 +250,7 @@ class AnalysisRuntime:
             self._evict_oldest_analysis()
 
     def _cached_projection(self, key: str) -> ProviderAnalysis | None:
-        projections = getattr(self, "projections", None)
-        if projections is None:
-            projections = self.projections = OrderedDict()
+        projections = self.projections
         cached = projections.get(key)
         if cached is None:
             return None
@@ -259,9 +258,7 @@ class AnalysisRuntime:
         return self._copy_provider_analysis(cached[0])
 
     def _cache_projection(self, key: str, analysis: ProviderAnalysis) -> None:
-        projections = getattr(self, "projections", None)
-        if projections is None:
-            projections = self.projections = OrderedDict()
+        projections = self.projections
         copied = self._copy_provider_analysis(analysis)
         size = len(
             canonical_bytes(
@@ -290,7 +287,7 @@ class AnalysisRuntime:
         return ProviderAnalysis(
             provider_id=analysis.provider_id,
             provider_version=analysis.provider_version,
-            blocks=cast(list[dict[str, Any]], json.loads(json.dumps(analysis.blocks))),
+            blocks=deepcopy(analysis.blocks),
             rows_observed=analysis.rows_observed,
             complete=analysis.complete,
             limitations=list(analysis.limitations),
@@ -335,7 +332,7 @@ class AnalysisRuntime:
             retained = any(
                 self._paths_overlap(source.path, root)
                 for analysis in self.analyses.values()
-                if analysis is not cached
+                if analysis is not cached and analysis.preserved is None
                 for source in analysis.sources
             )
             if not retained and not any(
@@ -500,20 +497,8 @@ class AnalysisRuntime:
                     ),
                 },
             )
-        if (
-            isinstance(validated, CpuHotspotArguments)
-            and validated.metric is not None
-            and any(item.format != "pstats" for item in resolved)
-        ):
-            raise RuntimeFailure(
-                "INVALID_INPUT",
-                "cpu.hotspots metric selection is supported only for pstats artifacts",
-                details={
-                    "capability_id": capability.id,
-                    "option": "metric",
-                    "accepted_formats": ["pstats"],
-                },
-            )
+        if isinstance(validated, CpuHotspotArguments):
+            validated.validate_formats(item.format for item in resolved)
         identity = {
             "capability_id": capability_id,
             "inputs": [
@@ -756,7 +741,9 @@ class AnalysisRuntime:
         capture_arguments = self._capture_arguments(
             target.provider_id, target.capture_arguments, capability_id=capability_id
         )
-        TypeAdapter(capability.model).validate_python(target.analysis_arguments)
+        analysis_arguments = TypeAdapter(capability.model).validate_python(
+            target.analysis_arguments
+        )
         output_formats = set(self._capture_output_formats(target.provider_id))
         compatible_provider_ids = [
             contract.id for contract in compatible_capture_providers(capability)
@@ -776,6 +763,8 @@ class AnalysisRuntime:
                     "compatible_capture_providers": compatible_provider_ids,
                 },
             )
+        if isinstance(analysis_arguments, CpuHotspotArguments):
+            analysis_arguments.validate_formats(output_formats)
         cases = experiment.cases if experiment else [ExperimentCase(name="single")]
         source_count = (
             len(cases)
@@ -1917,9 +1906,7 @@ class AnalysisRuntime:
     def rescue_evidence(self, analysis_id: str, destination: str) -> dict[str, Any]:
         selected = self._rescue_destination(destination)
         rescue_key = (analysis_id, str(selected))
-        rescues = getattr(self, "rescues", None)
-        if rescues is None:
-            rescues = self.rescues = OrderedDict()
+        rescues = self.rescues
         previous = rescues.get(rescue_key)
         cached = self.analyses.get(analysis_id)
         if cached is None and previous is None:
@@ -2009,11 +1996,7 @@ class AnalysisRuntime:
             raise RuntimeFailure("INVALID_INPUT", "Rescue destination must be an absolute path")
         selected = Path(os.path.abspath(supplied))
         configured = self.repository.root
-        configured_physical = configured.resolve(strict=False)
-        selected_physical = selected.resolve(strict=False)
-        if self._paths_overlap(selected, configured) or self._paths_overlap(
-            selected_physical, configured_physical
-        ):
+        if self._paths_overlap(selected, configured):
             raise RuntimeFailure(
                 "INVALID_INPUT", "Rescue destination must be outside the configured repository"
             )
@@ -2194,7 +2177,7 @@ class AnalysisRuntime:
 
     @staticmethod
     def _copy_result(result: Mapping[str, Any]) -> dict[str, Any]:
-        return cast(dict[str, Any], json.loads(json.dumps(result)))
+        return deepcopy(dict(result))
 
     def query_evidence(
         self,
@@ -2837,12 +2820,23 @@ class AnalysisRuntime:
         provider_version = binding.identity.sha256
         key = (source.sha256, provider_version)
         cached = self.scratch_artifacts.get(key)
-        if cached is not None and cached.is_dir():
-            self.scratch_artifacts.move_to_end(key)
-            return cached, provider_version
-        conversion_root = self.scratch / "conversions"
-        conversion_root.mkdir(exist_ok=True)
-        output_base = conversion_root / f"nsys-{source.sha256[:20]}-{provider_version[:12]}"
+        if cached is not None:
+            exported = next(
+                (
+                    path
+                    for path in (cached / "report.parquetdir", cached / "report")
+                    if path.is_dir()
+                ),
+                None,
+            )
+            if exported is not None:
+                self.scratch_artifacts.move_to_end(key)
+                return exported, provider_version
+            self._remove_scratch_artifact(self.scratch_artifacts.pop(key))
+        conversions = self.scratch / "conversions"
+        conversions.mkdir(exist_ok=True)
+        conversion_root = Path(tempfile.mkdtemp(prefix="nsys-", dir=conversions))
+        output_base = conversion_root / "report"
         request = ExecutionRequest(
             argv=(
                 str(binding.invocation_path),
@@ -2872,15 +2866,24 @@ class AnalysisRuntime:
                 maximum_writable_growth_bytes=limits.max_output_bytes,
             ),
         )
-        self.broker.run_sync(request)
-        candidates = (output_base.with_suffix(".parquetdir"), output_base)
-        exported = next((candidate for candidate in candidates if candidate.is_dir()), None)
-        if exported is None:
-            raise RuntimeFailure(
-                "EXECUTION_FAILURE", "Nsight Systems did not create a parquetdir export"
-            )
-        self._cache_scratch_artifact(key, exported)
-        return exported, provider_version
+        try:
+            outcome = self.broker.run_sync(request)
+            if process_exit_code(outcome.process.termination) != 0:
+                raise RuntimeFailure(
+                    "DECODE_FAILURE",
+                    "Nsight Systems export failed before producing trustworthy evidence",
+                )
+            candidates = (output_base.with_suffix(".parquetdir"), output_base)
+            exported = next((candidate for candidate in candidates if candidate.is_dir()), None)
+            if exported is None:
+                raise RuntimeFailure(
+                    "EXECUTION_FAILURE", "Nsight Systems did not create a parquetdir export"
+                )
+            self._cache_scratch_artifact(key, conversion_root)
+            return exported, provider_version
+        except BaseException:
+            shutil.rmtree(conversion_root, ignore_errors=True)
+            raise
 
     def _xctrace_toc(self, source: NativeSource, limits: RequestLimits) -> tuple[Path, str]:
         binding = ExecutableResolver().require_host_tool(
@@ -2889,12 +2892,15 @@ class AnalysisRuntime:
         provider_version = binding.identity.sha256
         key = (source.sha256, f"xctrace-toc:{provider_version}")
         cached = self.scratch_artifacts.get(key)
-        if cached is not None and cached.is_file():
+        if cached is not None and (cached / "toc.xml").is_file():
             self.scratch_artifacts.move_to_end(key)
-            return cached, provider_version
-        conversion_root = self.scratch / "conversions"
-        conversion_root.mkdir(exist_ok=True)
-        output = conversion_root / f"xctrace-{source.sha256[:20]}-{provider_version[:12]}.xml"
+            return cached / "toc.xml", provider_version
+        if cached is not None:
+            self._remove_scratch_artifact(self.scratch_artifacts.pop(key))
+        conversions = self.scratch / "conversions"
+        conversions.mkdir(exist_ok=True)
+        conversion_root = Path(tempfile.mkdtemp(prefix="xctrace-", dir=conversions))
+        output = conversion_root / "toc.xml"
         request = ExecutionRequest(
             argv=(
                 str(binding.invocation_path),
@@ -2921,13 +2927,21 @@ class AnalysisRuntime:
                 maximum_writable_growth_bytes=limits.max_output_bytes,
             ),
         )
-        self.broker.run_sync(request)
-        if not output.is_file():
-            raise RuntimeFailure(
-                "EXECUTION_FAILURE", "xctrace did not create a table-of-contents export"
-            )
-        self._cache_scratch_artifact(key, output)
-        return output, provider_version
+        try:
+            outcome = self.broker.run_sync(request)
+            if process_exit_code(outcome.process.termination) != 0:
+                raise RuntimeFailure(
+                    "DECODE_FAILURE", "xctrace export failed before producing trustworthy evidence"
+                )
+            if not output.is_file():
+                raise RuntimeFailure(
+                    "EXECUTION_FAILURE", "xctrace did not create a table-of-contents export"
+                )
+            self._cache_scratch_artifact(key, conversion_root)
+            return output, provider_version
+        except BaseException:
+            shutil.rmtree(conversion_root, ignore_errors=True)
+            raise
 
     def _capture_resource_policy(
         self, limits: RequestLimits, *, budget: WorkloadBudget, writable_root: Path

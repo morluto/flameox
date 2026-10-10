@@ -68,6 +68,11 @@ An em dash means callers provide an explicit artifact path; it does not mean
 the format is unsupported. The offline inference readers omit prompts,
 generations, error text, endpoints, tools, payloads, and prefix-hash values.
 
+CPU hotspot metric selection applies only to pstats. Node, py-spy, and perf
+captures reject an explicit metric before running the workload; omit it to use
+the native fixed weight. Saved artifacts can be reanalyzed with corrected
+arguments without rerunning capture.
+
 V8 CPU and heap hotspot rows include their extracted function, file, frame identity,
 symbolization state, and native zero-based line/column coordinates. Omitted coordinates
 use `-1` for unavailable; explicitly exported zero remains a valid first line or column.
@@ -95,6 +100,9 @@ use Triton's autotuner; Flameox does not invent configurations or patch kernels.
 An emitted cache without autotune records produces an explicit analysis failure.
 Pytest capture runs an explicit `python -m pytest` target with a request-bound,
 bounded event plugin.
+Capture checks that pytest 8.3 or newer is available in that exact workload
+interpreter before invoking the collector; installing pytest in the server
+interpreter alone does not satisfy this requirement.
 
 `failures.summary` scans the complete bounded pytest event artifact for aggregate outcomes, but its
 table projects only failed, errored, interrupted, and unexecuted identities. Failed collection

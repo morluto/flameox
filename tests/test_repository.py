@@ -194,6 +194,12 @@ def test_repeated_preservation_revalidates_bundle_and_returns_defensive_referenc
 def test_query_pagination_is_deterministic_and_inventory_bound(tmp_path: Path) -> None:
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
+        assert runtime.query_evidence()["inventory_status"] == "absent"
+        with pytest.raises(RuntimeFailure) as absent_inventory:
+            runtime.query_evidence(cursor="invalid-cursor")
+        assert absent_inventory.value.code == "INVALID_INPUT"
+        assert not (tmp_path / ".flameox").exists()
+
         for index in range(3):
             artifact = tmp_path / f"samples-{index}.json"
             artifact.write_text(json.dumps([{"value": index}]))

@@ -63,6 +63,23 @@ release or a full provider capture lifecycle. A passing suite also does not
 prove every publication boundary, provider, package-install route, or platform.
 Name the missing evidence when it matters to a change.
 
+The Node CPU workflow captures a real native profile over MCP stdio, rejects
+Python-only metric options before workload execution, and reanalyzes preserved
+evidence after an invalid analysis request and a CLI restart without rerunning
+the workload. It skips when Node.js is unavailable. V8 import regressions reject
+malformed required fields while retaining valid empty sample arrays.
+An optional CPU-only PyTorch stdio workflow captures native operator evidence,
+then replays summary, caller edges, operator rows, and a time window from that
+same saved trace. It requires PyTorch and a local Perfetto Trace Processor;
+the workload marker proves replay does not execute the workload again.
+
+The capture preservation workflow checks shared scratch ownership: preserving one
+analysis retains native files needed by an unpreserved sibling, and preserving
+the last sibling releases them. Decoder fault-injection workflows run real
+subprocesses that export XML or Parquet, then fail, omit required output, or time
+out. They verify failed output cleanup, retry, and successful conversion reuse;
+they do not establish native xctrace or Nsight Systems exporter compatibility.
+
 Known proof gaps include:
 
 - Cache bounds and eviction internals lack public-workflow proof.
@@ -73,7 +90,7 @@ Known proof gaps include:
 - A managed dependency reconnect branch and live package installation remain
   unproved.
 - Vendor tools, optional hardware, permissions, and other platforms are not
-  exercised by the ordinary CI suite. There is no retained live Node capture test.
+  exercised by the ordinary CI suite.
 
 Provider tests should identify their actual artifact or host requirement. A
 skip because a provider or host capability is unavailable is not provider

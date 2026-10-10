@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import venv
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,42 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
+
+
+@pytest.mark.process
+def test_pytest_capture_checks_the_exact_workload_interpreter_dependency(tmp_path: Path) -> None:
+    environment = tmp_path / "without-pytest"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    marker = tmp_path / "collected"
+    test_file = tmp_path / "test_marker.py"
+    test_file.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "def test_work():\n    assert True\n"
+    )
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[str(python), "-m", "pytest", str(test_file)],
+                        cwd=str(tmp_path),
+                        provider_id="pytest",
+                    ),
+                    "failures.summary",
+                )
+            assert failure.value.code == "UNAVAILABLE_CAPABILITY"
+            assert "pytest >=8.3" in failure.value.message
+            assert str(python) in failure.value.message
+            assert not marker.exists()
+            assert not (tmp_path / "store").exists()
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
 
 
 @pytest.mark.golden

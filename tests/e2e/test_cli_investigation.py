@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -317,3 +318,160 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
             await session.validate_tool_result("summarize_coverage", replay)
 
     anyio.run(replay_over_stdio)
+
+
+def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for native CPU profile capture")
+    store = tmp_path / "evidence"
+    marker = tmp_path / "workload-runs"
+    workload = tmp_path / "workload.js"
+    workload.write_text(
+        "const fs = require('node:fs');\n"
+        f"fs.appendFileSync({json.dumps(str(marker))}, 'run\\n');\n"
+        "function work() {\n"
+        "  const end = Date.now() + 100;\n"
+        "  let total = 0;\n"
+        "  while (Date.now() < end) total += Math.sqrt(total + 1);\n"
+        "  return total;\n"
+        "}\nconsole.log(work());\n"
+    )
+
+    async def exercise() -> tuple[str, list[dict[str, Any]]]:
+        parameters = StdioServerParameters(
+            command=str(Path(sys.executable).with_name("flameox")),
+            args=["mcp", "serve"],
+            cwd=tmp_path,
+            env={"FLAMEOX_DATA_DIR": str(store)},
+        )
+        async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+            await session.initialize()
+            capture_arguments = {
+                "target": {"argv": [node, str(workload)], "cwd": str(tmp_path)},
+                "provider": {"kind": "node-cpu-profile"},
+                "preserve": True,
+            }
+            rejected_capture = await session.call_tool(
+                "capture_cpu_hotspots",
+                {**capture_arguments, "metric": "self_time_seconds"},
+            )
+            assert rejected_capture.is_error is True
+            assert rejected_capture.structured_content is not None
+            assert rejected_capture.structured_content["code"] == "INVALID_INPUT"
+            assert not marker.exists()
+
+            captured = await session.call_tool("capture_cpu_hotspots", capture_arguments)
+            await session.validate_tool_result("capture_cpu_hotspots", captured)
+            assert captured.is_error is False
+            assert captured.structured_content is not None
+            payload = captured.structured_content
+            assert payload["provider"]["id"] == "v8-cpu-profile"
+            assert payload["blocks"][0]["values"]["sample_count"] > 0
+            assert payload["capture"]["executions"][0]["status"] == "succeeded"
+            inline = captured.content[0]
+            assert isinstance(inline, TextContent)
+            assert json.loads(inline.text) == payload
+            assert marker.read_text() == "run\n"
+            evidence_id = payload["preserved"]["evidence_id"]
+            inspected = await session.call_tool("inspect_evidence", {"evidence_id": evidence_id})
+            assert inspected.structured_content is not None
+            sources = inspected.structured_content["analysis_sources"]
+            rejected_analysis = await session.call_tool(
+                "rank_cpu_hotspots", {"sources": sources, "metric": "self_time_seconds"}
+            )
+            assert rejected_analysis.is_error is True
+            assert rejected_analysis.structured_content is not None
+            assert rejected_analysis.structured_content["code"] == "INVALID_INPUT"
+            assert marker.read_text() == "run\n"
+
+            replayed = await session.call_tool("rank_cpu_hotspots", {"sources": sources})
+            await session.validate_tool_result("rank_cpu_hotspots", replayed)
+            assert replayed.is_error is False
+            assert replayed.structured_content is not None
+            assert replayed.structured_content["blocks"] == payload["blocks"]
+            assert marker.read_text() == "run\n"
+            return evidence_id, payload["blocks"]
+
+    evidence_id, blocks = anyio.run(exercise)
+    restarted = run_cli(store, "analyze", "cpu.hotspots", "--evidence", evidence_id)
+    assert restarted["blocks"] == blocks
+    assert marker.read_text() == "run\n"
+
+
+@pytest.mark.optional
+@pytest.mark.requires_torch
+def test_torch_cpu_capture_replays_all_trace_projections_without_rerunning(tmp_path: Path) -> None:
+    binary = (
+        os.environ.get("FLAMEOX_TRACE_PROCESSOR")
+        or shutil.which("trace_processor_shell")
+        or shutil.which("trace_processor")
+    )
+    if binary is None:
+        pytest.skip("A local Perfetto Trace Processor executable is required")
+    store = tmp_path / "evidence"
+    marker = tmp_path / "workload-runs"
+    workload = tmp_path / "torch_workload.py"
+    workload.write_text(
+        "import torch\n"
+        "from pathlib import Path\n"
+        "from flameox.sdk import torch_profiler\n"
+        f"with Path({str(marker)!r}).open('a') as stream: stream.write('run\\n')\n"
+        "left = torch.rand((64, 64))\nright = torch.rand((64, 64))\n"
+        "with torch_profiler() as session:\n"
+        "    for _ in range(2):\n"
+        "        with session.phase('multiply'):\n"
+        "            result = left @ right\n"
+        "        session.step()\n"
+    )
+
+    async def exercise() -> None:
+        parameters = StdioServerParameters(
+            command=str(Path(sys.executable).with_name("flameox")),
+            args=["mcp", "serve"],
+            cwd=tmp_path,
+            env={"FLAMEOX_DATA_DIR": str(store), "FLAMEOX_TRACE_PROCESSOR": binary},
+        )
+        async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+            await session.initialize()
+            captured = await session.call_tool(
+                "capture_trace_pytorch",
+                {
+                    "target": {"argv": [sys.executable, str(workload)], "cwd": str(tmp_path)},
+                    "provider": {
+                        "kind": "torch-profiler",
+                        "activities": ["cpu"],
+                        "record_shapes": True,
+                    },
+                    "preserve": True,
+                },
+            )
+            await session.validate_tool_result("capture_trace_pytorch", captured)
+            assert not captured.is_error
+            assert captured.structured_content is not None
+            payload = captured.structured_content
+            assert payload["status"] == "complete"
+            assert any(row["name"] == "aten::mm" for row in payload["blocks"][1]["rows"])
+            inspected = await session.call_tool(
+                "inspect_evidence", {"evidence_id": payload["preserved"]["evidence_id"]}
+            )
+            assert inspected.structured_content is not None
+            for tool in (
+                "summarize_trace",
+                "inspect_trace_call_graph",
+                "summarize_pytorch_trace",
+                "inspect_trace_window",
+            ):
+                arguments = {"sources": inspected.structured_content["analysis_sources"]}
+                if tool == "inspect_trace_window":
+                    arguments.update(start_ns=0, end_ns=2**53 - 1)
+                replayed = await session.call_tool(tool, arguments)
+                await session.validate_tool_result(tool, replayed)
+                assert not replayed.is_error
+                assert replayed.structured_content is not None
+                assert replayed.structured_content["blocks"][1]["rows"]
+                if tool == "summarize_pytorch_trace":
+                    assert replayed.structured_content["blocks"] == payload["blocks"]
+                assert marker.read_text() == "run\n"
+
+    anyio.run(exercise)

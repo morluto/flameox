@@ -25,6 +25,7 @@ SYSTEM_PROVIDER_GUIDANCE = {
 }
 
 WORKLOAD_PYTHON_REQUIREMENTS = {
+    "pytest": ("pytest", "pytest", ">=8.3"),
     "coverage": ("coverage", "coverage", ">=7.14,<8"),
     "memray": ("memray", "memray", ">=1.17"),
     "torch-profiler": ("torch", "torch", ">=2.7"),
