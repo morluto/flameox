@@ -127,6 +127,8 @@ packages = ["flameox"]
 
 [[tool.mypy.overrides]]
 module = [
+    "aiperf",
+    "aiperf.*",
     "ijson",
     "ijson.*",
     "memray",

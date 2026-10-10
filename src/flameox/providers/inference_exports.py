@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import statistics
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -13,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from flameox.canonical import digest_model, sha256_id
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
-from flameox.providers.inference_comparison import assess_comparison, field_identities
+from flameox.providers.inference_comparison import assess_comparison, field_identities, mean_ratios
 
 _VLLM_MAX_BYTES = 16 * 1024 * 1024
 _SGLANG_MAX_BYTES = 1024 * 1024
@@ -584,13 +583,8 @@ class InferenceExportProvider:
             raise ProviderFailure(
                 "INVALID_INPUT", f"Every input must expose the numeric metric {metric}"
             )
-        try:
-            means = [statistics.fmean(values) for values in series]
-        except OverflowError as error:
-            raise ProviderFailure(
-                "LIMIT_EXCEEDED", "Inference comparison mean exceeds the finite numeric range"
-            ) from error
-        baseline = means[baseline_index]
+        comparisons = mean_ratios(series, baseline_index)
+        baseline = comparisons[baseline_index][0]
         compatibility, identity_differences, identity_unavailable = assess_comparison(
             analyses, arguments
         )
@@ -598,16 +592,7 @@ class InferenceExportProvider:
         for index, values in enumerate(series):
             if index == baseline_index:
                 continue
-            candidate = means[index]
-            ratio = candidate / baseline if baseline else None
-            if (
-                not math.isfinite(baseline)
-                or not math.isfinite(candidate)
-                or (ratio is not None and not math.isfinite(ratio))
-            ):
-                raise ProviderFailure(
-                    "LIMIT_EXCEEDED", "Inference comparison exceeds the finite numeric range"
-                )
+            candidate, ratio = comparisons[index]
             rows.append(
                 {
                     "metric": metric,

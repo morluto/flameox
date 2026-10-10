@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -355,6 +356,9 @@ def test_aiperf_runtime_comparison_uses_prompt_free_request_metrics(tmp_path: Pa
                         "turn_index": index,
                         "request_start_ns": 1_000 + index,
                         "request_end_ns": 1_000_000 + latency_ms * 1_000_000,
+                        "worker_id": "worker-0",
+                        "record_processor_id": "processor-0",
+                        "benchmark_phase": "profiling",
                         "was_cancelled": False,
                     },
                     "metrics": {
@@ -445,46 +449,80 @@ def test_aiperf_analysis_reports_missing_optional_package_as_unavailable(
 
 @pytest.mark.optional
 @pytest.mark.process
-def test_aiperf_export_is_projected_without_prompts_or_repository(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["exact", "scaled_overflow", "giant_tokens", "giant_duration"])
+def test_aiperf_export_is_projected_without_prompts_or_repository(
+    tmp_path: Path, mode: str
+) -> None:
     pytest.importorskip("aiperf")
     export = tmp_path / "profile_export.jsonl"
-    export.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "session_num": 7,
-                    "x_request_id": "request-7",
-                    "conversation_id": "conversation-a",
-                    "turn_index": 2,
-                    "request_start_ns": 125,
-                    "request_end_ns": 10_000_125,
-                    "worker_id": "worker-0",
-                    "record_processor_id": "processor-0",
-                    "benchmark_phase": "profiling",
-                    "was_cancelled": False,
-                },
-                "metrics": {
-                    "input_sequence_length": {"value": 20, "unit": "tokens"},
-                    "output_sequence_length": {"value": 3, "unit": "tokens"},
-                    "time_to_first_token": {"value": 2, "unit": "ms"},
-                    "request_latency": {"value": 10, "unit": "ms"},
-                },
-                "error": None,
-                "raw_prompt": "must never leave the isolated reader",
-            }
-        )
-        + "\n"
-    )
+    payload: dict[str, Any] = {
+        "metadata": {
+            "session_num": 7,
+            "x_request_id": "request-7",
+            "conversation_id": "conversation-a",
+            "turn_index": 2,
+            "request_start_ns": 125,
+            "request_end_ns": 10_000_125,
+            "worker_id": "worker-0",
+            "record_processor_id": "processor-0",
+            "benchmark_phase": "profiling",
+            "was_cancelled": False,
+        },
+        "metrics": {
+            "input_sequence_length": {"value": 20, "unit": "tokens"},
+            "output_sequence_length": {"value": 3, "unit": "tokens"},
+            "time_to_first_token": {"value": 2, "unit": "ms"},
+            "request_latency": {"value": 10, "unit": "ms"},
+        },
+        "error": None,
+        "raw_prompt": "must never leave the isolated reader",
+    }
+    metrics = payload["metrics"]
+    if mode == "exact":
+        metrics["input_sequence_length"]["value"] = 2**53 + 1
+        metrics["output_sequence_length"]["value"] = 2
+        metrics["request_latency"] = {"value": 2**53 + 1, "unit": "ns"}
+    elif mode == "scaled_overflow":
+        metrics["request_latency"] = {"value": 1e308, "unit": "s"}
+    elif mode == "giant_tokens":
+        metrics["input_sequence_length"]["value"] = 10**400
+    else:
+        metrics["request_latency"] = {"value": 10**400, "unit": "ns"}
+    export.write_text(json.dumps(payload) + "\n")
+    native = export.read_bytes()
     runtime = AnalysisRuntime(evidence_directory=tmp_path / ".flameox")
     try:
+        if mode in {"scaled_overflow", "giant_duration"}:
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "inference.summary", [PathSource(path=str(export), format="aiperf")], {}
+                )
+            assert failure.value.code == "DECODE_FAILURE"
+            assert export.read_bytes() == native
+            assert not (tmp_path / ".flameox").exists()
+            return
         result = runtime.analyze(
             "inference.summary",
             [PathSource(path=str(export), format="aiperf", producer="aiperf")],
             {},
         )
+        if mode == "giant_tokens":
+            with pytest.raises(RuntimeFailure) as failure:
+                runtime.analyze(
+                    "inference.compare",
+                    [PathSource(path=str(export), format="aiperf")] * 2,
+                    {"metric": "input_tokens"},
+                )
+            assert failure.value.code == "LIMIT_EXCEEDED"
     finally:
         runtime.close()
 
+    row = result["blocks"][1]["rows"][0]
+    assert row["input_tokens"] == str(2**53 + 1 if mode == "exact" else 10**400)
+    if mode == "exact":
+        assert row["latency_ns"] == str(2**53 + 1)
+        assert row["tpot_ns"] == 2**53 + 1 - 2_000_000
+    assert export.read_bytes() == native
     assert result["provider"]["id"] == "aiperf"
     assert result["blocks"][0]["values"]["median_ttft_ns"] == 2_000_000
     assert result["blocks"][1]["rows"][0]["source_request_id"] == "conversation-a:2"

@@ -4,6 +4,8 @@ import hashlib
 import importlib.metadata
 import math
 import os
+import sys
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -25,7 +27,7 @@ from flameox.workers.protocol import (
 )
 
 if TYPE_CHECKING:
-    from aiperf.common.models import MetricRecordInfo, MetricValue  # type: ignore[import-not-found]
+    from aiperf.common.models import MetricRecordInfo, MetricValue
 
 _ERROR_TYPES = {
     "AuthenticationError": "authentication",
@@ -40,28 +42,32 @@ _ERROR_TYPES = {
     "TimeoutError": "timeout",
     "UnavailableError": "unavailable",
 }
-_TIME_FACTORS = {"ns": 1.0, "us": 1_000.0, "µs": 1_000.0, "ms": 1_000_000.0, "s": 1e9}
+_TIME_FACTORS = {"ns": 1, "us": 1_000, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
 
 
 def _duration_ns(metric: MetricValue | None) -> int | None:
     if metric is None or isinstance(metric.value, bool):
         return None
-    value = float(metric.value)
+    value: int | float = metric.value
     factor = _TIME_FACTORS.get(metric.unit)
-    if factor is None or not math.isfinite(value) or value < 0:
+    if factor is None or value < 0:
         return None
-    return round(value * factor)
+    scaled = value * factor
+    if not 0 <= scaled <= sys.float_info.max:
+        raise ValueError("duration exceeds finite nanosecond bounds")
+    return round(scaled)
 
 
 def _token_count(metrics: dict[str, MetricValue], name: str) -> int:
     metric = metrics.get(name)
     if metric is None or metric.unit != "tokens" or isinstance(metric.value, bool):
         raise ValueError(f"{name} must be reported in tokens")
-    value = float(metric.value)
-    rounded = round(value)
-    if not math.isfinite(value) or value < 0 or value != rounded:
+    value: int | float = metric.value
+    if value < 0 or (
+        isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())
+    ):
         raise ValueError(f"{name} must be a non-negative integer")
-    return rounded
+    return int(value)
 
 
 def _error_category(error_type: str | None, code: int | None) -> AIPerfErrorCategory:
@@ -87,7 +93,7 @@ def _projection(record: MetricRecordInfo, line_index: int) -> AIPerfProjectionRo
     latency_ns = _duration_ns(record.metrics.get("request_latency"))
     ttft_ns = _duration_ns(record.metrics.get("time_to_first_token"))
     tpot_ns = (
-        round((latency_ns - ttft_ns) / (output_tokens - 1))
+        round(Fraction(latency_ns - ttft_ns, output_tokens - 1))
         if latency_ns is not None
         and ttft_ns is not None
         and latency_ns >= ttft_ns

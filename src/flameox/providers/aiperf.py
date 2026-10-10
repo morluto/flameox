@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from flameox.canonical import digest_model
 from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
-from flameox.providers.inference_comparison import assess_comparison
+from flameox.providers.inference_comparison import assess_comparison, mean_ratios
 from flameox.workers.aiperf_contract import (
     AIPERF_WORKER,
     AIPerfProjectionRow,
@@ -160,7 +160,8 @@ class AIPerfProvider:
             raise ProviderFailure(
                 "INVALID_INPUT", f"Every input must contain successful {metric} observations"
             )
-        baseline = statistics.fmean(series[baseline_index])
+        comparisons = mean_ratios(series, baseline_index)
+        baseline = comparisons[baseline_index][0]
         compatibility, identity_differences, identity_unavailable = assess_comparison(
             analyses, arguments
         )
@@ -168,7 +169,7 @@ class AIPerfProvider:
         for index, values in enumerate(series):
             if index == baseline_index:
                 continue
-            candidate = statistics.fmean(values)
+            candidate, ratio = comparisons[index]
             rows.append(
                 {
                     "metric": metric,
@@ -176,7 +177,7 @@ class AIPerfProvider:
                     "candidate_index": index,
                     "baseline_mean": baseline,
                     "candidate_mean": candidate,
-                    "ratio": candidate / baseline if baseline else None,
+                    "ratio": ratio,
                     "baseline_samples": len(series[baseline_index]),
                     "candidate_samples": len(values),
                     "compatibility": compatibility,
@@ -227,5 +228,10 @@ class AIPerfProvider:
                 continue
             value = row.get(metric)
             if isinstance(value, int | float) and not isinstance(value, bool):
-                values.append(float(value))
+                try:
+                    values.append(float(value))
+                except OverflowError as error:
+                    raise ProviderFailure(
+                        "LIMIT_EXCEEDED", "Inference metric exceeds the finite numeric range"
+                    ) from error
         return values
