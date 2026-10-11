@@ -87,6 +87,14 @@ and `inclusive_value` retain V8's allocation estimates, independently of sample 
 SARIF extraction use literal object keys and distinct array locations; dotted keys cannot
 impersonate native nodes, samples, or results. Malformed V8 child containers and duplicate
 object fields fail decoding.
+By default, Node capture uses Node's generated filenames, which include process and thread IDs,
+so forked processes and profiled workers do not overwrite each other's output. Each CPU or heap
+profile is preserved as a separate artifact with its original filename in the capture role.
+Up to 32 profiles of the same V8 format can be ranked together; rows retain their `artifact_id`
+and frame weights are not merged across profiles. Counts sum the admitted profiles, with a
+`profile_count` metric for multiple inputs. This covers only processes and threads that emit
+profiles with inherited flags; arbitrary descendants are not automatically profiled. Termination
+can prevent Node from flushing a profile; completed files remain available from failed captures.
 Native heap samples can reference nodes absent from the exported call tree. Those samples
 remain in the total counts and estimated bytes, with separate `unresolved_sample_count` and
 `unresolved_sampled_bytes` metrics, incomplete coverage, and an explicit attribution limitation.

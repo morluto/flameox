@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,99 @@ from flameox.runtime_contracts import (
     RequestLimits,
     RuntimeFailure,
 )
+from flameox.source_files import NativeSource
+
+
+@pytest.mark.process
+@pytest.mark.golden
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+def test_v8_profiles_rank_globally_without_merging_artifact_weights(
+    tmp_path: Path, profile_kind: str
+) -> None:
+    format_name = "cpuprofile" if profile_kind == "cpu" else "heapprofile"
+    sources = []
+    for index, weight in enumerate([1, 3]):
+        work = {
+            "id": 2,
+            "callFrame": {"functionName": "work", "url": "work.js"},
+            "children": [],
+            "selfSize": weight * 10,
+        }
+        root = {
+            "id": 1,
+            "callFrame": {"functionName": "root"},
+            "children": [2] if profile_kind == "cpu" else [work],
+            "selfSize": 0,
+        }
+        payload = (
+            {"nodes": [root, work], "samples": [2] * weight}
+            if profile_kind == "cpu"
+            else {"head": root, "samples": [{"nodeId": 2, "size": weight * 10}]}
+        )
+        path = tmp_path / f"profile-{index}.{format_name}"
+        data = json.dumps(payload).encode()
+        path.write_bytes(data)
+        sources.append(
+            NativeSource(
+                path, hashlib.sha256(data).hexdigest(), len(data), format_name, None, str(index)
+            )
+        )
+    operation = "rank_cpu_hotspots" if profile_kind == "cpu" else "rank_allocation_hotspots"
+    runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+    try:
+        result = runtime.structured_workers.analyze(
+            operation,
+            sources,
+            {},
+            max_rows=2,
+            timeout_seconds=10,
+            maximum_rss_bytes=512 * 1024**2,
+            maximum_output_bytes=1024**2,
+        )
+        assert result is not None
+        assert result.rows_observed == 4
+        assert result.complete is False
+        metrics = result.blocks[0]["values"]
+        assert metrics == (
+            {"profile_count": 2, "node_count": 4, "sample_count": 4}
+            if profile_kind == "cpu"
+            else {"profile_count": 2, "node_count": 4, "sample_count": 2, "total_sampled_bytes": 40}
+        )
+        rows = result.blocks[1]["rows"]
+        assert [row["self_value"] for row in rows] == (
+            [3, 1] if profile_kind == "cpu" else [30, 10]
+        )
+        assert rows[0]["frame_id"] == rows[1]["frame_id"]
+        assert [row["artifact_id"] for row in rows] == [
+            source.sha256 for source in reversed(sources)
+        ]
+
+        request_sources = [
+            PathSource(path=str(source.path), format=format_name) for source in sources
+        ]
+        with pytest.raises(RuntimeFailure) as too_many:
+            runtime.analyze(operation, request_sources * 17, {})
+        assert too_many.value.code == "INVALID_INPUT"
+        mixed_sources = [
+            request_sources[0],
+            request_sources[1].model_copy(
+                update={"format": "pstats" if profile_kind == "cpu" else "memray"}
+            ),
+        ]
+        with pytest.raises(RuntimeFailure) as mixed:
+            runtime.analyze(operation, mixed_sources, {})
+        assert mixed.value.code == "INVALID_INPUT"
+        first = runtime.analyze(operation, request_sources, {}, limits=RequestLimits(max_rows=1))
+        second = runtime.analyze(
+            operation,
+            request_sources,
+            {},
+            limits=RequestLimits(max_rows=1),
+            continuation=first["continuation"],
+        )
+        assert first["blocks"][1]["rows"] + second["blocks"][1]["rows"] == rows
+    finally:
+        runtime.close()
 
 
 @pytest.mark.process

@@ -133,7 +133,7 @@ def operation_descriptor(spec: Operation) -> dict[str, Any]:
         "minimum_sources": spec.minimum_sources,
         "maximum_sources": spec.maximum_sources,
         "capture_supported": bool(providers),
-        "experiment_supported": bool(providers) and spec.maximum_sources > 1,
+        "experiment_supported": bool(providers) and spec.supports_experiments,
         "capture_providers": [provider.id for provider in providers],
     }
 

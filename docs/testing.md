@@ -54,13 +54,16 @@ The maintained workflows cover these boundaries:
 | --- | --- | --- |
 | CLI and MCP | Schemas, inline results, validation, continuation, preservation, rescue, restart, replay | Does not measure agents' tool-selection quality |
 | Setup and update | Client formats and profile overrides, terminal consent, pinned launchers, environment forwarding, bounded failures, atomic writes | Installer shims do not prove live dependency resolution or native clients loading registrations |
-| Native analysis and capture | Node CPU capture and saved-input replay, Python profiles, inference and benchmark exports, pytest, coverage, streaming traces | Supplied artifacts do not establish every producer release or complete vendor capture lifecycle |
+| Native analysis and capture | Forked Node CPU/heap capture, failed exits and saved-input replay, Python profiles, inference and benchmark exports, pytest, coverage, streaming traces | Supplied artifacts do not establish every producer release or complete vendor capture lifecycle |
 | Processes and storage | Cancellation, descendant cleanup, output and scratch bounds, FIFO substitution, corruption, source-kind changes, immutable publication | Sampled resource observations are not strict OS quotas |
 | Comparisons | Native identities, exclusions, oracle outcomes, incompatible and partial coverage | Profiles alone do not establish causality or improvement |
 | Scale | Publication and paginated queries across 1,000 real manifests after restart | Timings depend on corpus, workload, environment, semantic oracle, and metric |
 
-Node replay uses a workload marker to prove it does not execute the target again. PyTorch trace
-replay needs PyTorch and a local Perfetto reader. Simulated vendor-exporter failures establish
+Node replay uses a workload marker to prove it does not execute the target again. Fork coverage
+checks separate parent/child artifacts and hotspots after successful and nonzero exits, plus
+preservation of a completed child profile when the parent times out. This does not establish
+profile flushing on forced termination or profiling arbitrary descendants. PyTorch trace replay
+needs PyTorch and a local Perfetto reader. Simulated vendor-exporter failures establish
 cleanup and retry behavior, not installed xctrace or Nsight compatibility. Setup/update workflows
 do not establish project or administrator policy precedence, Windows behavior, or private-index
 resolution. Real uvx preparation and native-client loading require separate matching host checks.

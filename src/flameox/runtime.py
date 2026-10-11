@@ -59,6 +59,7 @@ from flameox.providers.capture import (
     CaptureInvocation,
     build_capture_invocation,
     materialize_capture_support,
+    resolve_capture_artifacts,
 )
 from flameox.providers.contracts import (
     ProviderAnalysis,
@@ -477,6 +478,7 @@ class AnalysisRuntime:
                     },
                 )
         resolved = self._resolve_sources(sources, selected_limits)
+        spec.validate_source_count(len(resolved), formats=(item.format for item in resolved))
         text_fragment_chars = (
             validated.text_fragment_chars if isinstance(validated, PreviewArguments) else None
         )
@@ -819,7 +821,11 @@ class AnalysisRuntime:
                     f"the limit is {MAX_INPUTS}."
                 ),
             )
-        spec.validate_source_count(source_count)
+        spec.validate_source_count(source_count, formats=output_formats)
+        if experiment is not None and not spec.supports_experiments:
+            raise RuntimeFailure(
+                "INVALID_INPUT", f"{operation} does not support capture experiments."
+            )
         return ValidatedCaptureRequest(
             spec=spec,
             capture_arguments=capture_arguments,
@@ -1104,13 +1110,15 @@ class AnalysisRuntime:
                 resolved_artifacts: list[NativeSource] = []
                 for path, format_name, role in invocation.artifacts:
                     try:
-                        native = await self.run_in_request(
+                        natives = await self.run_in_request(
                             partial(
-                                self._resolve_capture_artifact,
+                                resolve_capture_artifacts,
                                 path,
                                 format_name=format_name,
                                 role=role,
                                 provider_id=target.provider_id,
+                                max_bytes=MAX_SESSION_SCRATCH_BYTES,
+                                max_files=MAX_SESSION_SCRATCH_FILES,
                             )
                         )
                     except RuntimeFailure as error:
@@ -1140,10 +1148,10 @@ class AnalysisRuntime:
                             }
                         )
                         break
-                    if native is None:
+                    if not natives:
                         missing_artifact_roles.append(role)
                         continue
-                    resolved_artifacts.append(native)
+                    resolved_artifacts.extend(natives)
                 if artifact_rejections:
                     await self.run_in_request(
                         partial(
@@ -1780,29 +1788,6 @@ class AnalysisRuntime:
                 "changing the declared workload environment, then retry."
             ),
         )
-
-    def _resolve_capture_artifact(
-        self,
-        path: Path,
-        *,
-        format_name: str,
-        role: str,
-        provider_id: str,
-    ) -> NativeSource | None:
-        if path.is_symlink():
-            raise RuntimeFailure("INVALID_INPUT", "Capture artifact must not be a symlink")
-        if not path.exists():
-            return None
-        if not path.is_file() and not path.is_dir():
-            raise RuntimeFailure("INVALID_INPUT", "Capture artifact must be a regular file")
-        digest, size, file_count = hash_path(
-            path,
-            max_bytes=MAX_SESSION_SCRATCH_BYTES,
-            max_files=MAX_SESSION_SCRATCH_FILES,
-        )
-        if file_count == 0:
-            return None
-        return NativeSource(path, digest, size, format_name, provider_id, role)
 
     @staticmethod
     def _discard_rejected_capture_directory(directory: Path, request_scratch: Path) -> None:
@@ -2741,18 +2726,14 @@ class AnalysisRuntime:
                 operation, sources, max_rows=max_rows, limits=limits
             ):
                 return platform_trace
-            if len(sources) == 1 and (
-                structured := self.structured_workers.analyze(
-                    operation,
-                    sources[0].path,
-                    sources[0].sha256,
-                    sources[0].format,
-                    dict(arguments),
-                    max_rows=max_rows,
-                    timeout_seconds=limits.timeout_seconds,
-                    maximum_rss_bytes=limits.max_memory_bytes,
-                    maximum_output_bytes=limits.max_output_bytes,
-                )
+            if structured := self.structured_workers.analyze(
+                operation,
+                sources,
+                dict(arguments),
+                max_rows=max_rows,
+                timeout_seconds=limits.timeout_seconds,
+                maximum_rss_bytes=limits.max_memory_bytes,
+                maximum_output_bytes=limits.max_output_bytes,
             ):
                 return structured
             if (

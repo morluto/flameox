@@ -27,6 +27,7 @@ from flameox.runtime_contracts import (
     TorchProfilerCaptureArguments,
     XctraceCaptureArguments,
 )
+from flameox.source_files import NativeSource, directory_files, hash_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,12 +148,11 @@ def _memray(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvoca
 
 def _node_cpu(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
     _arguments(request, EmptyArguments)
-    output = request.directory / "profile.cpuprofile"
+    output = request.directory / "cpu-profiles"
     argv = (
         request.target_argv[0],
         "--cpu-prof",
-        f"--cpu-prof-dir={request.directory}",
-        f"--cpu-prof-name={output.name}",
+        f"--cpu-prof-dir={output}",
         *request.target_argv[1:],
     )
     return CaptureInvocation(
@@ -162,12 +162,11 @@ def _node_cpu(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvo
 
 def _node_heap(request: CaptureBuildRequest, _: ManagedExecutable) -> CaptureInvocation:
     _arguments(request, EmptyArguments)
-    output = request.directory / "profile.heapprofile"
+    output = request.directory / "heap-profiles"
     argv = (
         request.target_argv[0],
         "--heap-prof",
-        f"--heap-prof-dir={request.directory}",
-        f"--heap-prof-name={output.name}",
+        f"--heap-prof-dir={output}",
         *request.target_argv[1:],
     )
     return CaptureInvocation(
@@ -479,6 +478,8 @@ def build_capture_invocation(
 
 def materialize_capture_support(provider_id: str, directory: Path) -> None:
     child_directory = {
+        "node-cpu-profile": "cpu-profiles",
+        "node-heap-profile": "heap-profiles",
         "nvbench": "nvbench",
         "torch-profiler": "torch-profiler",
         "triton": "triton-cache",
@@ -488,3 +489,48 @@ def materialize_capture_support(provider_id: str, directory: Path) -> None:
         (directory / child_directory).mkdir()
     if provider_id == "coverage":
         (directory / "coverage.ini").write_text("[run]\n")
+
+
+def resolve_capture_artifacts(
+    path: Path,
+    *,
+    format_name: str,
+    role: str,
+    provider_id: str,
+    max_bytes: int,
+    max_files: int,
+) -> list[NativeSource]:
+    """Admit native output, retaining Node's distinct process/thread profile filenames."""
+    if path.is_symlink():
+        raise RuntimeFailure("INVALID_INPUT", "Capture artifact must not be a symlink")
+    if not path.exists():
+        return []
+    if not path.is_file() and not path.is_dir():
+        raise RuntimeFailure("INVALID_INPUT", "Capture artifact must be a regular file")
+    profiles = provider_id in {"node-cpu-profile", "node-heap-profile"} and path.is_dir()
+    members = directory_files(path, max_files=max_files) if profiles else [path]
+    sources: list[NativeSource] = []
+    remaining_bytes = max_bytes
+    remaining_files = max_files
+    for member in members:
+        if profiles and (member.parent != path or member.suffix != f".{format_name}"):
+            raise RuntimeFailure(
+                "INVALID_INPUT", "Node capture directory contains unexpected output"
+            )
+        digest, size, file_count = hash_path(
+            member, max_bytes=remaining_bytes, max_files=remaining_files
+        )
+        remaining_bytes -= size
+        remaining_files -= file_count
+        if file_count:
+            sources.append(
+                NativeSource(
+                    member,
+                    digest,
+                    size,
+                    format_name,
+                    provider_id,
+                    f"{role}/{member.name}" if profiles else role,
+                )
+            )
+    return sources

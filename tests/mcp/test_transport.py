@@ -367,10 +367,8 @@ def test_stdio_exposes_direct_tools_and_runs_typed_validation_and_capture(tmp_pa
                 (
                     "rank_cpu_hotspots",
                     {
-                        "sources": [
-                            {"path": str(artifact)},
-                            {"path": str(artifact)},
-                        ]
+                        "sources": [{"path": str(artifact)}]
+                        * (OPERATION_BY_NAME["rank_cpu_hotspots"].maximum_sources + 1)
                     },
                     None,
                 ),

@@ -53,6 +53,52 @@ def test_capture_rejects_declared_provider_capability_mismatch_before_execution(
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(
+    ("provider", "operation"),
+    [
+        ("py-spy", "rank_cpu_hotspots"),
+        ("memray", "rank_allocation_hotspots"),
+        ("node-cpu-profile", "rank_cpu_hotspots"),
+        ("node-heap-profile", "rank_allocation_hotspots"),
+    ],
+)
+def test_profile_capture_still_rejects_experiments_before_execution(
+    tmp_path: Path, provider: str, operation: str
+) -> None:
+    marker = tmp_path / "executed"
+
+    async def exercise() -> None:
+        runtime = AnalysisRuntime(evidence_directory=tmp_path / "store")
+        try:
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.capture_and_analyze(
+                    CaptureTarget(
+                        argv=[sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+                        cwd=str(tmp_path),
+                        provider_id=provider,
+                    ),
+                    operation,
+                    experiment=ExperimentDesign(
+                        cases=[ExperimentCase(name="first"), ExperimentCase(name="second")],
+                        blocks=1,
+                        seed=7,
+                        metric="wall_time_ns",
+                        estimand="median_difference",
+                        practical_threshold=0,
+                    ),
+                )
+            assert failure.value.code == "INVALID_INPUT"
+            if provider.startswith("node-"):
+                assert "does not support capture experiments" in failure.value.message
+            else:
+                assert failure.value.details["maximum_sources"] == 1
+        finally:
+            runtime.close()
+
+    anyio.run(exercise)
+    assert not marker.exists()
+
+
 def test_experiment_environment_limit_applies_after_overrides_are_merged(
     tmp_path: Path,
 ) -> None:

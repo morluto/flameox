@@ -162,7 +162,7 @@ def capture_arguments(spec: Operation) -> type[CaptureArguments]:
     fields: dict[str, Any] = {
         "provider": (providers, Field(discriminator="kind", description="Compatible collector.")),
     }
-    if spec.maximum_sources > 1:
+    if spec.supports_experiments:
         fields["experiment"] = (
             ExperimentDesign | None,
             Field(

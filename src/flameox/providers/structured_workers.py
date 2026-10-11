@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal, cast
 
-from flameox.providers.contracts import ProviderAnalysis
+from flameox.providers.contracts import ProviderAnalysis, ProviderFailure
 from flameox.runtime_contracts import PstatsMetric
+from flameox.source_files import NativeSource
 from flameox.workers.compute_sanitizer_contract import (
     COMPUTE_SANITIZER_WORKER,
     ComputeSanitizerWorkerRequest,
@@ -27,6 +30,88 @@ class StructuredWorkerProviders:
         self.harness = harness
 
     def analyze(
+        self,
+        operation: str,
+        sources: Sequence[NativeSource],
+        arguments: dict[str, object],
+        *,
+        max_rows: int,
+        timeout_seconds: float,
+        maximum_rss_bytes: int,
+        maximum_output_bytes: int,
+    ) -> ProviderAnalysis | None:
+        if len(sources) == 1:
+            source = sources[0]
+            return self._analyze_source(
+                operation,
+                source.path,
+                source.sha256,
+                source.format,
+                arguments,
+                max_rows=max_rows,
+                timeout_seconds=timeout_seconds,
+                maximum_rss_bytes=maximum_rss_bytes,
+                maximum_output_bytes=maximum_output_bytes,
+            )
+        format_name = {
+            "rank_cpu_hotspots": "cpuprofile",
+            "rank_allocation_hotspots": "heapprofile",
+        }.get(operation)
+        if not sources or format_name is None or any(s.format != format_name for s in sources):
+            return None
+        metrics: dict[str, int] = {"profile_count": len(sources)}
+        rows: list[dict[str, Any]] = []
+        limitations: list[str] = []
+        rows_observed = 0
+        complete = True
+        deadline = monotonic() + timeout_seconds
+        for source in sources:
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                raise ProviderFailure("LIMIT_EXCEEDED", "V8 profile analysis exceeded its timeout.")
+            analysis = self._analyze_source(
+                operation,
+                source.path,
+                source.sha256,
+                source.format,
+                arguments,
+                max_rows=max_rows,
+                timeout_seconds=remaining_seconds,
+                maximum_rss_bytes=maximum_rss_bytes,
+                maximum_output_bytes=maximum_output_bytes,
+            )
+            assert analysis is not None
+            for name, value in analysis.blocks[0]["values"].items():
+                metrics[name] = metrics.get(name, 0) + cast(int, value)
+            rows.extend(analysis.blocks[1]["rows"])
+            rows.sort(
+                key=lambda row: (
+                    -cast(int, row["self_value"]),
+                    -cast(int, row["inclusive_value"]),
+                    str(row["artifact_id"]),
+                    str(row["frame_id"]),
+                )
+            )
+            complete = complete and analysis.complete and len(rows) <= max_rows
+            del rows[max_rows:]
+            rows_observed += analysis.rows_observed
+            limitations.extend(analysis.limitations)
+        limitations.append(
+            "Hotspots are ranked across separate V8 profiles without merging frame weights "
+            "between artifacts. Profiles cover only processes and threads that emitted files "
+            "with inherited profiling flags; other descendants are not established."
+        )
+        assert analysis is not None
+        return ProviderAnalysis(
+            provider_id=analysis.provider_id,
+            provider_version=analysis.provider_version,
+            blocks=[{"type": "metrics", "values": metrics}, {"type": "table", "rows": rows}],
+            rows_observed=rows_observed,
+            complete=complete,
+            limitations=list(dict.fromkeys(limitations)),
+        )
+
+    def _analyze_source(
         self,
         operation: str,
         path: Path,

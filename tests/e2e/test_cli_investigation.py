@@ -423,23 +423,45 @@ def test_native_coverage_capture_survives_cli_to_mcp_handoff(tmp_path: Path) -> 
     anyio.run(replay_over_stdio)
 
 
-def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile_kind", ["cpu", "heap"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_node_fork_capture_and_saved_reanalysis_never_rerun_workload(
+    tmp_path: Path, profile_kind: str, exit_code: int
+) -> None:
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node.js is required for native CPU profile capture")
+        pytest.skip("Node.js is required for native profile capture")
     store = tmp_path / "evidence"
     marker = tmp_path / "workload-runs"
     workload = tmp_path / "workload.js"
     workload.write_text(
         "const fs = require('node:fs');\n"
-        f"fs.appendFileSync({json.dumps(str(marker))}, 'run\\n');\n"
-        "function work() {\n"
+        "function childOnlyHotspot() {\n"
         "  const end = Date.now() + 100;\n"
         "  let total = 0;\n"
         "  while (Date.now() < end) total += Math.sqrt(total + 1);\n"
-        "  return total;\n"
-        "}\nconsole.log(work());\n"
+        "  return Array.from({length: 50000}, (_, value) => ({value, total}));\n"
+        "}\n"
+        "function parentOnlyHotspot() {\n"
+        "  const end = Date.now() + 100;\n"
+        "  let total = 0;\n"
+        "  while (Date.now() < end) total += Math.sqrt(total + 1);\n"
+        "  return Array.from({length: 50000}, (_, value) => ({value, total}));\n"
+        "}\n"
+        "if (process.argv[2] === 'child') {\n"
+        "  global.retained = childOnlyHotspot();\n"
+        "} else {\n"
+        f"  fs.appendFileSync({json.dumps(str(marker))}, 'run\\n');\n"
+        "  require('node:child_process').fork(__filename, ['child']).on('exit', code => {\n"
+        "    if (code !== 0) throw new Error('child failed');\n"
+        "    global.retained = parentOnlyHotspot();\n"
+        f"    process.exitCode = {exit_code};\n"
+        "  });\n"
+        "}\n"
     )
+    operation = "rank_cpu_hotspots" if profile_kind == "cpu" else "rank_allocation_hotspots"
+    capture_tool = f"capture_and_{operation}"
+    node_arguments = ["--heap-prof-interval=16384"] if profile_kind == "heap" else []
 
     async def exercise() -> tuple[str, list[dict[str, Any]]]:
         parameters = StdioServerParameters(
@@ -451,27 +473,31 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
         async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
             await session.initialize()
             capture_arguments = {
-                "target": {"argv": [node, str(workload)], "cwd": str(tmp_path)},
-                "provider": {"kind": "node-cpu-profile"},
+                "target": {"argv": [node, *node_arguments, str(workload)], "cwd": str(tmp_path)},
+                "provider": {"kind": f"node-{profile_kind}-profile"},
                 "preserve": True,
             }
-            rejected_capture = await session.call_tool(
-                "capture_and_rank_cpu_hotspots",
-                {**capture_arguments, "metric": "self_time_seconds"},
-            )
-            assert rejected_capture.is_error is True
-            assert rejected_capture.structured_content is not None
-            assert rejected_capture.structured_content["code"] == "INVALID_INPUT"
-            assert not marker.exists()
+            if profile_kind == "cpu":
+                rejected_capture = await session.call_tool(
+                    capture_tool, {**capture_arguments, "metric": "self_time_seconds"}
+                )
+                assert rejected_capture.is_error is True
+                assert rejected_capture.structured_content is not None
+                assert rejected_capture.structured_content["code"] == "INVALID_INPUT"
+                assert not marker.exists()
 
-            captured = await session.call_tool("capture_and_rank_cpu_hotspots", capture_arguments)
-            await session.validate_tool_result("capture_and_rank_cpu_hotspots", captured)
+            captured = await session.call_tool(capture_tool, capture_arguments)
+            await session.validate_tool_result(capture_tool, captured)
             assert captured.is_error is False
             assert captured.structured_content is not None
             payload = captured.structured_content
-            assert payload["provider"]["id"] == "v8-cpu-profile"
+            assert payload["provider"]["id"] == f"v8-{profile_kind}-profile"
             assert payload["blocks"][0]["values"]["sample_count"] > 0
-            assert payload["capture"]["executions"][0]["status"] == "succeeded"
+            execution = payload["capture"]["executions"][0]
+            assert execution["status"] == ("succeeded" if exit_code == 0 else "failed")
+            rows = payload["blocks"][1]["rows"]
+            assert {"parentOnlyHotspot", "childOnlyHotspot"} <= {row["function"] for row in rows}
+            assert len({row["artifact_id"] for row in rows}) == 2
             inline = captured.content[0]
             assert isinstance(inline, TextContent)
             assert json.loads(inline.text) == payload
@@ -480,16 +506,18 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
             inspected = await session.call_tool("inspect_evidence", {"evidence_id": evidence_id})
             assert inspected.structured_content is not None
             sources = inspected.structured_content["analysis_sources"]
-            rejected_analysis = await session.call_tool(
-                "rank_cpu_hotspots", {"sources": sources, "metric": "self_time_seconds"}
-            )
-            assert rejected_analysis.is_error is True
-            assert rejected_analysis.structured_content is not None
-            assert rejected_analysis.structured_content["code"] == "INVALID_INPUT"
-            assert marker.read_text() == "run\n"
+            assert len(sources) == 2
+            if profile_kind == "cpu":
+                rejected_analysis = await session.call_tool(
+                    operation, {"sources": sources, "metric": "self_time_seconds"}
+                )
+                assert rejected_analysis.is_error is True
+                assert rejected_analysis.structured_content is not None
+                assert rejected_analysis.structured_content["code"] == "INVALID_INPUT"
+                assert marker.read_text() == "run\n"
 
-            replayed = await session.call_tool("rank_cpu_hotspots", {"sources": sources})
-            await session.validate_tool_result("rank_cpu_hotspots", replayed)
+            replayed = await session.call_tool(operation, {"sources": sources})
+            await session.validate_tool_result(operation, replayed)
             assert replayed.is_error is False
             assert replayed.structured_content is not None
             assert replayed.structured_content["blocks"] == payload["blocks"]
@@ -497,7 +525,7 @@ def test_node_cpu_capture_and_saved_reanalysis_never_rerun_workload(tmp_path: Pa
             return evidence_id, payload["blocks"]
 
     evidence_id, blocks = anyio.run(exercise)
-    restarted = run_cli(store, "analyze", "rank_cpu_hotspots", "--evidence", evidence_id)
+    restarted = run_cli(store, "analyze", operation, "--evidence", evidence_id)
     assert restarted["blocks"] == blocks
     assert marker.read_text() == "run\n"
 

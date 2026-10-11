@@ -1050,18 +1050,25 @@ class Operation:
     limitation: str = "Observed artifact contents do not by themselves prove causality."
     minimum_sources: int = 1
     maximum_sources: int = 1
+    multiple_source_format: str | None = None
+    supports_experiments: bool = False
 
     @property
     def capture_name(self) -> str:
         return f"capture_and_{self.name}"
 
-    def validate_source_count(self, count: int) -> None:
-        if self.minimum_sources <= count <= self.maximum_sources:
+    def validate_source_count(self, count: int, *, formats: Iterable[str] = ()) -> None:
+        maximum = self.maximum_sources
+        if self.multiple_source_format is not None and any(
+            format_name != self.multiple_source_format for format_name in formats
+        ):
+            maximum = 1
+        if self.minimum_sources <= count <= maximum:
             return
         expected = (
             str(self.minimum_sources)
-            if self.minimum_sources == self.maximum_sources
-            else f"{self.minimum_sources} to {self.maximum_sources}"
+            if self.minimum_sources == maximum
+            else f"{self.minimum_sources} to {maximum}"
         )
         raise RuntimeFailure(
             "INVALID_INPUT",
@@ -1069,7 +1076,7 @@ class Operation:
             details={
                 "operation": self.name,
                 "minimum_sources": self.minimum_sources,
-                "maximum_sources": self.maximum_sources,
+                "maximum_sources": maximum,
                 "actual_sources": count,
             },
         )
@@ -1123,9 +1130,12 @@ OPERATIONS = (
     ),
     Operation(
         "rank_cpu_hotspots",
-        "Rank bounded CPU evidence.",
+        "Rank bounded CPU evidence. Multiple inputs require V8 CPU profiles; "
+        "rows retain separate artifact identities.",
         ("cpuprofile", "pstats", "py-spy", "perf", "perf-data"),
         CpuHotspotArguments,
+        maximum_sources=MAX_INPUTS,
+        multiple_source_format="cpuprofile",
     ),
     Operation(
         "inspect_cpu_callers",
@@ -1136,9 +1146,12 @@ OPERATIONS = (
     ),
     Operation(
         "rank_allocation_hotspots",
-        "Rank bounded allocation hotspots from Memray or V8 sampling heap profiles.",
+        "Rank bounded allocation hotspots from Memray or V8 sampling heap profiles. "
+        "Multiple inputs require V8 heap profiles; rows retain separate artifact identities.",
         ("memray", "heapprofile"),
         EmptyArguments,
+        maximum_sources=MAX_INPUTS,
+        multiple_source_format="heapprofile",
     ),
     Operation(
         "rank_retained_memory",
@@ -1152,6 +1165,7 @@ OPERATIONS = (
         ("pyperf", "samples", "nvbench"),
         EmptyArguments,
         maximum_sources=MAX_INPUTS,
+        supports_experiments=True,
     ),
     Operation(
         "analyze_benchmark_scaling",
@@ -1159,6 +1173,7 @@ OPERATIONS = (
         ("pyperf", "samples", "nvbench"),
         ScalingArguments,
         maximum_sources=MAX_INPUTS,
+        supports_experiments=True,
     ),
     Operation(
         "compare_benchmarks",
@@ -1250,6 +1265,7 @@ OPERATIONS = (
         ("json", "jsonl", "csv", "text", "parquet"),
         PreviewArguments,
         maximum_sources=MAX_INPUTS,
+        supports_experiments=True,
     ),
 )
 OPERATION_BY_NAME = {item.name: item for item in OPERATIONS}
